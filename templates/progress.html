@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Progress - SAP AI Assistant Next</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main class="page">
+      <section class="panel">
+        <h1 id="current-stage">{{ progress.current_stage_title }}</h1>
+        <p id="stage-message">{{ progress.stage_message }}</p>
+        <div class="progress-bar" aria-label="Job progress">
+          <div id="progress-bar-fill" class="progress-bar-fill" style="width: {{ progress.progress_percent }}%"></div>
+        </div>
+        <p id="progress-percent" class="progress-percent">{{ progress.progress_percent }}% complete</p>
+        <p id="elapsed-time" class="elapsed-time">Elapsed time: {{ progress.elapsed_seconds }} seconds</p>
+        <ol id="stage-list" class="stage-list">
+          {% for stage in progress.stages %}
+            <li class="{% if stage.completed %}complete{% elif stage.current or stage.name == progress.current_stage %}current{% endif %}">
+              {{ stage.title }}
+            </li>
+          {% endfor %}
+        </ol>
+        <ol id="activity-list" class="stage-list">
+          {% for message in progress.activity_messages %}
+            <li>{{ message }}</li>
+          {% endfor %}
+        </ol>
+        <p class="job-id">Job ID: {{ job_id }}</p>
+        <div id="result-links" class="{% if progress.status != "Complete" %}hidden{% endif %}">
+          <p><a class="button-link" href="{{ url_for('result', job_id=job_id) }}">View result</a></p>
+          <p><a href="{{ url_for('download', job_id=job_id) }}">Download generated.abap</a></p>
+        </div>
+        <div id="review-links" class="{% if progress.status != "Awaiting Review" %}hidden{% endif %}">
+          <p><a class="button-link" href="{{ url_for('processing_plan_review', job_id=job_id) }}">Review processing plan</a></p>
+        </div>
+      </section>
+    </main>
+    <script>
+      const statusUrl = "{{ url_for('progress_status', job_id=job_id) }}";
+      const currentStage = document.getElementById("current-stage");
+      const stageMessage = document.getElementById("stage-message");
+      const progressBarFill = document.getElementById("progress-bar-fill");
+      const progressPercent = document.getElementById("progress-percent");
+      const elapsedTime = document.getElementById("elapsed-time");
+      const stageList = document.getElementById("stage-list");
+      const activityList = document.getElementById("activity-list");
+      const resultLinks = document.getElementById("result-links");
+      const reviewLinks = document.getElementById("review-links");
+
+      function renderProgress(progress) {
+        currentStage.textContent = progress.current_stage_title || progress.current_stage;
+        stageMessage.textContent = progress.stage_message;
+        progressBarFill.style.width = `${progress.progress_percent}%`;
+        progressPercent.textContent = `${progress.progress_percent}% complete`;
+        elapsedTime.textContent = `Elapsed time: ${progress.elapsed_seconds} seconds`;
+        stageList.replaceChildren(...progress.stages.map((stage) => {
+          const item = document.createElement("li");
+          item.textContent = stage.title || stage.name;
+          if (stage.completed) {
+            item.className = "complete";
+          } else if (stage.current || stage.name === progress.current_stage) {
+            item.className = "current";
+          }
+          return item;
+        }));
+        activityList.replaceChildren(...(progress.activity_messages || []).map((message) => {
+          const item = document.createElement("li");
+          item.textContent = message;
+          return item;
+        }));
+        resultLinks.classList.toggle("hidden", progress.status !== "Complete");
+        reviewLinks.classList.toggle("hidden", progress.status !== "Awaiting Review");
+        return progress.is_active;
+      }
+
+      async function pollProgress() {
+        try {
+          const response = await fetch(statusUrl, { cache: "no-store" });
+          if (!response.ok) {
+            return true;
+          }
+          return renderProgress(await response.json());
+        } catch (error) {
+          return true;
+        }
+      }
+
+      if ({{ "true" if progress.is_active else "false" }}) {
+        const pollAndMaybeStop = async () => {
+          if (!(await pollProgress())) {
+            clearInterval(poller);
+          }
+        };
+        const poller = setInterval(pollAndMaybeStop, 1000);
+        pollAndMaybeStop();
+      }
+    </script>
+  </body>
+</html>

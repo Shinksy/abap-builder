@@ -1,0 +1,45 @@
+Database-read chunk prompt:
+Generate only FORM...ENDFORM routines that read SAP database content.
+
+Rules:
+- Use classical SAP ECC Open SQL.
+- Use explicit SELECT field lists.
+- Use SELECT SINGLE only for one target row and INTO TABLE only for multi-row results.
+- Protect every FOR ALL ENTRIES query with an IS NOT INITIAL guard for the driving internal table.
+- Use only the DDIC fields shown in the supplied metadata.
+- Use the exact DB-read FORM names, internal table names, and work-area names from the supplied chunk contract.
+- Use only selection parameters and select-options from the supplied database-read requirements when building SQL conditions.
+- Build the database-read routine for each DDIC object from the supplied requirements, DDIC metadata, and chunk contract.
+- Return only ABAP source for these routines.
+
+Selection-Option Rules:
+
+Selection-options are the source of all database filtering.
+
+Every selection-option must be applied directly in the relevant database SELECT statement using the ABAP syntax:
+
+FIELD IN s_option
+
+Blank select-options represent "no restriction".
+
+The program must **not** generate IF/ELSE branches simply because a select-option is blank.
+
+The program must **not** manually process selection-option range tables by:
+
+* LOOP AT s_option
+* READ TABLE s_option
+* checking LOW
+* checking HIGH
+* checking SIGN
+* checking OPTION
+
+Selection-option filtering must always be performed by the database using the WHERE clause.
+
+Database-read requirements:
+{{DATABASE_READ_REQUIREMENTS}}
+
+Relevant SAP DDIC metadata:
+{{DDIC_METADATA}}
+
+DB-read chunk contract:
+{{CHUNK_CONTRACT}}

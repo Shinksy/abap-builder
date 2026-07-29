@@ -1,0 +1,503 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dependency_analysis.schema.json",
+  "title": "SAP Dependency Analysis Implementation Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "ddic_objects": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/namedDependency" },
+      "default": []
+    },
+    "callables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/namedDependency" },
+      "default": []
+    },
+    "local_identifiers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/namedDependency" },
+      "default": []
+    },
+    "declarations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/declaration" },
+      "default": []
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/selectOperation" },
+          { "$ref": "#/$defs/readOperation" },
+          { "$ref": "#/$defs/loopOperation" },
+          { "$ref": "#/$defs/moveOperation" },
+          { "$ref": "#/$defs/appendOperation" },
+          { "$ref": "#/$defs/callFunctionOperation" },
+          { "$ref": "#/$defs/alvOperation" },
+          { "$ref": "#/$defs/csvOperation" }
+        ]
+      },
+      "default": []
+    },
+    "form_names": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/namedDependency" },
+      "default": []
+    },
+    "execution_order": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/executionStep" },
+      "default": []
+    },
+    "unresolved": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/unresolvedItem" },
+      "default": []
+    }
+  },
+  "required": [
+    "ddic_objects",
+    "callables",
+    "local_identifiers",
+    "declarations",
+    "operations",
+    "form_names",
+    "execution_order",
+    "unresolved"
+  ],
+  "$defs": {
+    "namedDependency": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "kind": { "type": "string" },
+            "fields": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "default": []
+            },
+            "purpose": { "type": "string" },
+            "source": { "type": "string" }
+          },
+          "required": ["name"]
+        }
+      ]
+    },
+    "declaration": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "kind": {
+              "type": "string",
+          "enum": ["tables_declaration", "structure", "type", "data", "work_area", "internal_table", "output_structure", "field_symbol", "constant", "parameter", "select_option", "other"]
+        },
+        "abap_type": { "type": "string" },
+        "line_type": { "type": "string" },
+        "source_table": { "type": "string" },
+        "table_kind": { "type": "string", "enum": ["STANDARD TABLE", "SORTED TABLE", "HASHED TABLE"] },
+        "components": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/typeComponent" },
+          "default": []
+        },
+        "source": { "type": "string" },
+        "purpose": { "type": "string" },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["name", "kind"]
+    },
+    "typeComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "abap_type": { "type": "string", "minLength": 1 }
+      },
+      "required": ["name", "abap_type"]
+    },
+    "selectOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "const": "select" },
+        "id": { "type": "string", "minLength": 1 },
+        "form_name": { "type": "string", "minLength": 1 },
+        "source_table": { "type": "string", "minLength": 1 },
+        "target_table": { "type": "string", "minLength": 1 },
+        "target_work_area": {
+          "anyOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "cardinality": { "type": "string", "enum": ["SINGLE", "MULTIPLE"] },
+        "access_method": {
+          "type": "string",
+          "enum": ["SELECT_SINGLE", "SELECT", "FOR_ALL_ENTRIES"]
+        },
+        "driving_table": { "type": "string", "minLength": 1 },
+        "conditions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/selectCondition" },
+          "default": []
+        },
+        "initial_table_guard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "table": { "type": "string", "minLength": 1 },
+            "required": { "type": "boolean" }
+          },
+          "required": ["table", "required"]
+        },
+        "order": { "type": "integer", "minimum": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["operation", "id", "form_name", "source_table", "target_table", "fields", "cardinality", "access_method"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "access_method": { "const": "SELECT_SINGLE" } },
+            "required": ["access_method"]
+          },
+          "then": {
+            "properties": { "target_work_area": { "type": "string", "minLength": 1 } },
+            "required": ["target_work_area"]
+          }
+        }
+      ]
+    },
+    "selectCondition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "database_field": { "type": "string", "minLength": 1 },
+            "operator": { "type": "string", "minLength": 1 },
+            "value_type": { "const": "SELECTION_OPTION" },
+            "value": { "type": "string", "minLength": 1 }
+          },
+          "required": ["database_field", "operator", "value_type", "value"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "database_field": { "type": "string", "minLength": 1 },
+            "operator": { "type": "string", "minLength": 1 },
+            "value_type": { "const": "TABLE_FIELD" },
+            "source_table": { "type": "string", "minLength": 1 },
+            "source_field": { "type": "string", "minLength": 1 }
+          },
+          "required": ["database_field", "operator", "value_type", "source_table", "source_field"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "database_field": { "type": "string", "minLength": 1 },
+            "operator": { "type": "string", "minLength": 1 },
+            "value_type": { "const": "IDENTIFIER" },
+            "value": { "type": "string", "minLength": 1 }
+          },
+          "required": ["database_field", "operator", "value_type", "value"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "database_field": { "type": "string", "minLength": 1 },
+            "operator": { "type": "string", "minLength": 1 },
+            "value_type": { "const": "CONSTANT" },
+            "value": { "type": "string", "minLength": 1 }
+          },
+          "required": ["database_field", "operator", "value_type", "value"]
+        }
+      ]
+    },
+    "readOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "const": "read" },
+        "id": { "type": "string", "minLength": 1 },
+        "form_name": { "type": "string", "minLength": 1 },
+        "table": { "type": "string", "minLength": 1 },
+        "target_work_area": { "type": "string", "minLength": 1 },
+        "key_fields": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/readKeyField" },
+          "minItems": 1
+        },
+        "access_method": { "const": "READ" },
+        "cardinality": { "type": "string", "enum": ["SINGLE"] },
+        "order": { "type": "integer", "minimum": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["operation", "id", "form_name", "table", "target_work_area", "key_fields", "access_method", "cardinality"]
+    },
+    "readKeyField": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "table_field": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 }
+      },
+      "required": ["table_field", "value"]
+    },
+    "loopOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "const": "loop" },
+        "id": { "type": "string", "minLength": 1 },
+        "form_name": { "type": "string", "minLength": 1 },
+        "table": { "type": "string", "minLength": 1 },
+        "target_table": { "type": "string" },
+        "target_work_area": { "type": "string", "minLength": 1 },
+        "fields": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        },
+        "access_method": { "const": "LOOP" },
+        "cardinality": { "type": "string", "enum": ["MULTIPLE"] },
+        "body_operation_refs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        },
+        "order": { "type": "integer", "minimum": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["operation", "id", "form_name", "table", "target_work_area", "access_method", "cardinality"]
+    },
+    "moveOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "const": "move" },
+        "id": { "type": "string", "minLength": 1 },
+        "form_name": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "source_table": { "type": "string" },
+        "source_field": { "type": "string" },
+        "target_table": { "type": "string" },
+        "target_work_area": { "type": "string" },
+        "target_field": { "type": "string" },
+        "fields": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        },
+        "access_method": { "const": "MOVE" },
+        "cardinality": { "type": "string", "enum": ["SINGLE", "MULTIPLE"] },
+        "order": { "type": "integer", "minimum": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["operation", "id", "form_name", "source", "target", "access_method", "cardinality"]
+    },
+    "appendOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "const": "append" },
+        "id": { "type": "string", "minLength": 1 },
+        "form_name": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "target_table": { "type": "string", "minLength": 1 },
+        "target_work_area": { "type": "string" },
+        "fields": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        },
+        "access_method": { "const": "APPEND" },
+        "cardinality": { "type": "string", "enum": ["SINGLE"] },
+        "order": { "type": "integer", "minimum": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["operation", "id", "form_name", "source", "target_table", "access_method", "cardinality"]
+    },
+    "executionStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "order": { "type": "integer", "minimum": 1 },
+        "operation_ref": { "type": "string", "minLength": 1 },
+        "form_name": { "type": "string", "minLength": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["order", "operation_ref", "form_name"]
+    },
+    "callFunctionOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "const": "call_function" },
+        "id": { "type": "string", "minLength": 1 },
+        "form_name": { "type": "string", "minLength": 1 },
+        "callable": { "type": "string", "minLength": 1 },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "exporting": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/callFunctionParameter" },
+              "default": []
+            },
+            "importing": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/callFunctionParameter" },
+              "default": []
+            },
+            "changing": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/callFunctionParameter" },
+              "default": []
+            },
+            "tables": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/callFunctionParameter" },
+              "default": []
+            }
+          },
+          "required": ["exporting", "importing", "changing", "tables"]
+        },
+        "access_method": { "const": "CALL_FUNCTION" },
+        "cardinality": { "type": "string", "enum": ["SINGLE", "MULTIPLE"] },
+        "order": { "type": "integer", "minimum": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["operation", "id", "form_name", "callable", "parameters", "access_method", "cardinality"]
+    },
+    "callFunctionParameter": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "source_table": { "type": "string" },
+              "source_field": { "type": "string" },
+              "target_table": { "type": "string" },
+              "target_work_area": { "type": "string" },
+              "target_field": { "type": "string" },
+              "value": { "type": "string" }
+            },
+            "required": ["name"]
+    },
+    "alvOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "const": "alv" },
+        "id": { "type": "string", "minLength": 1 },
+        "form_name": { "type": "string", "minLength": 1 },
+        "source_table": { "type": "string", "minLength": 1 },
+        "target_table": { "type": "string", "minLength": 1 },
+        "fields": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "access_method": { "const": "ALV" },
+        "cardinality": { "type": "string", "enum": ["MULTIPLE"] },
+        "order": { "type": "integer", "minimum": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["operation", "id", "form_name", "source_table", "target_table", "fields", "access_method", "cardinality"]
+    },
+    "csvOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "const": "csv" },
+        "id": { "type": "string", "minLength": 1 },
+        "form_name": { "type": "string", "minLength": 1 },
+        "source_table": { "type": "string", "minLength": 1 },
+        "target_table": { "type": "string", "minLength": 1 },
+        "fields": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "access_method": { "const": "CSV" },
+        "cardinality": { "type": "string", "enum": ["MULTIPLE"] },
+        "file_name": { "type": "string" },
+        "order": { "type": "integer", "minimum": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        }
+      },
+      "required": ["operation", "id", "form_name", "source_table", "target_table", "fields", "access_method", "cardinality"]
+    },
+    "unresolvedItem": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "kind": { "type": "string" },
+            "reason": { "type": "string" },
+            "needed_for": { "type": "string" }
+          },
+          "required": ["name", "reason"]
+        }
+      ]
+    }
+  }
+}

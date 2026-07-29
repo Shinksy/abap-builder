@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Processing Plan Review - SAP AI Assistant Next</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main class="page">
+      <section class="panel wide">
+        <div class="result-header">
+          <h1>Processing Plan Review</h1>
+          <div class="button-row">
+            <a class="button-link" href="{{ url_for('home') }}">New</a>
+            <a class="button-link" href="{{ url_for('progress', job_id=job_id) }}">Progress</a>
+          </div>
+        </div>
+
+        {% if proposal.review_action_message %}
+          <div class="status-callout error-callout" role="alert">
+            {{ proposal.review_action_message }}
+          </div>
+        {% elif proposal.validation_errors %}
+          <div class="status-callout warning-callout" role="status">
+            The proposed processing plan has validation errors. You can still approve the saved proposal, or edit the JSON and use Approve edited JSON after correcting the errors.
+          </div>
+        {% endif %}
+
+        <details class="validation-panel"{% if proposal.review_action_failed and proposal.validation_errors %} open{% endif %}>
+          <summary>Validation Errors</summary>
+          {% if proposal.validation_errors %}
+            <ul class="validation-list">
+              {% for error in proposal.validation_errors %}
+                <li class="validation-issue">{{ error }}</li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p>None</p>
+          {% endif %}
+        </details>
+
+        <details class="validation-panel">
+          <summary>Validation Warnings</summary>
+          {% if proposal.validation_warnings %}
+            <ul class="validation-list">
+              {% for warning in proposal.validation_warnings %}
+                <li>{{ warning }}</li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p>None</p>
+          {% endif %}
+        </details>
+
+        <details class="code-panel">
+          <summary>LLM Prompt</summary>
+          <pre><code>{{ proposal.llm_request if proposal.llm_request else "Unavailable" }}</code></pre>
+        </details>
+
+        <details class="code-panel">
+          <summary>Readable Summary</summary>
+          <pre><code>{{ proposal.summary }}</code></pre>
+        </details>
+
+        <form method="post">
+          <label for="structured_json">Structured JSON</label>
+          <textarea id="structured_json" name="structured_json" rows="22">{{ proposal.structured_json }}</textarea>
+          <div class="button-row">
+            <button type="submit" name="action" value="approve">Approve</button>
+            <button type="submit" name="action" value="approve_edit">Approve edited JSON</button>
+            <button type="submit" name="action" value="reextract">Re-extract</button>
+            <button type="submit" name="action" value="reject" class="secondary-button">Reject</button>
+          </div>
+        </form>
+
+        <p class="job-id">Job ID: {{ job_id }}</p>
+      </section>
+    </main>
+  </body>
+</html>

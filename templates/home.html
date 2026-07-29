@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SAP AI ABAP Generator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main class="page">
+      <section class="panel">
+        <h1>SAP AI ABAP Generator</h1>
+
+        {% if error %}
+          <p class="error">{{ error }}</p>
+        {% endif %}
+
+        <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+          <label for="abap_file">Upload Specification</label>
+          <input id="abap_file" name="abap_file" type="file" accept=".abap,.txt" required>
+          <label>
+            <input name="run_sap_syntax_check" type="checkbox" value="1">
+            Run SAP syntax check
+          </label>
+          <label for="sap_syntax_check_attempts">SAP syntax API calls</label>
+          <input id="sap_syntax_check_attempts" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2">
+          <button type="submit">Upload</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,29 @@
+Processing chunk prompt:
+Generate only FORM...ENDFORM routines that perform business processing.
+
+Rules:
+- Use the structured processing plan as the authoritative source of processing logic.
+- Use only the exact processing FORM names, internal table names, work-area names, output objects, and callable identities supplied below.
+- Read from already populated internal tables and work areas.
+- Use callable signatures and parameters only when they are supplied in the filtered callable metadata.
+- Do not invent callable parameters.
+- Generate CALL FUNCTION for CALL_FUNCTION steps.
+- Generate CALL METHOD <class>=><method> for CALL_STATIC_METHOD steps.
+- Generate CALL METHOD <object>-><method> for CALL_METHOD steps.
+- Include IMPORTING, EXPORTING, CHANGING, TABLES, and RECEIVING clauses only when the structured step supplies the corresponding mappings.
+- Treat receiving_parameter and returning_parameter as returned-value targets for method calls.
+- Do not generate SAP database reads.
+- Do not generate presentation, file, event-block, or declaration logic.
+- Return only ABAP source for these routines.
+
+Structured processing plan:
+{{PROCESSING_REQUIREMENTS}}
+
+Filtered SAP callable metadata required by the plan:
+{{CALLABLE_METADATA}}
+
+Filtered SAP DDIC metadata required by the plan:
+{{DDIC_METADATA}}
+
+Filtered processing chunk contract:
+{{CHUNK_CONTRACT}}

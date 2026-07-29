@@ -1,0 +1,24 @@
+Declarations-specific prompt:
+Generate only classical SAP ECC ABAP declarations needed by this report.
+
+Allowed output statements:
+- REPORT
+- TABLES
+- TYPES
+- DATA
+- CONSTANTS
+- PARAMETERS
+- SELECT-OPTIONS
+
+Return only those declaration statements.
+
+Declaration requirements:
+{{DECLARATION_REQUIREMENTS}}
+
+For every entry in tables_declarations, generate one TABLES declaration for that DDIC table.
+
+Relevant SAP DDIC metadata:
+{{DDIC_METADATA}}
+
+Declaration chunk contract:
+{{CHUNK_CONTRACT}}

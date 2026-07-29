@@ -1,0 +1,43 @@
+Output chunk prompt:
+Generate only FORM...ENDFORM routines that prepare and present generated results.
+
+Rules:
+- Use the exact output FORM names and output fields from the supplied chunk contract.
+- Generate ALV logic only when an ALV FORM name is present in the chunk contract.
+- Generate CSV logic only when a CSV FORM name is present in the chunk contract.
+- Use classical SAP ECC-compatible statements.
+- Do not add USING, CHANGING or TABLES parameters.
+- Do not generate SAP database reads.
+- Do not generate business-processing, event-block, or declaration logic.
+- Return only ABAP source for these routines.
+
+When ALV output is required:
+
+- Use classical SAP ECC ALV.
+- Use REUSE_ALV_GRID_DISPLAY.
+- Use the existing global field-catalogue internal table and work area from the naming contract.
+- Populate:
+  - FIELDNAME
+  - SELTEXT_L
+  - SELTEXT_M
+  - SELTEXT_S
+- Do not use SCRTEXT_L, SCRTEXT_M or SCRTEXT_S.
+- Generate and populate a field catalogue for every output field.
+- Use the exact global field-catalogue names from the naming contract.
+- Set FIELDNAME to the output structure component name.
+- Set appropriate column headings.
+- Pass the field catalogue using IT_FIELDCAT.
+- Do not call REUSE_ALV_GRID_DISPLAY without a populated field catalogue.
+
+When file output is required:
+- Use the existing global filename variable from the supplied chunk contract.
+- Do not create local or undeclared filename variables.
+
+Output requirements:
+{{OUTPUT_REQUIREMENTS}}
+
+Relevant SAP DDIC metadata:
+{{DDIC_METADATA}}
+
+Output chunk contract:
+{{CHUNK_CONTRACT}}

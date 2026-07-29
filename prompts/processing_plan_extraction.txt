@@ -1,0 +1,68 @@
+Extract the business-processing logic from the functional specification.
+Extract business-processing logic.
+
+Return one valid JSON object containing a processing_steps array.
+Do not generate ABAP.
+
+The processing contract defines the only valid internal tables, work areas, fields, callables, output fields, and selection parameters. Use only names from that contract.
+
+Represent the business logic using these operations:
+
+- LOOP
+- READ
+- IF
+- MOVE
+- CLEAR
+- APPEND
+- CALL_FUNCTION
+- CALL_STATIC_METHOD
+- CALL_METHOD
+- CONCATENATE
+- SORT
+- DELETE
+
+Operation schema:
+
+- LOOP: source, into, steps
+- READ: source, into, conditions
+- IF: conditions, then, else
+- MOVE: source, target
+- CLEAR: target
+- APPEND: source, target
+- CALL_FUNCTION: name, input_parameters, output_parameters
+- CALL_STATIC_METHOD: class, method, input_parameters, output_parameters, receiving_parameter or returning_parameter
+- CALL_METHOD: object, method, input_parameters, output_parameters, receiving_parameter or returning_parameter
+- CONCATENATE, SORT, DELETE: include only required fields
+
+Rules
+
+- Preserve the order of the functional specification.
+- Extract only business logic explicitly described.
+- Translate business actions into the corresponding processing operations:
+  - "Process each record" → LOOP
+  - "Search", "Find", "Lookup" → READ
+  - "Populate", "Assign", "Use" → MOVE
+  - "Call function/module" → CALL_FUNCTION
+  - "Call static method", "class method", "=>" -> CALL_STATIC_METHOD
+  - "Call instance method", "object method", "->" -> CALL_METHOD
+  - "Add output record" → APPEND
+- Do not invent business logic that is not implied by the specification.
+- Nest all steps that occur within a LOOP inside its steps array.
+- READ conditions must be structured lookup-key objects with left, operator and right.
+- For READ operations, include only fields required to locate a row in the already-populated internal table.
+- Do not put SQL WHERE filters, selection parameters, select-options, constants, or predicates already applied during SELECT into READ conditions.
+- The processing generator may assume internal tables already contain only rows that passed database extraction filters.
+- IF branches must contain then and else arrays. Use empty arrays when a branch has no explicit steps.
+- Output fields must be referenced as w_output-<field>.
+- When an output record is created:
+  - CLEAR w_output before populating it.
+  - APPEND w_output TO t_output after it is populated.
+- CALL_FUNCTION must contain separate input_parameters and output_parameters objects.
+- CALL_STATIC_METHOD and CALL_METHOD must contain separate input_parameters and output_parameters objects.
+- For CALL_STATIC_METHOD, split the provider-compatible CLASS=>METHOD identity into class and method.
+- For CALL_METHOD, use the instance object name and method name from the specification.
+- Use receiving_parameter when a method returns a value via ABAP RECEIVING.
+- Use returning_parameter when the specification describes a returned value without naming ABAP RECEIVING syntax.
+- receiving_parameter and returning_parameter are target variables or fields that receive the returned value; do not put them inside input_parameters or output_parameters.
+- Do not use placeholder conditions.
+- Return an empty processing_steps array only if the specification contains no business-processing logic.

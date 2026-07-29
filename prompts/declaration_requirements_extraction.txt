@@ -1,0 +1,86 @@
+Extract declaration requirements from the functional specification.
+
+Return structured JSON only.
+Do not generate ABAP.
+Do not include implementation logic for database reads, processing, output routines, FORM routines, or event blocks.
+
+Return exactly this JSON shape:
+{
+  "report_name": "",
+  "parameters": [
+    {
+      "name": "",
+      "type_or_like": "",
+      "as_checkbox": false,
+      "radiobutton_group": "",
+      "default": ""
+    }
+  ],
+  "select_options": [
+    {
+      "name": "",
+      "for_field": "",
+      "type_or_like": "",
+      "default": ""
+    }
+  ],
+  "tables_declarations": [],  
+  "global_variables": [
+    {
+      "name": "",
+      "declaration": ""
+    }
+  ],
+  "constants": [],  
+  "output_structure_fields": [
+    {
+      "name": "",
+      "type_or_like": ""
+    }
+  ]
+}
+
+Rules:
+- Include only declaration requirements explicitly stated in the functional specification.
+- Include global_variables for every global DATA object that generated FORM routines must reference.
+- Each global_variables entry must include the exact variable name and the complete ABAP DATA declaration when the type is known.
+- Do not invent global_variables that are not required by the functional specification or supplied generation contract.
+- Preserve SAP names exactly as written.
+- Do not infer fields by expanding DDIC objects.
+- Do not combine all fields from dependent tables into output_structure_fields.
+- Build output_structure_fields only from fields explicitly specified as output fields in the functional specification.
+- For every output_structure_fields entry, return an object with name and type_or_like.
+- Add "include_when" only when the functional specification makes the output field conditional.
+- Determine output_structure_fields.type_or_like generically from the functional specification and available SAP DDIC metadata.
+- When an output field maps to an SAP table or structure field present in the SAP DDIC metadata, use TYPE <DDIC_OBJECT>-<FIELD>.
+- When an output field is populated from a function module or method parameter, find that exact callable parameter in the SAP callable metadata and use its verified DDIC or ABAP type.
+- When the functional specification gives an explicit ABAP type, use that exact type.
+- Do not invent a DDIC object, DDIC field, data element, or ABAP type.
+- Do not hard-code report-specific fields, callable names, parameter names, or types.
+- If a reliable output field type cannot be determined, leave type_or_like empty.
+- For every PARAMETERS entry, return the complete ABAP declaration attributes needed to generate the declaration: name, TYPE or LIKE when applicable, AS CHECKBOX when applicable, RADIOBUTTON GROUP when applicable, and DEFAULT value when applicable.
+- When a parameter is a checkbox, set as_checkbox to true. Otherwise set as_checkbox to false.
+- When a parameter is a radio button, determine the mutually exclusive choice group from the functional specification and set radiobutton_group to the exact group identifier that should be used in ABAP.
+- ABAP RADIOBUTTON GROUP identifiers must be 4 characters or fewer.
+- If the functional specification names a longer radio-button group, shorten it to a stable ABAP-ready group identifier of 4 characters or fewer while preserving which parameters belong together.
+- If multiple radio buttons belong to the same mutually exclusive choice, assign them to the same radiobutton_group.
+- Do not leave radiobutton_group blank for any radio button parameter. Use an empty string only for parameters that are not radio buttons.
+- Preserve DEFAULT values exactly as ABAP-ready literals or values, for example "X" when a radio button or checkbox is selected by default.
+- For SELECT-OPTIONS, preserve the exact referenced FOR field or explicit TYPE or LIKE and any DEFAULT value.
+- Leave an array empty when the functional specification does not explicitly require that category.
+
+Example radio button PARAMETERS entries:
+{
+  "name": "p_alv",
+  "type_or_like": "",
+  "as_checkbox": false,
+  "radiobutton_group": "rad1",
+  "default": "X"
+}
+{
+  "name": "p_file",
+  "type_or_like": "",
+  "as_checkbox": false,
+  "radiobutton_group": "rad1",
+  "default": ""
+}

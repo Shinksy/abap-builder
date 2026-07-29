@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Generated ABAP - SAP AI Assistant Next</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    {% macro processing_time(value) -%}
+      {% if value is number %}{{ "%.2f"|format(value) }}s{% else %}Unavailable{% endif %}
+    {%- endmacro %}
+    {% set section_durations = metrics.get("section_durations", {}) %}
+    <main class="page">
+      <section class="panel wide">
+        <div class="result-header">
+          <h1>Generated ABAP</h1>
+          <a class="button-link" href="{{ url_for('home') }}">New</a>
+        </div>
+        <p class="job-id">Job ID: {{ job_id }}</p>
+        <div class="metrics-grid">
+          <details class="metric-card">
+            <summary>Generation</summary>
+            <dl>
+              <dt>Model</dt>
+              <dd>{{ metrics.model or "Unavailable" }}</dd>
+              <dt>Duration</dt>
+              <dd>{% if metrics.duration_seconds is number %}{{ "%.2f"|format(metrics.duration_seconds) }}s{% else %}Unavailable{% endif %}</dd>
+            </dl>
+          </details>
+          <details class="metric-card">
+            <summary>Token Usage</summary>
+            <dl>
+              <dt>Input tokens</dt>
+              <dd>{% if metrics.input_tokens is number %}{{ "{:,}".format(metrics.input_tokens) }}{% else %}Unavailable{% endif %}</dd>
+              <dt>Output tokens</dt>
+              <dd>{% if metrics.output_tokens is number %}{{ "{:,}".format(metrics.output_tokens) }}{% else %}Unavailable{% endif %}</dd>
+              <dt>Total tokens</dt>
+              <dd>{% if metrics.total_tokens is number %}{{ "{:,}".format(metrics.total_tokens) }}{% else %}Unavailable{% endif %}</dd>
+            </dl>
+          </details>
+          <details class="metric-card">
+            <summary>Estimated Cost</summary>
+            <dl>
+              <dt>Input cost</dt>
+              <dd>{% if metrics.estimated_input_cost is number %}${{ "%.6f"|format(metrics.estimated_input_cost) }}{% else %}Unavailable{% endif %}</dd>
+              <dt>Output cost</dt>
+              <dd>{% if metrics.estimated_output_cost is number %}${{ "%.6f"|format(metrics.estimated_output_cost) }}{% else %}Unavailable{% endif %}</dd>
+              <dt>Total cost</dt>
+              <dd>{% if metrics.estimated_total_cost is number %}${{ "%.6f"|format(metrics.estimated_total_cost) }}{% else %}Unavailable{% endif %}</dd>
+            </dl>
+          </details>
+          <details class="metric-card">
+            <summary>Output Size</summary>
+            <dl>
+              <dt>Prompt characters</dt>
+              <dd>{% if metrics.prompt_characters is number %}{{ "{:,}".format(metrics.prompt_characters) }}{% else %}Unavailable{% endif %}</dd>
+              <dt>Specification characters</dt>
+              <dd>{% if metrics.specification_characters is number %}{{ "{:,}".format(metrics.specification_characters) }}{% else %}Unavailable{% endif %}</dd>
+              <dt>ABAP characters</dt>
+              <dd>{% if metrics.generated_abap_characters is number %}{{ "{:,}".format(metrics.generated_abap_characters) }}{% else %}Unavailable{% endif %}</dd>
+              <dt>ABAP lines</dt>
+              <dd>{% if metrics.generated_abap_lines is number %}{{ "{:,}".format(metrics.generated_abap_lines) }}{% else %}Unavailable{% endif %}</dd>
+            </dl>
+          </details>
+        </div>
+        <details class="validation-panel">
+          <summary>Validation</summary>
+          <p>Processing time: {{ processing_time(section_durations.get("validation")) }}</p>
+          {% if validation_issues %}
+            <p>{{ validation_issues|length }} deterministic issue{% if validation_issues|length != 1 %}s{% endif %} found.</p>
+            <div class="validation-list">
+              {% for issue in validation_issues %}
+                <article class="validation-issue">
+                  <div class="issue-meta">
+                    <span>{{ issue.severity }}</span>
+                    <span>Line {{ issue.line_number }}</span>
+                    <span>{{ issue.rule_id }}</span>
+                  </div>
+                  <p>{{ issue.message }}</p>
+                  <pre class="source-line"><code>{{ issue.source_line }}</code></pre>
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p>No deterministic issues found.</p>
+          {% endif %}
+        </details>
+        <details class="validation-panel">
+          <summary>Auto Fix</summary>
+          <p>Processing time: {{ processing_time(section_durations.get("auto_fix")) }}</p>
+          <p>Issue count before: {{ fix_summary.original_issue_count }}</p>
+          <p>Issue count after: {{ fix_summary.final_issue_count }}</p>
+          {% if fix_summary.fixes %}
+            <ul class="fix-list">
+              {% for fix in fix_summary.fixes %}
+                <li>{{ fix.description }}</li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p>No fixes applied.</p>
+          {% endif %}
+        </details>
+        <details class="validation-panel">
+          <summary>SAP Syntax Check</summary>
+          {% set syntax = sap_syntax_check or {} %}
+          {% set sap_syntax_duration = section_durations.get("sap_syntax_check") %}
+          {% if sap_syntax_duration is not number %}
+            {% set sap_syntax_duration = syntax.get("duration_seconds") %}
+          {% endif %}
+          <p>Processing time: {{ processing_time(sap_syntax_duration) }}</p>
+          {% if syntax.get("requested") %}
+            <p>Status: {{ syntax.get("status", "unknown")|replace("_", " ") }}</p>
+            {% if syntax.get("technical_message") %}
+              <p>{{ syntax.get("technical_message") }}</p>
+            {% endif %}
+            {% if syntax.get("errors") %}
+              <div class="validation-list">
+                {% for issue in syntax.get("errors", []) %}
+                  <article class="validation-issue">
+                    <div class="issue-meta">
+                      <span>{{ issue.get("severity", "E") }}</span>
+                      <span>Line {{ issue.get("line") or "Unknown" }}</span>
+                      {% if issue.get("word") %}<span>{{ issue.get("word") }}</span>{% endif %}
+                    </div>
+                    <p>{{ issue.get("message") }}</p>
+                    {% if issue.get("source_line") %}
+                      <pre class="source-line"><code>{{ issue.get("source_line") }}</code></pre>
+                    {% endif %}
+                  </article>
+                {% endfor %}
+              </div>
+            {% elif syntax.get("status") == "passed" %}
+              <p>No SAP syntax errors found.</p>
+            {% endif %}
+          {% else %}
+            <p>Not requested.</p>
+          {% endif %}
+        </details>
+        <details class="validation-panel">
+          <summary>SAP Metadata Requests</summary>
+          {% set requests = sap_metadata_requests or {} %}
+          <p>Processing time: {{ processing_time(section_durations.get("sap_metadata_requests")) }}</p>
+          {% if requests.get("ddic") or requests.get("functions") or requests.get("methods") %}
+            <dl>
+              {% if requests.get("ddic") %}
+                <dt>DDIC tables and structures</dt>
+                <dd>{{ requests.get("ddic")|join(", ") }}</dd>
+              {% endif %}
+              {% if requests.get("functions") %}
+                <dt>Function modules</dt>
+                <dd>{{ requests.get("functions")|join(", ") }}</dd>
+              {% endif %}
+              {% if requests.get("methods") %}
+                <dt>Class/interface methods</dt>
+                <dd>{{ requests.get("methods")|join(", ") }}</dd>
+              {% endif %}
+            </dl>
+          {% else %}
+            <p>None</p>
+          {% endif %}
+        </details>
+        <details class="validation-panel">
+          <summary>Dependency Analysis Diagnostics</summary>
+          {% if dependency_analysis %}
+            {% set diagnostics = dependency_analysis.get("_diagnostics", {}) %}
+            {% set dependency_duration = section_durations.get("dependency_analysis") %}
+            {% if dependency_duration is not number %}
+              {% set dependency_duration = diagnostics.get("duration_seconds") %}
+            {% endif %}
+            <p>Processing time: {{ processing_time(dependency_duration) }}</p>
+            <dl>
+              <dt>Dependency Analysis Prompt</dt>
+              <dd><pre><code>{{ diagnostics.get("prompt") or "None" }}</code></pre></dd>
+              <dt>Raw LLM response</dt>
+              <dd><pre><code>{{ diagnostics.get("raw_response") or "None" }}</code></pre></dd>
+              <dt>Normalized dependency analysis</dt>
+              <dd>
+                <dl>
+                  <dt>DDIC objects</dt>
+                  <dd>{{ dependency_analysis.get("ddic_objects", [])|map(attribute="name")|join(", ") if dependency_analysis.get("ddic_objects") else "None" }}</dd>
+                  <dt>Callable identities</dt>
+                  <dd>{{ dependency_analysis.get("callables", [])|join(", ") if dependency_analysis.get("callables") else "None" }}</dd>
+                  <dt>Local identifiers</dt>
+                  <dd>{{ dependency_analysis.get("local_identifiers", [])|join(", ") if dependency_analysis.get("local_identifiers") else "None" }}</dd>
+                  <dt>Unresolved items</dt>
+                  <dd>{{ dependency_analysis.get("unresolved", [])|join(", ") if dependency_analysis.get("unresolved") else "None" }}</dd>
+                </dl>
+              </dd>
+              <dt>Rejected analysis entries with reasons</dt>
+              <dd>
+                {% if dependency_analysis.get("rejected_analysis_entries") %}
+                  <ul>
+                    {% for item in dependency_analysis.get("rejected_analysis_entries", []) %}
+                      <li>{{ item.get("name") }}{% if item.get("category") %} [{{ item.get("category") }}]{% endif %}{% if item.get("reason") %} ({{ item.get("reason") }}){% endif %}</li>
+                    {% endfor %}
+                  </ul>
+                {% else %}
+                  None
+                {% endif %}
+              </dd>
+              <dt>Final DDIC objects passed to SAP</dt>
+              <dd>{{ ddic_metadata.get("tables", {}).keys()|list|sort|join(", ") if ddic_metadata.get("tables") else "None" }}</dd>
+              <dt>Final callable identities passed to SAP</dt>
+              <dd>{{ dependency_analysis.get("final_callable_identities", dependency_analysis.get("callables", []))|join(", ") if dependency_analysis.get("final_callable_identities", dependency_analysis.get("callables")) else "None" }}</dd>
+              <dt>Callable signatures included in generation prompt</dt>
+              <dd>{{ dependency_analysis.get("callable_signatures_included_in_prompt", [])|join(", ") if dependency_analysis.get("callable_signatures_included_in_prompt") else "None" }}</dd>
+              <dt>Unresolved callable signatures</dt>
+              <dd>
+                {% if dependency_analysis.get("unresolved_callable_signatures") %}
+                  <ul>
+                    {% for item in dependency_analysis.get("unresolved_callable_signatures", []) %}
+                      <li>{{ item.get("identity") }}{% if item.get("reason") %} ({{ item.get("reason") }}){% endif %}</li>
+                    {% endfor %}
+                  </ul>
+                {% else %}
+                  None
+                {% endif %}
+              </dd>
+            </dl>
+          {% else %}
+            <p>Processing time: {{ processing_time(section_durations.get("dependency_analysis")) }}</p>
+            <p>No dependency analysis recorded.</p>
+          {% endif %}
+        </details>
+        <details class="validation-panel">
+          <summary>Developer Diagnostics</summary>
+          {% if abap_generation_diagnostics and abap_generation_diagnostics.get("used_fallback") %}
+            <p>Chunked ABAP generation fell back to full-program generation.</p>
+            <dl>
+              <dt>Fallback reason</dt>
+              <dd><pre><code>{{ abap_generation_diagnostics.get("fallback_reason") or "No fallback reason recorded." }}</code></pre></dd>
+            </dl>
+          {% endif %}
+          {% if abap_generation_chunks %}
+            {% set declaration_requirements_diagnostic = (abap_generation_diagnostics.get("declaration_requirements") if abap_generation_diagnostics else {}) or {} %}
+            {% set processing_plan_diagnostic = (abap_generation_diagnostics.get("processing_plan") if abap_generation_diagnostics else {}) or {} %}
+            <div class="chunk-diagnostics">
+              <details class="chunk-panel">
+                <summary class="chunk-summary">
+                  <span>declaration_requirements</span>
+                  <span class="chunk-duration">
+                    {% if declaration_requirements_diagnostic.get("duration_seconds") is number %}
+                      {{ "%.2f"|format(declaration_requirements_diagnostic.get("duration_seconds")) }}s
+                    {% else %}
+                      Time unavailable
+                    {% endif %}
+                  </span>
+                </summary>
+                <dl>
+                  <dt>Exact prompt sent to the LLM</dt>
+                  <dd><pre><code>{{ declaration_requirements_diagnostic.get("prompt") or "None" }}</code></pre></dd>
+                  <dt>Raw LLM response</dt>
+                  <dd><pre><code>{{ declaration_requirements_diagnostic.get("raw_response") or "None" }}</code></pre></dd>
+                  <dt>Final DECLARATION_REQUIREMENTS</dt>
+                  <dd><pre><code>{{ declaration_requirements_diagnostic.get("requirements") or "None" }}</code></pre></dd>
+                </dl>
+              </details>
+              <details class="chunk-panel">
+                <summary class="chunk-summary">
+                  <span>processing_plan</span>
+                  <span class="chunk-duration">
+                    {% if processing_plan_diagnostic.get("duration_seconds") is number %}
+                      {{ "%.2f"|format(processing_plan_diagnostic.get("duration_seconds")) }}s
+                    {% else %}
+                      Time unavailable
+                    {% endif %}
+                  </span>
+                </summary>
+                <dl>
+                  <dt>Exact prompt sent to the LLM</dt>
+                  <dd><pre><code>{{ processing_plan_diagnostic.get("prompt") or "None" }}</code></pre></dd>
+                  <dt>Raw LLM response</dt>
+                  <dd><pre><code>{{ processing_plan_diagnostic.get("raw_response") or "None" }}</code></pre></dd>
+                  <dt>Structured processing plan</dt>
+                  <dd><pre><code>{{ processing_plan_diagnostic.get("plan") or "None" }}</code></pre></dd>
+                </dl>
+              </details>
+              {% for chunk in abap_generation_chunks %}
+                <details class="chunk-panel">
+                  <summary class="chunk-summary">
+                    <span class="chunk-title-stack">
+                      <span>{{ chunk.get("name") or "Unnamed chunk" }}</span>
+                      {% if chunk.get("subtitle") %}
+                        <span class="chunk-subtitle">{{ chunk.get("subtitle") }}</span>
+                      {% endif %}
+                    </span>
+                    <span class="chunk-duration">
+                      {% if chunk.get("duration_seconds") is number %}
+                        {{ "%.2f"|format(chunk.get("duration_seconds")) }}s
+                      {% else %}
+                        Time unavailable
+                      {% endif %}
+                    </span>
+                  </summary>
+                  <dl>
+                    <dt>Chunk name</dt>
+                    <dd>{{ chunk.get("name") or "Unnamed chunk" }}</dd>
+                    {% if chunk.get("subtitle") %}
+                      <dt>Chunk subtitle</dt>
+                      <dd>{{ chunk.get("subtitle") }}</dd>
+                    {% endif %}
+                    {% if chunk.get("error") %}
+                      <dt>Chunk error</dt>
+                      <dd><pre><code>{{ chunk.get("error") }}</code></pre></dd>
+                    {% endif %}
+                    <dt>Exact prompt sent to the LLM</dt>
+                    <dd><pre><code>{{ chunk.get("prompt") or "None" }}</code></pre></dd>
+                    {% if chunk.get("declaration_requirements") %}
+                      {% set declaration_requirements = chunk.get("declaration_requirements", {}) %}
+                      <dt>Final DECLARATION_REQUIREMENTS</dt>
+                      <dd><pre><code>{{ declaration_requirements.get("requirements") or declaration_requirements.get("raw_response") or "None" }}</code></pre></dd>
+                    {% endif %}
+                    {% if chunk.get("declaration_naming_contract") %}
+                      <dt>Final declaration naming contract</dt>
+                      <dd><pre><code>{{ chunk.get("declaration_naming_contract") }}</code></pre></dd>
+                    {% endif %}
+                    {% if chunk.get("processing_plan") %}
+                      {% set processing_plan = chunk.get("processing_plan", {}) %}
+                      <dt>Structured processing plan</dt>
+                      <dd><pre><code>{{ processing_plan.get("plan") or processing_plan.get("raw_response") or "None" }}</code></pre></dd>
+                    {% endif %}
+                    {% set ddic_filter = chunk.get("ddic_metadata_filter", {}) %}
+                    <dt>Fields extracted from the functional specification</dt>
+                    <dd>{{ ddic_filter.get("fields_extracted_from_specification", [])|join(", ") if ddic_filter.get("fields_extracted_from_specification") else "None" }}</dd>
+                    <dt>Matched SAP metadata fields</dt>
+                    <dd>{{ ddic_filter.get("matched_sap_metadata_fields", [])|join(", ") if ddic_filter.get("matched_sap_metadata_fields") else "None" }}</dd>
+                    <dt>Complete row-type objects required</dt>
+                    <dd>{{ ddic_filter.get("complete_row_type_objects", [])|join(", ") if ddic_filter.get("complete_row_type_objects") else "None" }}</dd>
+                    <dt>Filtered DDIC metadata sent to this chunk</dt>
+                    <dd><pre><code>{{ chunk.get("filtered_ddic_metadata") or "None" }}</code></pre></dd>
+                    <dt>Raw LLM response</dt>
+                    <dd><pre><code>{{ chunk.get("text") or "None" }}</code></pre></dd>
+                  </dl>
+                </details>
+              {% endfor %}
+            </div>
+          {% elif not (abap_generation_diagnostics and abap_generation_diagnostics.get("used_fallback")) %}
+            <p>No ABAP generation chunk diagnostics recorded.</p>
+          {% endif %}
+        </details>
+        <details class="code-panel">
+          <summary>Generated ABAP</summary>
+          {% set generated_abap_duration = section_durations.get("generated_abap") %}
+          {% if generated_abap_duration is not number %}
+            {% set generated_abap_duration = metrics.duration_seconds %}
+          {% endif %}
+          <p>Processing time: {{ processing_time(generated_abap_duration) }}</p>
+          <div class="code-toolbar">
+            <button id="copy-abap" type="button">Copy</button>
+            <span id="copy-message" class="copy-message" aria-live="polite"></span>
+          </div>
+          <pre class="generated-abap-block"><code id="generated-abap">{{ generated_abap }}</code></pre>
+          <p><a href="{{ url_for('download', job_id=job_id) }}">Download generated.abap</a></p>
+        </details>
+      </section>
+    </main>
+    <script>
+      const copyButton = document.getElementById("copy-abap");
+      const copyMessage = document.getElementById("copy-message");
+      const generatedAbap = document.getElementById("generated-abap");
+
+      async function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return;
+        }
+
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.setAttribute("readonly", "");
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textArea);
+      }
+
+      if (copyButton && copyMessage && generatedAbap) {
+        copyButton.addEventListener("click", async () => {
+          try {
+            await copyText(generatedAbap.innerText);
+            copyMessage.textContent = "Copied to clipboard.";
+            setTimeout(() => {
+              copyMessage.textContent = "";
+            }, 2500);
+          } catch (error) {
+            copyMessage.textContent = "Copy failed.";
+          }
+        });
+      }
+    </script>
+  </body>
+</html>
