@@ -18,6 +18,7 @@ from services.create_abap import (
     PROCESSING_PLAN_LLM_SOURCE_ARTIFACT,
     PROCESSING_PLAN_PROPOSAL_ARTIFACT,
     REPORT_SKELETON_PATH,
+    active_processing_duration,
     approve_processing_plan_for_job,
     append_generation_contract,
     build_generation_contract,
@@ -29,9 +30,11 @@ from services.create_abap import (
     load_report_skeleton,
     merge_processing_rule_ddic_dependencies,
     merge_specification_callable_dependencies,
+    normalize_metrics_for_display,
     processing_plan_review_payload,
     render_create_prompt,
     run_create_abap,
+    usage_for_final_metrics,
 )
 from services.callable_signature_provider import (
     NoOpCallableSignatureProvider,
@@ -3584,6 +3587,64 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
+    def test_active_processing_duration_sums_section_work(self):
+        self.assertEqual(
+            active_processing_duration(
+                {
+                    "dependency_analysis": 2.0,
+                    "sap_metadata_requests": 0.5,
+                    "declaration_requirements": 3.0,
+                    "processing_plan_extraction": 4.0,
+                    "generated_abap": 5.0,
+                    "validation": None,
+                },
+                fallback=99.0,
+            ),
+            14.5,
+        )
+        self.assertEqual(active_processing_duration({}, fallback=99.0), 99.0)
+
+    def test_existing_metrics_display_uses_active_section_duration(self):
+        metrics = normalize_metrics_for_display(
+            {
+                "duration_seconds": 240.0,
+                "section_durations": {
+                    "dependency_analysis": 2.0,
+                    "sap_metadata_requests": 0.5,
+                    "generated_abap": 5.0,
+                },
+            }
+        )
+
+        self.assertEqual(metrics["duration_seconds"], 7.5)
+
+    def test_approval_resume_usage_uses_prior_usage_and_chunk_usage_once(self):
+        usage = usage_for_final_metrics(
+            {
+                "usage": {"input_tokens": 999, "output_tokens": 999, "total_tokens": 1998},
+                "chunks": [
+                    {"usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}},
+                    {"usage": {"input_tokens": 200, "output_tokens": 75, "total_tokens": 275}},
+                ],
+            },
+            {"input_tokens": 999, "output_tokens": 999, "total_tokens": 1998},
+            prior_usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+
+        self.assertEqual(usage, {"input_tokens": 310, "output_tokens": 130, "total_tokens": 440})
+        fallback_usage = usage_for_final_metrics(
+            {
+                "used_fallback": True,
+                "usage": {"input_tokens": 300, "output_tokens": 100, "total_tokens": 400},
+                "chunks": [
+                    {"usage": {"input_tokens": 25, "output_tokens": 10, "total_tokens": 35}},
+                ],
+            },
+            {"input_tokens": 300, "output_tokens": 100, "total_tokens": 400},
+            prior_usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+        self.assertEqual(fallback_usage, {"input_tokens": 335, "output_tokens": 115, "total_tokens": 450})
+
     def _run_flow(self, tmp_path):
         uploads_folder = tmp_path / "uploads"
         jobs_folder = tmp_path / "jobs"
@@ -3680,7 +3741,11 @@ class CreateAbapFlowTest(unittest.TestCase):
 
                 metrics = json.loads((jobs_folder / job_id / "metrics.json").read_text(encoding="utf-8"))
                 self.assertEqual(metrics["model"], "test-model")
-                self.assertEqual(metrics["duration_seconds"], 0.25)
+                self.assertAlmostEqual(
+                    metrics["duration_seconds"],
+                    sum(metrics["section_durations"].values()),
+                )
+                self.assertGreaterEqual(metrics["duration_seconds"], 0.25)
                 self.assertEqual(metrics["input_tokens"], 7000)
                 self.assertEqual(metrics["output_tokens"], 3500)
                 self.assertEqual(metrics["total_tokens"], 10500)

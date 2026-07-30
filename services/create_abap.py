@@ -34,6 +34,7 @@ from services.orchestrator import (
     ChunkedGenerationError,
     ProcessingContractValidationError,
     ProcessingPlanValidationError,
+    aggregate_usage,
     declaration_requirements_with_processing_plan_variables,
     declaration_requirements_for_prompt,
     ensure_standard_report_header,
@@ -87,6 +88,8 @@ def start_create_abap_job(
     processing_plan_review_required=True,
     approved_processing_plan=None,
     prepared_declaration_requirements=None,
+    prior_section_durations=None,
+    prior_usage=None,
 ):
     thread = Thread(
         target=run_create_abap,
@@ -104,6 +107,8 @@ def start_create_abap_job(
             "processing_plan_review_required": processing_plan_review_required,
             "approved_processing_plan": approved_processing_plan,
             "prepared_declaration_requirements": prepared_declaration_requirements,
+            "prior_section_durations": prior_section_durations,
+            "prior_usage": prior_usage,
         },
         daemon=True,
     )
@@ -125,11 +130,13 @@ def run_create_abap(
     processing_plan_review_required=False,
     approved_processing_plan=None,
     prepared_declaration_requirements=None,
+    prior_section_durations=None,
+    prior_usage=None,
 ):
     job_folder = Path(jobs_folder) / job_id
     job_folder.mkdir(parents=True, exist_ok=True)
     post_generation_diagnostics = {"stages": []}
-    section_durations = {}
+    section_durations = dict(prior_section_durations or {})
 
     try:
         update_progress(
@@ -165,7 +172,9 @@ def run_create_abap(
         )
         merge_processing_rule_ddic_dependencies(dependency_analysis, source_text)
         merge_specification_callable_dependencies(dependency_analysis, source_text)
-        section_durations["dependency_analysis"] = (
+        add_section_duration(
+            section_durations,
+            "dependency_analysis",
             (dependency_analysis.get("_diagnostics") or {}).get("duration_seconds")
             if isinstance(dependency_analysis, dict)
             else None
@@ -197,9 +206,7 @@ def run_create_abap(
             signature_provider,
             progress_callback=ddic_progress_callback,
         )
-        section_durations["sap_metadata_requests"] = section_durations.get("sap_metadata_requests", 0.0) + (
-            time.monotonic() - metadata_started_at
-        )
+        add_section_duration(section_durations, "sap_metadata_requests", time.monotonic() - metadata_started_at)
         prompt_text = append_ddic_catalogue(prompt_text, ddic_metadata)
         prompt_text = append_callable_catalogue(prompt_text, callable_metadata)
         generation_contract = build_generation_contract(source_text, dependency_analysis, ddic_metadata, callable_metadata)
@@ -214,6 +221,16 @@ def run_create_abap(
                 callable_metadata=callable_metadata,
                 ddic_metadata=ddic_metadata,
             )
+            add_section_duration(
+                section_durations,
+                "declaration_requirements",
+                declaration_requirements.get("duration_seconds") if isinstance(declaration_requirements, dict) else None,
+            )
+            add_section_duration(
+                section_durations,
+                "processing_plan_extraction",
+                processing_plan.get("duration_seconds") if isinstance(processing_plan, dict) else None,
+            )
             save_processing_plan_context(
                 job_folder,
                 {
@@ -222,6 +239,13 @@ def run_create_abap(
                     "prompt_text": prompt_text,
                     "declaration_requirements": declaration_requirements,
                     "callable_metadata": callable_metadata,
+                    "section_durations": section_durations,
+                    "usage": aggregate_usage(
+                        [
+                            declaration_requirements.get("usage") if isinstance(declaration_requirements, dict) else None,
+                            processing_plan.get("usage") if isinstance(processing_plan, dict) else None,
+                        ]
+                    ),
                 },
             )
             save_dependency_analysis(job_folder, dependency_analysis)
@@ -266,6 +290,7 @@ def run_create_abap(
             approved_processing_plan=approved_processing_plan,
         )
         duration_seconds = time.perf_counter() - started_at
+        add_section_duration(section_durations, "generated_abap", duration_seconds)
         record_orchestrator_source_stages(post_generation_diagnostics, llm_result)
         update_progress(
             jobs_folder,
@@ -275,6 +300,7 @@ def run_create_abap(
             stage="Cleaning generated ABAP",
         )
         response_text, model_name, usage = normalize_llm_result(llm_result)
+        usage = usage_for_final_metrics(llm_result, usage, prior_usage=prior_usage)
         generated_abap = clean_response(response_text)
         generated_ddic = classify_post_generation_ddic_candidates(generated_abap)
         record_post_generation_ddic_diagnostics(dependency_analysis, generated_ddic)
@@ -290,9 +316,7 @@ def run_create_abap(
             None,
             progress_callback=ddic_progress_callback,
         )
-        section_durations["sap_metadata_requests"] = section_durations.get("sap_metadata_requests", 0.0) + (
-            time.monotonic() - metadata_started_at
-        )
+        add_section_duration(section_durations, "sap_metadata_requests", time.monotonic() - metadata_started_at)
 
         def update_fix_progress(stage, message):
             update_progress(jobs_folder, job_id, "Running", message, stage=stage)
@@ -304,7 +328,7 @@ def run_create_abap(
             callable_mappings=callable_metadata,
             progress_callback=update_fix_progress,
         )
-        section_durations["auto_fix"] = time.monotonic() - auto_fix_started_at
+        add_section_duration(section_durations, "auto_fix", time.monotonic() - auto_fix_started_at)
         final_abap = fix_result["fixed_source"]
         final_abap = ensure_required_tables_declarations(
             final_abap,
@@ -333,9 +357,7 @@ def run_create_abap(
             None,
             progress_callback=ddic_progress_callback,
         )
-        section_durations["sap_metadata_requests"] = section_durations.get("sap_metadata_requests", 0.0) + (
-            time.monotonic() - metadata_started_at
-        )
+        add_section_duration(section_durations, "sap_metadata_requests", time.monotonic() - metadata_started_at)
         validation_started_at = time.monotonic()
         validation_issues = fix_result["final_issues"]
         if specification_requests_alv(source_text):
@@ -349,7 +371,7 @@ def run_create_abap(
                 identifier_provenance=ddic_identifier_provenance(ddic_metadata),
             )
             validation_issues = merge_validation_issues(validation_issues, ddic_issues)
-        section_durations["validation"] = time.monotonic() - validation_started_at
+        add_section_duration(section_durations, "validation", time.monotonic() - validation_started_at)
         update_progress(
             jobs_folder,
             job_id,
@@ -379,18 +401,18 @@ def run_create_abap(
         )
         final_abap = group_declaration_statements_by_prefix(final_abap)
         final_abap = ensure_standard_report_header(final_abap)
-        section_durations["sap_syntax_check"] = time.monotonic() - sap_syntax_started_at
+        add_section_duration(section_durations, "sap_syntax_check", time.monotonic() - sap_syntax_started_at)
         record_post_generation_stage(post_generation_diagnostics, "complete_source_immediately_before_final_save", final_abap)
         (job_folder / "generated.abap").write_text(final_abap, encoding="utf-8")
         save_post_generation_diagnostics(job_folder, post_generation_diagnostics)
         metrics = build_metrics(
             model_name=model_name,
-            duration_seconds=duration_seconds,
+            duration_seconds=active_processing_duration(section_durations, fallback=duration_seconds),
             usage=usage,
             prompt_text=prompt_text,
             source_text=source_text,
             generated_abap=final_abap,
-            section_durations={**section_durations, "generated_abap": duration_seconds},
+            section_durations=section_durations,
         )
         save_metrics(job_folder, metrics)
         update_progress(jobs_folder, job_id, "Complete", "ABAP generation complete.", stage="Complete")
@@ -1442,6 +1464,41 @@ def build_metrics(model_name, duration_seconds, usage, prompt_text, source_text,
     }
 
 
+def add_section_duration(section_durations, section_name, duration_seconds):
+    if not isinstance(section_durations, dict):
+        return
+    if not isinstance(duration_seconds, (int, float)):
+        section_durations.setdefault(section_name, duration_seconds)
+        return
+    section_durations[section_name] = section_durations.get(section_name, 0.0) + float(duration_seconds)
+
+
+def active_processing_duration(section_durations, fallback=None):
+    total = 0.0
+    found = False
+    for duration_seconds in (section_durations or {}).values():
+        if isinstance(duration_seconds, (int, float)):
+            total += float(duration_seconds)
+            found = True
+    if found:
+        return total
+    return fallback
+
+
+def usage_for_final_metrics(llm_result, usage, prior_usage=None):
+    if not prior_usage:
+        return usage
+    chunk_usage = [
+        chunk.get("usage")
+        for chunk in (llm_result or {}).get("chunks", [])
+        if isinstance(chunk, dict)
+    ]
+    current_usage = chunk_usage
+    if (llm_result or {}).get("used_fallback"):
+        current_usage = current_usage + [usage]
+    return aggregate_usage([prior_usage] + current_usage) or usage
+
+
 def calculate_cost(model_name, input_tokens, output_tokens):
     pricing = Config.MODEL_PRICING.get(model_name, {})
     input_rate = pricing.get("input_per_1m_tokens")
@@ -1469,7 +1526,18 @@ def load_metrics(jobs_folder, job_id):
     metrics_path = Path(jobs_folder) / job_id / "metrics.json"
     if not metrics_path.exists():
         return {}
-    return json.loads(metrics_path.read_text(encoding="utf-8"))
+    return normalize_metrics_for_display(json.loads(metrics_path.read_text(encoding="utf-8")))
+
+
+def normalize_metrics_for_display(metrics):
+    if not isinstance(metrics, dict):
+        return metrics
+    duration_seconds = active_processing_duration(metrics.get("section_durations"))
+    if duration_seconds is None:
+        return metrics
+    updated = dict(metrics)
+    updated["duration_seconds"] = duration_seconds
+    return updated
 
 
 def save_validation_issues(job_folder, issues):

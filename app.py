@@ -195,6 +195,8 @@ def create_app(config_overrides=None):
                 processing_plan_review_required=False,
                 approved_processing_plan={"plan": approved_plan.get("plan")},
                 prepared_declaration_requirements=context.get("declaration_requirements"),
+                prior_section_durations=context.get("section_durations"),
+                prior_usage=context.get("usage"),
             )
             return redirect(url_for("progress", job_id=job_id))
         abort(400)
