@@ -9,6 +9,13 @@ from services.callable_signature_provider import get_configured_callable_signatu
 from services.ddic_metadata_provider import get_configured_ddic_metadata_provider
 from services.job_options import load_job_options, save_job_options
 from services.llm import generate_code_review_repair
+from services.metadata_cache_upload import (
+    MetadataCacheUploadError,
+    METADATA_TYPE_LABELS,
+    parse_metadata_upload_json,
+    prepare_metadata_cache_upload,
+    save_metadata_cache_upload,
+)
 from services.progress import create_job, get_progress, update_progress
 from services.sap_syntax_check import get_configured_sap_syntax_checker
 from services.create_abap import (
@@ -57,13 +64,47 @@ def create_app(config_overrides=None):
 
     @app.get("/")
     def home():
-        return render_template("home.html")
+        return render_template("home.html", metadata_type_labels=METADATA_TYPE_LABELS)
+
+    @app.post("/metadata-cache/upload")
+    def upload_metadata_cache_file():
+        metadata_type = request.form.get("metadata_type")
+        try:
+            metadata = parse_metadata_upload_json(
+                uploaded_file=request.files.get("metadata_file"),
+                payload_text=request.form.get("metadata_payload"),
+            )
+            prepared_upload = prepare_metadata_cache_upload(metadata_type, metadata, app.config)
+        except MetadataCacheUploadError as exc:
+            return render_template(
+                "home.html",
+                metadata_type_labels=METADATA_TYPE_LABELS,
+                metadata_error=str(exc),
+            ), 400
+        destination_path = Path(prepared_upload["destination_path"])
+        prepared_upload["destination_display_path"] = display_path(destination_path)
+        if destination_path.exists() and request.form.get("confirm_overwrite") != "1":
+            return render_template(
+                "home.html",
+                metadata_type_labels=METADATA_TYPE_LABELS,
+                metadata_upload_confirm=prepared_upload,
+                metadata_payload=json.dumps(prepared_upload["metadata"]),
+            ), 409
+        save_metadata_cache_upload(prepared_upload)
+        return render_template(
+            "home.html",
+            metadata_type_labels=METADATA_TYPE_LABELS,
+            metadata_success=(
+                f"Uploaded {prepared_upload['metadata_type_label']} metadata for "
+                f"{prepared_upload['object_name']} to {prepared_upload['destination_display_path']}."
+            ),
+        )
 
     @app.post("/upload")
     def upload_file():
         uploaded_file = request.files.get("abap_file")
         if not uploaded_file or not uploaded_file.filename:
-            return render_template("home.html", error="Select an ABAP file to upload."), 400
+            return render_template("home.html", error="Select an ABAP file to upload.", metadata_type_labels=METADATA_TYPE_LABELS), 400
 
         job_id = create_job(jobs_folder)
         run_sap_syntax_check = request.form.get("run_sap_syntax_check") == "1"
@@ -255,6 +296,13 @@ def record_result_page_source(job_folder, generated_abap):
         generated_abap,
     )
     save_post_generation_diagnostics(job_folder, diagnostics)
+
+
+def display_path(path):
+    try:
+        return str(Path(path).resolve(strict=False).relative_to(Config.BASE_DIR))
+    except ValueError:
+        return str(path)
 
 
 def log_ddic_metadata_startup(app):

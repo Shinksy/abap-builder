@@ -15,6 +15,14 @@
           <p class="error">{{ error }}</p>
         {% endif %}
 
+        {% if metadata_error %}
+          <p class="error">{{ metadata_error }}</p>
+        {% endif %}
+
+        {% if metadata_success %}
+          <p class="success">{{ metadata_success }}</p>
+        {% endif %}
+
         <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
           <label for="abap_file">Upload Specification</label>
           <input id="abap_file" name="abap_file" type="file" accept=".abap,.txt" required>
@@ -26,6 +34,39 @@
           <input id="sap_syntax_check_attempts" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2">
           <button type="submit">Upload</button>
         </form>
+
+        <section class="metadata-upload">
+          <h2>Upload Metadata Cache</h2>
+          {% if metadata_upload_confirm %}
+            <div class="status-callout warning-callout" role="alert">
+              {{ metadata_upload_confirm.destination_display_path }} already exists for {{ metadata_upload_confirm.object_name }}.
+            </div>
+            <form action="{{ url_for('upload_metadata_cache_file') }}" method="post">
+              <input type="hidden" name="metadata_type" value="{{ metadata_upload_confirm.metadata_type }}">
+              <input type="hidden" name="metadata_payload" value="{{ metadata_payload }}">
+              <input type="hidden" name="confirm_overwrite" value="1">
+              <div class="button-row">
+                <button type="submit">Overwrite</button>
+                <a class="button-link secondary-link" href="{{ url_for('home') }}">Cancel</a>
+              </div>
+            </form>
+          {% else %}
+            <form action="{{ url_for('upload_metadata_cache_file') }}" method="post" enctype="multipart/form-data">
+              <fieldset>
+                <legend>Metadata Type</legend>
+                {% for value, label in metadata_type_labels.items() %}
+                  <label class="radio-option">
+                    <input name="metadata_type" type="radio" value="{{ value }}" required>
+                    {{ label }}
+                  </label>
+                {% endfor %}
+              </fieldset>
+              <label for="metadata_file">Metadata JSON</label>
+              <input id="metadata_file" name="metadata_file" type="file" accept=".json,application/json" required>
+              <button type="submit">Upload Metadata</button>
+            </form>
+          {% endif %}
+        </section>
       </section>
     </main>
   </body>

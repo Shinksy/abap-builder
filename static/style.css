@@ -33,6 +33,11 @@ h1 {
   font-size: 28px;
 }
 
+h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
 .result-header {
   display: flex;
   align-items: center;
@@ -71,6 +76,35 @@ textarea {
 textarea {
   width: 100%;
   resize: vertical;
+}
+
+fieldset {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #bcccdc;
+  border-radius: 6px;
+}
+
+legend {
+  padding: 0 4px;
+  font-weight: 700;
+}
+
+.radio-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+}
+
+.metadata-upload {
+  display: grid;
+  gap: 14px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #d9e2ec;
 }
 
 button {
@@ -306,6 +340,14 @@ code {
   color: #8a1f11;
   background: #fff0ed;
   border: 1px solid #ffb4a6;
+  border-radius: 6px;
+}
+
+.success {
+  padding: 10px 12px;
+  color: #0b7285;
+  background: #e6fffa;
+  border: 1px solid #5fe3d0;
   border-radius: 6px;
 }
 
