@@ -99,6 +99,24 @@ legend {
   font-weight: 400;
 }
 
+.checkbox-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.syntax-check-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.syntax-attempts-input {
+  width: 64px;
+  padding: 6px 8px;
+}
+
 .metadata-upload {
   display: grid;
   gap: 14px;
@@ -401,4 +419,11 @@ code {
 
 .hidden {
   display: none;
+}
+
+@media (max-width: 420px) {
+  .syntax-check-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }

@@ -26,12 +26,13 @@
         <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
           <label for="abap_file">Upload Specification</label>
           <input id="abap_file" name="abap_file" type="file" accept=".abap,.txt" required>
-          <label>
-            <input name="run_sap_syntax_check" type="checkbox" value="1">
-            Run SAP syntax check
-          </label>
-          <label for="sap_syntax_check_attempts">SAP syntax API calls</label>
-          <input id="sap_syntax_check_attempts" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2">
+          <div class="syntax-check-row">
+            <label class="checkbox-option">
+              <input name="run_sap_syntax_check" type="checkbox" value="1">
+              Run SAP Syntax
+            </label>
+            <input id="sap_syntax_check_attempts" class="syntax-attempts-input" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2" aria-label="SAP syntax API calls">
+          </div>
           <button type="submit">Upload</button>
         </form>
 
