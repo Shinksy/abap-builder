@@ -1,4 +1,5 @@
 {
+  "name": "HR_INFOTYPE_OPERATION",
   "parameters": {
     "KEY": {
       "direction": "EXPORTING",

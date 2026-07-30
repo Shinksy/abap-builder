@@ -1,4 +1,5 @@
 {
+  "name": "BAPI_TRANSACTION_COMMIT",
   "parameters": {
     "RETURN": {
       "direction": "EXPORTING",

@@ -15,6 +15,7 @@ from services.callable_signature_provider import (
     get_configured_callable_signature_provider,
     map_method_direction,
 )
+from services.ddic_metadata_provider import LocalDdicMetadataCache
 
 
 class CallableSignatureProviderTest(unittest.TestCase):
@@ -45,6 +46,7 @@ class CallableSignatureProviderTest(unittest.TestCase):
             metadata["callable_signatures"]["Z_TEST_FUNCTION"]["parameters"]["IV_INPUT"]["direction"],
             "IMPORTING",
         )
+        self.assertEqual(metadata["callable_signatures"]["Z_TEST_FUNCTION"]["name"], "Z_TEST_FUNCTION")
         self.assertEqual(
             metadata["callable_signatures"]["ZCL_TEST=>EXECUTE"]["returning"]["direction"],
             "RETURNING",
@@ -169,6 +171,7 @@ class CallableSignatureProviderTest(unittest.TestCase):
             self.assertEqual([call["url"] for call in session.calls], ["https://sap.example.test/function"])
             self.assertIn("IV_INPUT", metadata["callable_signatures"]["Z_TEST_FUNCTION"]["parameters"])
             saved = json.loads((temp_path / "callables" / "functions" / "Z_TEST_FUNCTION.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["name"], "Z_TEST_FUNCTION")
             self.assertIn("IV_INPUT", saved["parameters"])
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
@@ -223,6 +226,87 @@ class CallableSignatureProviderTest(unittest.TestCase):
             self.assertNotIn("RESULT", signature["parameters"])
             self.assertEqual(signature["returning"]["name"], "RESULT")
             self.assertEqual(signature["returning"]["direction"], "RETURNING")
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_legacy_cached_function_without_name_loads_with_filename_name(self):
+        temp_path = test_temp_path()
+        try:
+            cache = LocalCallableSignatureCache(temp_path / "callables")
+            path = temp_path / "callables" / "functions" / "Z_LEGACY_FUNCTION.json"
+            path.parent.mkdir(parents=True)
+            legacy = legacy_cached_signature()
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+
+            signature = cache.load_signature("Z_LEGACY_FUNCTION")
+
+            self.assertEqual(signature["name"], "Z_LEGACY_FUNCTION")
+            self.assertEqual(signature["parameters"], legacy["parameters"])
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_function_cache_save_uses_json_name_for_canonical_filename(self):
+        temp_path = test_temp_path()
+        try:
+            cache = LocalCallableSignatureCache(temp_path / "callables")
+
+            cache.save_signature("z_placeholder", {"name": "z_uploaded_function", "parameters": {}})
+
+            self.assertTrue((temp_path / "callables" / "functions" / "Z_UPLOADED_FUNCTION.json").exists())
+            self.assertFalse((temp_path / "callables" / "functions" / "Z_PLACEHOLDER.json").exists())
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_function_metadata_upload_rejects_name_filename_mismatch(self):
+        temp_path = test_temp_path()
+        try:
+            temp_path.mkdir(parents=True)
+            cache = LocalCallableSignatureCache(temp_path / "callables")
+            upload = temp_path / "Z_FILE_NAME.json"
+            upload.write_text(
+                json.dumps({"name": "Z_JSON_NAME", "parameters": {}}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Z_JSON_NAME.*Z_FILE_NAME.json"):
+                cache.import_function_signature_file(upload)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_function_metadata_upload_accepts_matching_name_and_normalizes_uppercase(self):
+        temp_path = test_temp_path()
+        try:
+            temp_path.mkdir(parents=True)
+            cache = LocalCallableSignatureCache(temp_path / "callables")
+            upload = temp_path / "z_uploaded_function.json"
+            upload.write_text(
+                json.dumps({"name": "z_uploaded_function", "parameters": {"IV_INPUT": {"direction": "IMPORTING"}}}),
+                encoding="utf-8",
+            )
+
+            signature = cache.import_function_signature_file(upload)
+
+            self.assertEqual(signature["name"], "Z_UPLOADED_FUNCTION")
+            saved = json.loads((temp_path / "callables" / "functions" / "Z_UPLOADED_FUNCTION.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["parameters"], {"IV_INPUT": {"direction": "IMPORTING"}})
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_method_and_table_metadata_schemas_are_unchanged(self):
+        temp_path = test_temp_path()
+        try:
+            method_cache = LocalCallableSignatureCache(temp_path / "callables")
+            method_cache.save_signature("ZCL_TEST=>EXECUTE", method_signature())
+            saved_method = json.loads((temp_path / "callables" / "methods" / "ZCL_TEST%3D%3EEXECUTE.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved_method["class"], "ZCL_TEST")
+            self.assertEqual(saved_method["method"], "EXECUTE")
+            self.assertNotIn("name", saved_method)
+
+            table_cache = LocalDdicMetadataCache(temp_path / "ddic")
+            table_metadata = {"name": "ZTABLE", "fields": [{"name": "FIELD1"}]}
+            table_cache.save_table("ZTABLE", table_metadata)
+            saved_table = json.loads((temp_path / "ddic" / "ZTABLE.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved_table, table_metadata)
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -313,6 +397,7 @@ def method_response():
 
 def cached_signature():
     return {
+        "name": "Z_TEST_FUNCTION",
         "parameters": {
             "CACHED_INPUT": {
                 "direction": "IMPORTING",
@@ -320,6 +405,34 @@ def cached_signature():
                 "required": False,
             }
         }
+    }
+
+
+def legacy_cached_signature():
+    signature = cached_signature()
+    signature.pop("name", None)
+    return signature
+
+
+def method_signature():
+    return {
+        "class": "ZCL_TEST",
+        "method": "EXECUTE",
+        "parameters": {
+            "IV_INPUT": {
+                "direction": "IMPORTING",
+                "rawDirection": "0",
+                "abap_type": "STRING",
+                "required": True,
+            }
+        },
+        "returning": {
+            "name": "RESULT",
+            "direction": "RETURNING",
+            "rawDirection": "3",
+            "abap_type": "STRING",
+            "required": True,
+        },
     }
 
 

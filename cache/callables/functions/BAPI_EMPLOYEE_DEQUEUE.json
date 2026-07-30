@@ -1,4 +1,5 @@
 {
+  "name": "BAPI_EMPLOYEE_DEQUEUE",
   "parameters": {
     "RETURN": {
       "direction": "EXPORTING",

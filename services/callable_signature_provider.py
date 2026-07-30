@@ -34,7 +34,9 @@ class LocalCallableSignatureCache(CallableSignatureProvider):
             if cached is None:
                 diagnostics["cacheMisses"].append(identity)
                 continue
-            signatures[identity] = cached
+            target = parse_callable_identity(identity)
+            cache_key = cached.get("name") if target["kind"] == "FUNCTION" and isinstance(cached, dict) else identity
+            signatures[normalize_callable_identity(cache_key)] = cached
             diagnostics["cacheHits"].append(identity)
         result = {"callable_signatures": signatures}
         if diagnostics["cacheHits"] or diagnostics["cacheMisses"]:
@@ -62,12 +64,27 @@ class LocalCallableSignatureCache(CallableSignatureProvider):
         if not normalized_identity or not isinstance(signature, dict):
             return
         signature = normalize_cached_signature(normalized_identity, signature)
+        target = parse_callable_identity(normalized_identity)
+        if target["kind"] == "FUNCTION":
+            normalized_identity = signature.get("name") or normalized_identity
         path = self.signature_path(normalized_identity)
         existing = self.load_signature(normalized_identity)
         if existing == signature:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(signature, indent=2), encoding="utf-8")
+
+    def import_function_signature_file(self, source_path):
+        path = Path(source_path)
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Function metadata upload is not valid JSON: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError("Function metadata upload must contain a JSON object.")
+        signature = normalize_function_signature(path.stem, loaded, source_path=path, validate_filename=True)
+        self.save_signature(signature["name"], signature)
+        return signature
 
     def signature_path(self, identity):
         target = parse_callable_identity(identity)
@@ -380,6 +397,7 @@ def parse_callable_identity(identity):
 
 
 def parse_function_signature_response(xml_text, function_name):
+    normalized_function_name = normalize_callable_identity(function_name)
     root = ET.fromstring(xml_text or "")
     parameters = {}
     for item in iter_items(root, "PARAMS"):
@@ -394,7 +412,7 @@ def parse_function_signature_response(xml_text, function_name):
             "field": child_text(item, "FIELDNAME"),
             "required": child_text(item, "OPTIONAL").upper() != "X",
         }
-    return {"parameters": parameters}
+    return {"name": normalized_function_name, "parameters": parameters}
 
 
 def parse_method_signature_response(xml_text, class_name, method_name):
@@ -428,9 +446,32 @@ def parse_method_signature_response(xml_text, class_name, method_name):
 
 
 def normalize_cached_signature(identity, signature):
-    if parse_callable_identity(identity)["kind"] != "METHOD":
+    target = parse_callable_identity(identity)
+    if target["kind"] == "FUNCTION":
+        return normalize_function_signature(target["name"], signature)
+    if target["kind"] != "METHOD":
         return signature
     return normalize_method_signature_directions(signature)
+
+
+def normalize_function_signature(identity, signature, source_path=None, validate_filename=False):
+    normalized = deepcopy(signature)
+    parameters = normalized.get("parameters")
+    if not isinstance(parameters, dict):
+        parameters = {}
+        normalized["parameters"] = parameters
+    filename_name = ""
+    if source_path:
+        filename_name = normalize_callable_identity(Path(source_path).stem)
+    if not filename_name:
+        filename_name = normalize_callable_identity(identity)
+    json_name = normalize_callable_identity(normalized.get("name"))
+    if validate_filename and json_name and filename_name and json_name != filename_name:
+        raise ValueError(
+            f"Function metadata name {json_name} does not match filename {filename_name}.json."
+        )
+    normalized["name"] = json_name or filename_name
+    return normalized
 
 
 def normalize_method_signature_directions(signature):
