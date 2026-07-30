@@ -13,6 +13,7 @@ from services.callable_signature_provider import (
     NoOpCallableSignatureProvider,
     SapCallableSignatureProvider,
     get_configured_callable_signature_provider,
+    map_method_direction,
 )
 
 
@@ -47,6 +48,10 @@ class CallableSignatureProviderTest(unittest.TestCase):
         self.assertEqual(
             metadata["callable_signatures"]["ZCL_TEST=>EXECUTE"]["returning"]["direction"],
             "RETURNING",
+        )
+        self.assertEqual(
+            metadata["callable_signatures"]["ZCL_TEST=>EXECUTE"]["parameters"]["IV_INPUT"]["direction"],
+            "IMPORTING",
         )
         function_call = session.calls[0]
         method_call = session.calls[1]
@@ -182,6 +187,45 @@ class CallableSignatureProviderTest(unittest.TestCase):
         self.assertEqual(provider.mode, "sap_first")
         self.assertIsInstance(provider.sap_provider, SapCallableSignatureProvider)
 
+    def test_method_direction_codes_match_sap_raw_direction_values(self):
+        self.assertEqual(map_method_direction("0"), "IMPORTING")
+        self.assertEqual(map_method_direction("1"), "EXPORTING")
+        self.assertEqual(map_method_direction("2"), "CHANGING")
+        self.assertEqual(map_method_direction("3"), "RETURNING")
+
+    def test_cached_method_signature_is_normalized_from_raw_direction(self):
+        temp_path = test_temp_path()
+        try:
+            cache = LocalCallableSignatureCache(temp_path / "callables")
+            path = temp_path / "callables" / "methods" / "ZCL_TEST%3D%3EEXECUTE.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "class": "ZCL_TEST",
+                        "method": "EXECUTE",
+                        "parameters": {
+                            "IV_INPUT": {"direction": "UNRESOLVED", "rawDirection": "0"},
+                            "EV_OUTPUT": {"direction": "IMPORTING", "rawDirection": "1"},
+                            "CV_VALUE": {"direction": "EXPORTING", "rawDirection": "2"},
+                            "RESULT": {"direction": "CHANGING", "rawDirection": "3"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            signature = cache.load_signature("ZCL_TEST=>EXECUTE")
+
+            self.assertEqual(signature["parameters"]["IV_INPUT"]["direction"], "IMPORTING")
+            self.assertEqual(signature["parameters"]["EV_OUTPUT"]["direction"], "EXPORTING")
+            self.assertEqual(signature["parameters"]["CV_VALUE"]["direction"], "CHANGING")
+            self.assertNotIn("RESULT", signature["parameters"])
+            self.assertEqual(signature["returning"]["name"], "RESULT")
+            self.assertEqual(signature["returning"]["direction"], "RETURNING")
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
 
 class RecordingSession:
     def __init__(self, responses):
@@ -248,14 +292,14 @@ def method_response():
       <T_ZSEOSUBCODF>
         <ITEM>
           <SCONAME>IV_INPUT</SCONAME>
-          <PARDECLTYP>1</PARDECLTYP>
+          <PARDECLTYP>0</PARDECLTYP>
           <TYPE>STRING</TYPE>
           <PAROPTIONL></PAROPTIONL>
           <EXCDECLTYP>0</EXCDECLTYP>
         </ITEM>
         <ITEM>
           <SCONAME>RV_RESULT</SCONAME>
-          <PARDECLTYP>4</PARDECLTYP>
+          <PARDECLTYP>3</PARDECLTYP>
           <TYPE>STRING</TYPE>
           <PAROPTIONL></PAROPTIONL>
           <EXCDECLTYP>0</EXCDECLTYP>

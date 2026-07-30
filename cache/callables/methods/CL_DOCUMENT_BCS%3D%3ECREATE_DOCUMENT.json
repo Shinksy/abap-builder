@@ -3,82 +3,83 @@
   "method": "CREATE_DOCUMENT",
   "parameters": {
     "CX_DOCUMENT_BCS": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "",
       "required": true
     },
     "IV_VSI_PROFILE": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "VSCAN_PROFILE",
       "required": false
     },
     "I_HEADER": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "SOLI_TAB",
       "required": false
     },
     "I_HEX": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "SOLIX_TAB",
       "required": false
     },
     "I_IMPORTANCE": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "BCS_DOCIMP",
       "required": false
     },
     "I_LANGUAGE": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "SO_OBJ_LA",
       "required": true
     },
     "I_LENGTH": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "SO_OBJ_LEN",
       "required": false
     },
     "I_SENDER": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "CL_CAM_ADDRESS_BCS",
       "required": false
     },
     "I_SENSITIVITY": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "SO_OBJ_SNS",
       "required": false
     },
     "I_SUBJECT": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "SO_OBJ_DES",
       "required": true
     },
     "I_TEXT": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "SOLI_TAB",
       "required": false
     },
     "I_TYPE": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "SO_OBJ_TP",
       "required": true
-    },
-    "RESULT": {
-      "direction": "CHANGING",
-      "rawDirection": "3",
-      "abap_type": "CL_DOCUMENT_BCS",
-      "required": true
     }
+  },
+  "returning": {
+    "name": "RESULT",
+    "direction": "RETURNING",
+    "rawDirection": "3",
+    "abap_type": "CL_DOCUMENT_BCS",
+    "required": true
   }
 }

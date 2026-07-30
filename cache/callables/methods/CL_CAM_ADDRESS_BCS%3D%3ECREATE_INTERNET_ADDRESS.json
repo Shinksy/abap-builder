@@ -3,34 +3,35 @@
   "method": "CREATE_INTERNET_ADDRESS",
   "parameters": {
     "CX_ADDRESS_BCS": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "",
       "required": true
     },
     "I_ADDRESS_NAME": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "ADR6-SMTP_ADDR",
       "required": false
     },
     "I_ADDRESS_STRING": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "ADR6-SMTP_ADDR",
       "required": true
     },
     "I_INCL_SAPUSER": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "OS_BOOLEAN",
       "required": false
-    },
-    "RESULT": {
-      "direction": "CHANGING",
-      "rawDirection": "3",
-      "abap_type": "CL_CAM_ADDRESS_BCS",
-      "required": true
     }
+  },
+  "returning": {
+    "name": "RESULT",
+    "direction": "RETURNING",
+    "rawDirection": "3",
+    "abap_type": "CL_CAM_ADDRESS_BCS",
+    "required": true
   }
 }

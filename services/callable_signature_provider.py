@@ -53,12 +53,15 @@ class LocalCallableSignatureCache(CallableSignatureProvider):
             loaded = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        return loaded if isinstance(loaded, dict) else None
+        if not isinstance(loaded, dict):
+            return None
+        return normalize_cached_signature(identity, loaded)
 
     def save_signature(self, identity, signature):
         normalized_identity = normalize_callable_identity(identity)
         if not normalized_identity or not isinstance(signature, dict):
             return
+        signature = normalize_cached_signature(normalized_identity, signature)
         path = self.signature_path(normalized_identity)
         existing = self.load_signature(normalized_identity)
         if existing == signature:
@@ -424,6 +427,30 @@ def parse_method_signature_response(xml_text, class_name, method_name):
     return result
 
 
+def normalize_cached_signature(identity, signature):
+    if parse_callable_identity(identity)["kind"] != "METHOD":
+        return signature
+    return normalize_method_signature_directions(signature)
+
+
+def normalize_method_signature_directions(signature):
+    normalized = deepcopy(signature)
+    parameters = normalized.get("parameters")
+    if not isinstance(parameters, dict):
+        return normalized
+    for name, parameter in list(parameters.items()):
+        if not isinstance(parameter, dict):
+            continue
+        raw_direction = parameter.get("rawDirection")
+        if raw_direction is not None:
+            parameter["direction"] = map_method_direction(raw_direction)
+        if parameter.get("direction") == "RETURNING":
+            returning = {"name": str(name or "").upper(), **parameter}
+            normalized["returning"] = returning
+            parameters.pop(name, None)
+    return normalized
+
+
 def iter_items(root, table_name):
     for table_node in root.iter():
         if local_name(table_node.tag).upper() != table_name:
@@ -455,9 +482,10 @@ def map_function_direction(raw_direction):
 
 def map_method_direction(raw_direction):
     return {
-        "1": "IMPORTING",
-        "2": "EXPORTING",
-        "3": "CHANGING",
+        "0": "IMPORTING",
+        "1": "EXPORTING",
+        "2": "CHANGING",
+        "3": "RETURNING",
         "4": "RETURNING",
     }.get(str(raw_direction or "").upper(), "UNRESOLVED")
 

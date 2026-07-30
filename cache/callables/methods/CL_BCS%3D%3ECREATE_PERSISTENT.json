@@ -3,16 +3,17 @@
   "method": "CREATE_PERSISTENT",
   "parameters": {
     "CX_SEND_REQ_BCS": {
-      "direction": "UNRESOLVED",
+      "direction": "IMPORTING",
       "rawDirection": "0",
       "abap_type": "",
       "required": true
-    },
-    "RESULT": {
-      "direction": "CHANGING",
-      "rawDirection": "3",
-      "abap_type": "CL_BCS",
-      "required": true
     }
+  },
+  "returning": {
+    "name": "RESULT",
+    "direction": "RETURNING",
+    "rawDirection": "3",
+    "abap_type": "CL_BCS",
+    "required": true
   }
 }
