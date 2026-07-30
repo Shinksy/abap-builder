@@ -1,0 +1,123 @@
+{
+  "parameters": {
+    "KEY": {
+      "direction": "EXPORTING",
+      "rawDirection": "E",
+      "abap_type": "BAPIPAKEY",
+      "field": "",
+      "required": true
+    },
+    "RETURN": {
+      "direction": "EXPORTING",
+      "rawDirection": "E",
+      "abap_type": "BAPIRETURN1",
+      "field": "",
+      "required": true
+    },
+    "DIALOG_MODE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "C",
+      "field": "",
+      "required": false
+    },
+    "INFTY": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "PRELP",
+      "field": "INFTY",
+      "required": true
+    },
+    "LOCKINDICATOR": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "P0001",
+      "field": "SPRPS",
+      "required": false
+    },
+    "NOCOMMIT": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "BAPI_STAND",
+      "field": "NO_COMMIT",
+      "required": false
+    },
+    "NUMBER": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "P0001",
+      "field": "PERNR",
+      "required": true
+    },
+    "OBJECTID": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "P0001",
+      "field": "OBJPS",
+      "required": false
+    },
+    "OPERATION": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "PSPAR",
+      "field": "ACTIO",
+      "required": true
+    },
+    "RECORD": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": true
+    },
+    "RECORDNUMBER": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "P0001",
+      "field": "SEQNR",
+      "required": false
+    },
+    "SECONDARY_RECORD": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": false
+    },
+    "SUBTYPE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "P0001",
+      "field": "SUBTY",
+      "required": false
+    },
+    "TCLAS": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "PSPAR",
+      "field": "TCLAS",
+      "required": false
+    },
+    "VALIDITYBEGIN": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "P0001",
+      "field": "BEGDA",
+      "required": false
+    },
+    "VALIDITYEND": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "P0001",
+      "field": "ENDDA",
+      "required": false
+    },
+    "VIEW_IDENTIFIER": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "P0003",
+      "field": "VIEKN",
+      "required": false
+    }
+  }
+}

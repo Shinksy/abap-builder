@@ -1,0 +1,378 @@
+{
+  "name": "PA0105",
+  "field_count": 37,
+  "fields": {
+    "MANDT": {
+      "name": "MANDT",
+      "rollname": "MANDT",
+      "datatype": "CLNT",
+      "length": 3,
+      "decimals": 0,
+      "description": "Client",
+      "key": true
+    },
+    "PERNR": {
+      "name": "PERNR",
+      "rollname": "PERSNO",
+      "datatype": "NUMC",
+      "length": 8,
+      "decimals": 0,
+      "description": "Personnel number",
+      "key": true
+    },
+    "SUBTY": {
+      "name": "SUBTY",
+      "rollname": "SUBTY",
+      "datatype": "CHAR",
+      "length": 4,
+      "decimals": 0,
+      "description": "Subtype",
+      "key": true
+    },
+    "OBJPS": {
+      "name": "OBJPS",
+      "rollname": "OBJPS",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "Object ID",
+      "key": true
+    },
+    "SPRPS": {
+      "name": "SPRPS",
+      "rollname": "SPRPS",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Lock indicator",
+      "key": true
+    },
+    "ENDDA": {
+      "name": "ENDDA",
+      "rollname": "ENDDA",
+      "datatype": "DATS",
+      "length": 8,
+      "decimals": 0,
+      "description": "End Date",
+      "key": true
+    },
+    "BEGDA": {
+      "name": "BEGDA",
+      "rollname": "BEGDA",
+      "datatype": "DATS",
+      "length": 8,
+      "decimals": 0,
+      "description": "Start Date",
+      "key": true
+    },
+    "SEQNR": {
+      "name": "SEQNR",
+      "rollname": "SEQNR",
+      "datatype": "NUMC",
+      "length": 3,
+      "decimals": 0,
+      "description": "Infotype record no.",
+      "key": true
+    },
+    "AEDTM": {
+      "name": "AEDTM",
+      "rollname": "AEDAT",
+      "datatype": "DATS",
+      "length": 8,
+      "decimals": 0,
+      "description": "Changed on",
+      "key": false
+    },
+    "UNAME": {
+      "name": "UNAME",
+      "rollname": "AENAM",
+      "datatype": "CHAR",
+      "length": 12,
+      "decimals": 0,
+      "description": "Changed by",
+      "key": false
+    },
+    "HISTO": {
+      "name": "HISTO",
+      "rollname": "HISTO",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Historical record",
+      "key": false
+    },
+    "ITXEX": {
+      "name": "ITXEX",
+      "rollname": "ITXEX",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Text exists",
+      "key": false
+    },
+    "REFEX": {
+      "name": "REFEX",
+      "rollname": "PRFEX",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Reference fields exist (cost assign.)",
+      "key": false
+    },
+    "ORDEX": {
+      "name": "ORDEX",
+      "rollname": "ORDEX",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Conf. fields exist",
+      "key": false
+    },
+    "ITBLD": {
+      "name": "ITBLD",
+      "rollname": "ITBLD",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "PREAS": {
+      "name": "PREAS",
+      "rollname": "PREAS",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "Reason for Change",
+      "key": false
+    },
+    "FLAG1": {
+      "name": "FLAG1",
+      "rollname": "NUSED",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "FLAG2": {
+      "name": "FLAG2",
+      "rollname": "NUSED",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "FLAG3": {
+      "name": "FLAG3",
+      "rollname": "NUSED",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "FLAG4": {
+      "name": "FLAG4",
+      "rollname": "NUSED",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "RESE1": {
+      "name": "RESE1",
+      "rollname": "NUSED2",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "RESE2": {
+      "name": "RESE2",
+      "rollname": "NUSED2",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "GRPVL": {
+      "name": "GRPVL",
+      "rollname": "PCCE_GPVAL",
+      "datatype": "CHAR",
+      "length": 4,
+      "decimals": 0,
+      "description": "Grouping Value",
+      "key": false
+    },
+    "USRTY": {
+      "name": "USRTY",
+      "rollname": "USRTY",
+      "datatype": "CHAR",
+      "length": 4,
+      "decimals": 0,
+      "description": "Communication type",
+      "key": false
+    },
+    "USRID": {
+      "name": "USRID",
+      "rollname": "SYSID",
+      "datatype": "CHAR",
+      "length": 30,
+      "decimals": 0,
+      "description": "ID/number",
+      "key": false
+    },
+    "USRID_LONG": {
+      "name": "USRID_LONG",
+      "rollname": "COMM_ID_LONG",
+      "datatype": "CHAR",
+      "length": 241,
+      "decimals": 0,
+      "description": "Long ID/Number",
+      "key": false
+    },
+    "SIM": {
+      "name": "SIM",
+      "rollname": "ZSIM",
+      "datatype": "NUMC",
+      "length": 12,
+      "decimals": 0,
+      "description": "SIM",
+      "key": false
+    },
+    "TYPE": {
+      "name": "TYPE",
+      "rollname": "ZMOBILE_TYPE",
+      "datatype": "CHAR",
+      "length": 20,
+      "decimals": 0,
+      "description": "Type",
+      "key": false
+    },
+    "REAL_USER": {
+      "name": "REAL_USER",
+      "rollname": "ZMOBILE_REAL_USER",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Real User",
+      "key": false
+    },
+    "MANAGED_DEVICE": {
+      "name": "MANAGED_DEVICE",
+      "rollname": "ZMANAGED_DEVICE",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Managed Device",
+      "key": false
+    },
+    "IMEI": {
+      "name": "IMEI",
+      "rollname": "ZIMEI",
+      "datatype": "NUMC",
+      "length": 15,
+      "decimals": 0,
+      "description": "IMEI",
+      "key": false
+    },
+    "DEVICE": {
+      "name": "DEVICE",
+      "rollname": "ZMOBILE_DEVICE",
+      "datatype": "CHAR",
+      "length": 50,
+      "decimals": 0,
+      "description": "Device",
+      "key": false
+    },
+    "PROFILE": {
+      "name": "PROFILE",
+      "rollname": "ZMOBILE_PROFILE",
+      "datatype": "CHAR",
+      "length": 20,
+      "decimals": 0,
+      "description": "Profile",
+      "key": false
+    },
+    "TARIFF": {
+      "name": "TARIFF",
+      "rollname": "ZMOBILE_TARRIFF",
+      "datatype": "CHAR",
+      "length": 20,
+      "decimals": 0,
+      "description": "Tariff",
+      "key": false
+    },
+    "VIP": {
+      "name": "VIP",
+      "rollname": "ZMOBILE_VIP",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "VIP",
+      "key": false
+    },
+    "KOSTL": {
+      "name": "KOSTL",
+      "rollname": "KOSTL",
+      "datatype": "CHAR",
+      "length": 10,
+      "decimals": 0,
+      "description": "Cost Center",
+      "key": false
+    },
+    "USER_NAME": {
+      "name": "USER_NAME",
+      "rollname": "ZMOBILE_USER_NAME",
+      "datatype": "CHAR",
+      "length": 50,
+      "decimals": 0,
+      "description": "User Name",
+      "key": false
+    }
+  },
+  "field_order": [
+    "MANDT",
+    "PERNR",
+    "SUBTY",
+    "OBJPS",
+    "SPRPS",
+    "ENDDA",
+    "BEGDA",
+    "SEQNR",
+    "AEDTM",
+    "UNAME",
+    "HISTO",
+    "ITXEX",
+    "REFEX",
+    "ORDEX",
+    "ITBLD",
+    "PREAS",
+    "FLAG1",
+    "FLAG2",
+    "FLAG3",
+    "FLAG4",
+    "RESE1",
+    "RESE2",
+    "GRPVL",
+    "USRTY",
+    "USRID",
+    "USRID_LONG",
+    "SIM",
+    "TYPE",
+    "REAL_USER",
+    "MANAGED_DEVICE",
+    "IMEI",
+    "DEVICE",
+    "PROFILE",
+    "TARIFF",
+    "VIP",
+    "KOSTL",
+    "USER_NAME"
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "class": "SEND_REQUEST",
+  "method": "ADD_RECIPIENT",
+  "parameters": {}
+}

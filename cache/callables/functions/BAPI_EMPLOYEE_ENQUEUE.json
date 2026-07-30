@@ -1,0 +1,18 @@
+{
+  "parameters": {
+    "RETURN": {
+      "direction": "EXPORTING",
+      "rawDirection": "E",
+      "abap_type": "BAPIRETURN1",
+      "field": "",
+      "required": true
+    },
+    "NUMBER": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "BAPIP0001",
+      "field": "PERNR",
+      "required": true
+    }
+  }
+}

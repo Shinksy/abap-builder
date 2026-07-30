@@ -1,0 +1,288 @@
+{
+  "name": "PA0000",
+  "field_count": 28,
+  "fields": {
+    "MANDT": {
+      "name": "MANDT",
+      "rollname": "MANDT",
+      "datatype": "CLNT",
+      "length": 3,
+      "decimals": 0,
+      "description": "Client",
+      "key": true
+    },
+    "PERNR": {
+      "name": "PERNR",
+      "rollname": "PERSNO",
+      "datatype": "NUMC",
+      "length": 8,
+      "decimals": 0,
+      "description": "Personnel number",
+      "key": true
+    },
+    "SUBTY": {
+      "name": "SUBTY",
+      "rollname": "SUBTY",
+      "datatype": "CHAR",
+      "length": 4,
+      "decimals": 0,
+      "description": "Subtype",
+      "key": true
+    },
+    "OBJPS": {
+      "name": "OBJPS",
+      "rollname": "OBJPS",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "Object ID",
+      "key": true
+    },
+    "SPRPS": {
+      "name": "SPRPS",
+      "rollname": "SPRPS",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Lock indicator",
+      "key": true
+    },
+    "ENDDA": {
+      "name": "ENDDA",
+      "rollname": "ENDDA",
+      "datatype": "DATS",
+      "length": 8,
+      "decimals": 0,
+      "description": "End Date",
+      "key": true
+    },
+    "BEGDA": {
+      "name": "BEGDA",
+      "rollname": "BEGDA",
+      "datatype": "DATS",
+      "length": 8,
+      "decimals": 0,
+      "description": "Start Date",
+      "key": true
+    },
+    "SEQNR": {
+      "name": "SEQNR",
+      "rollname": "SEQNR",
+      "datatype": "NUMC",
+      "length": 3,
+      "decimals": 0,
+      "description": "Infotype record no.",
+      "key": true
+    },
+    "AEDTM": {
+      "name": "AEDTM",
+      "rollname": "AEDAT",
+      "datatype": "DATS",
+      "length": 8,
+      "decimals": 0,
+      "description": "Changed on",
+      "key": false
+    },
+    "UNAME": {
+      "name": "UNAME",
+      "rollname": "AENAM",
+      "datatype": "CHAR",
+      "length": 12,
+      "decimals": 0,
+      "description": "Changed by",
+      "key": false
+    },
+    "HISTO": {
+      "name": "HISTO",
+      "rollname": "HISTO",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Historical record",
+      "key": false
+    },
+    "ITXEX": {
+      "name": "ITXEX",
+      "rollname": "ITXEX",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Text exists",
+      "key": false
+    },
+    "REFEX": {
+      "name": "REFEX",
+      "rollname": "PRFEX",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Reference fields exist (cost assign.)",
+      "key": false
+    },
+    "ORDEX": {
+      "name": "ORDEX",
+      "rollname": "ORDEX",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Conf. fields exist",
+      "key": false
+    },
+    "ITBLD": {
+      "name": "ITBLD",
+      "rollname": "ITBLD",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "PREAS": {
+      "name": "PREAS",
+      "rollname": "PREAS",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "Reason for Change",
+      "key": false
+    },
+    "FLAG1": {
+      "name": "FLAG1",
+      "rollname": "NUSED",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "FLAG2": {
+      "name": "FLAG2",
+      "rollname": "NUSED",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "FLAG3": {
+      "name": "FLAG3",
+      "rollname": "NUSED",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "FLAG4": {
+      "name": "FLAG4",
+      "rollname": "NUSED",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "RESE1": {
+      "name": "RESE1",
+      "rollname": "NUSED2",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "RESE2": {
+      "name": "RESE2",
+      "rollname": "NUSED2",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "GRPVL": {
+      "name": "GRPVL",
+      "rollname": "PCCE_GPVAL",
+      "datatype": "CHAR",
+      "length": 4,
+      "decimals": 0,
+      "description": "Grouping Value",
+      "key": false
+    },
+    "MASSN": {
+      "name": "MASSN",
+      "rollname": "MASSN",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "Action Type",
+      "key": false
+    },
+    "MASSG": {
+      "name": "MASSG",
+      "rollname": "MASSG",
+      "datatype": "CHAR",
+      "length": 2,
+      "decimals": 0,
+      "description": "Reason for Action",
+      "key": false
+    },
+    "STAT1": {
+      "name": "STAT1",
+      "rollname": "STAT1",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Cust.-specific stat.",
+      "key": false
+    },
+    "STAT2": {
+      "name": "STAT2",
+      "rollname": "STAT2",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Employment status",
+      "key": false
+    },
+    "STAT3": {
+      "name": "STAT3",
+      "rollname": "STAT3",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Spec.payment status",
+      "key": false
+    }
+  },
+  "field_order": [
+    "MANDT",
+    "PERNR",
+    "SUBTY",
+    "OBJPS",
+    "SPRPS",
+    "ENDDA",
+    "BEGDA",
+    "SEQNR",
+    "AEDTM",
+    "UNAME",
+    "HISTO",
+    "ITXEX",
+    "REFEX",
+    "ORDEX",
+    "ITBLD",
+    "PREAS",
+    "FLAG1",
+    "FLAG2",
+    "FLAG3",
+    "FLAG4",
+    "RESE1",
+    "RESE2",
+    "GRPVL",
+    "MASSN",
+    "MASSG",
+    "STAT1",
+    "STAT2",
+    "STAT3"
+  ]
+}

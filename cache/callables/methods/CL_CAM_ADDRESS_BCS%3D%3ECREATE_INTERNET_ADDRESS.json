@@ -1,0 +1,36 @@
+{
+  "class": "CL_CAM_ADDRESS_BCS",
+  "method": "CREATE_INTERNET_ADDRESS",
+  "parameters": {
+    "CX_ADDRESS_BCS": {
+      "direction": "UNRESOLVED",
+      "rawDirection": "0",
+      "abap_type": "",
+      "required": true
+    },
+    "I_ADDRESS_NAME": {
+      "direction": "UNRESOLVED",
+      "rawDirection": "0",
+      "abap_type": "ADR6-SMTP_ADDR",
+      "required": false
+    },
+    "I_ADDRESS_STRING": {
+      "direction": "UNRESOLVED",
+      "rawDirection": "0",
+      "abap_type": "ADR6-SMTP_ADDR",
+      "required": true
+    },
+    "I_INCL_SAPUSER": {
+      "direction": "UNRESOLVED",
+      "rawDirection": "0",
+      "abap_type": "OS_BOOLEAN",
+      "required": false
+    },
+    "RESULT": {
+      "direction": "CHANGING",
+      "rawDirection": "3",
+      "abap_type": "CL_CAM_ADDRESS_BCS",
+      "required": true
+    }
+  }
+}
