@@ -1,3 +1,7 @@
+from copy import deepcopy
+import json
+from pathlib import Path
+from urllib.parse import quote
 import xml.etree.ElementTree as ET
 
 import requests
@@ -16,6 +20,98 @@ class CallableSignatureProvider:
 class NoOpCallableSignatureProvider(CallableSignatureProvider):
     def get_signatures(self, callable_identities):
         return {}
+
+
+class LocalCallableSignatureCache(CallableSignatureProvider):
+    def __init__(self, cache_dir):
+        self.cache_dir = Path(cache_dir)
+
+    def get_signatures(self, callable_identities):
+        signatures = {}
+        diagnostics = {"cacheHits": [], "cacheMisses": []}
+        for identity in dedupe_callable_identities(callable_identities):
+            cached = self.load_signature(identity)
+            if cached is None:
+                diagnostics["cacheMisses"].append(identity)
+                continue
+            signatures[identity] = cached
+            diagnostics["cacheHits"].append(identity)
+        result = {"callable_signatures": signatures}
+        if diagnostics["cacheHits"] or diagnostics["cacheMisses"]:
+            result["_diagnostics"] = diagnostics
+        return result
+
+    def save_signatures(self, metadata):
+        for identity, signature in normalize_provider_signatures(metadata).items():
+            self.save_signature(identity, signature)
+
+    def load_signature(self, identity):
+        path = self.signature_path(identity)
+        if not path.exists():
+            return None
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    def save_signature(self, identity, signature):
+        normalized_identity = normalize_callable_identity(identity)
+        if not normalized_identity or not isinstance(signature, dict):
+            return
+        path = self.signature_path(normalized_identity)
+        existing = self.load_signature(normalized_identity)
+        if existing == signature:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(signature, indent=2), encoding="utf-8")
+
+    def signature_path(self, identity):
+        target = parse_callable_identity(identity)
+        directory = "methods" if target["kind"] == "METHOD" else "functions"
+        return self.cache_dir / directory / f"{cache_file_stem(target['identity'])}.json"
+
+
+class ModeAwareCallableSignatureProvider(CallableSignatureProvider):
+    VALID_MODES = {"cache_first", "sap_first", "cache_only", "sap_only"}
+
+    def __init__(self, cache_provider, sap_provider=None, mode="cache_first"):
+        self.cache_provider = cache_provider
+        self.sap_provider = sap_provider or NoOpCallableSignatureProvider()
+        self.mode = normalize_metadata_mode(mode)
+
+    def get_signatures(self, callable_identities):
+        identities = dedupe_callable_identities(callable_identities)
+        if not identities:
+            return {}
+        if self.mode == "cache_only":
+            return self.cache_provider.get_signatures(identities)
+        if self.mode == "sap_only":
+            return self.fetch_from_sap(identities)
+        if self.mode == "sap_first":
+            return self.get_signatures_sap_first(identities)
+        return self.get_signatures_cache_first(identities)
+
+    def get_signatures_cache_first(self, identities):
+        cached = self.cache_provider.get_signatures(identities)
+        missing = missing_callable_identities(identities, cached)
+        if not missing:
+            return cached
+        fetched = self.fetch_from_sap(missing)
+        return merge_callable_provider_metadata(cached, fetched)
+
+    def get_signatures_sap_first(self, identities):
+        fetched = self.fetch_from_sap(identities)
+        missing = missing_callable_identities(identities, fetched)
+        if not missing:
+            return fetched
+        cached = self.cache_provider.get_signatures(missing)
+        return merge_callable_provider_metadata(fetched, cached)
+
+    def fetch_from_sap(self, identities):
+        fetched = self.sap_provider.get_signatures(identities)
+        self.cache_provider.save_signatures(fetched)
+        return fetched if isinstance(fetched, dict) else {}
 
 
 class SapCallableSignatureProvider(CallableSignatureProvider):
@@ -155,15 +251,28 @@ class SapCallableSignatureProvider(CallableSignatureProvider):
 
 
 def get_configured_callable_signature_provider(config):
-    if not config.get("SAP_FUNCTION_SIGNATURE_URL") and not config.get("SAP_METHOD_SIGNATURE_URL"):
+    has_sap_urls = bool(config.get("SAP_FUNCTION_SIGNATURE_URL") or config.get("SAP_METHOD_SIGNATURE_URL"))
+    has_cache_config = bool(
+        config.get("SAP_CALLABLE_CACHE_DIR")
+        or config.get("SAP_CALLABLE_METADATA_MODE")
+        or config.get("SAP_METADATA_CACHE_MODE")
+    )
+    if not has_sap_urls and not has_cache_config:
         return NoOpCallableSignatureProvider()
-    return SapCallableSignatureProvider(
-        function_url=config.get("SAP_FUNCTION_SIGNATURE_URL"),
-        method_url=config.get("SAP_METHOD_SIGNATURE_URL"),
-        user=config.get("SAP_API_USER"),
-        password=config.get("SAP_API_PASSWORD"),
-        timeout=config.get("SAP_API_TIMEOUT", 30),
-        verify=config.get("SAP_API_VERIFY", True),
+    sap_provider = NoOpCallableSignatureProvider()
+    if has_sap_urls:
+        sap_provider = SapCallableSignatureProvider(
+            function_url=config.get("SAP_FUNCTION_SIGNATURE_URL"),
+            method_url=config.get("SAP_METHOD_SIGNATURE_URL"),
+            user=config.get("SAP_API_USER"),
+            password=config.get("SAP_API_PASSWORD"),
+            timeout=config.get("SAP_API_TIMEOUT", 30),
+            verify=config.get("SAP_API_VERIFY", True),
+        )
+    return ModeAwareCallableSignatureProvider(
+        LocalCallableSignatureCache(config.get("SAP_CALLABLE_CACHE_DIR") or Path("cache") / "callables"),
+        sap_provider=sap_provider,
+        mode=config.get("SAP_CALLABLE_METADATA_MODE", config.get("SAP_METADATA_CACHE_MODE", "cache_first")),
     )
 
 
@@ -351,3 +460,39 @@ def map_method_direction(raw_direction):
         "3": "CHANGING",
         "4": "RETURNING",
     }.get(str(raw_direction or "").upper(), "UNRESOLVED")
+
+
+def missing_callable_identities(identities, metadata):
+    signatures = normalize_provider_signatures(metadata)
+    normalized = {normalize_callable_identity(identity) for identity in signatures}
+    return [identity for identity in identities if identity not in normalized]
+
+
+def merge_callable_provider_metadata(*metadata_items):
+    merged = {"callable_signatures": {}}
+    diagnostics = []
+    unresolved = []
+    for metadata in metadata_items:
+        if not isinstance(metadata, dict):
+            continue
+        for identity, signature in normalize_provider_signatures(metadata).items():
+            merged["callable_signatures"][normalize_callable_identity(identity)] = deepcopy(signature)
+        if "_diagnostics" in metadata:
+            diagnostics.append(metadata["_diagnostics"])
+        unresolved.extend(metadata.get("unresolved", []) or [])
+    if diagnostics:
+        merged["_diagnostics"] = diagnostics
+    if unresolved:
+        merged["unresolved"] = unresolved
+    return merged if (merged["callable_signatures"] or diagnostics or unresolved) else {}
+
+
+def normalize_metadata_mode(mode):
+    normalized = str(mode or "cache_first").strip().lower()
+    if normalized not in ModeAwareCallableSignatureProvider.VALID_MODES:
+        return "cache_first"
+    return normalized
+
+
+def cache_file_stem(identity):
+    return quote(normalize_callable_identity(identity), safe="")

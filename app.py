@@ -260,6 +260,7 @@ def log_ddic_metadata_startup(app):
     print(f"DDIC metadata .env path loaded: {app.config.get('ENV_FILE_PATH')}")
     print(f"DDIC metadata enabled raw: {app.config.get('SAP_DDIC_METADATA_ENABLED_RAW')}")
     print(f"DDIC metadata enabled parsed: {app.config.get('SAP_DDIC_METADATA_ENABLED')}")
+    print(f"DDIC metadata mode: {app.config.get('SAP_DDIC_METADATA_MODE')}")
     print(f"DDIC provider selected: {type(provider).__name__}")
     print(f"SAP API base URL configured: {bool(app.config.get('SAP_API_BASE_URL'))}")
 

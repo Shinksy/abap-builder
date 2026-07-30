@@ -1,8 +1,15 @@
+import json
+from pathlib import Path
+import shutil
 import unittest
+from uuid import uuid4
 
+import requests
 from requests.auth import HTTPBasicAuth
 
 from services.callable_signature_provider import (
+    LocalCallableSignatureCache,
+    ModeAwareCallableSignatureProvider,
     NoOpCallableSignatureProvider,
     SapCallableSignatureProvider,
     get_configured_callable_signature_provider,
@@ -80,6 +87,101 @@ class CallableSignatureProviderTest(unittest.TestCase):
 
         self.assertIsInstance(provider, NoOpCallableSignatureProvider)
 
+    def test_cache_first_reads_cached_function_and_fetches_missing_method(self):
+        temp_path = test_temp_path()
+        try:
+            cache = LocalCallableSignatureCache(temp_path / "callables")
+            cache.save_signature("Z_TEST_FUNCTION", cached_signature())
+            session = RecordingSession({"https://sap.example.test/method": method_response()})
+            provider = ModeAwareCallableSignatureProvider(
+                cache,
+                SapCallableSignatureProvider(method_url="https://sap.example.test/method", session_factory=lambda: session),
+                mode="cache_first",
+            )
+
+            metadata = provider.get_signatures(["Z_TEST_FUNCTION", "ZCL_TEST=>EXECUTE"])
+
+            self.assertEqual(set(metadata["callable_signatures"]), {"Z_TEST_FUNCTION", "ZCL_TEST=>EXECUTE"})
+            self.assertEqual([call["url"] for call in session.calls], ["https://sap.example.test/method"])
+            self.assertTrue((temp_path / "callables" / "functions" / "Z_TEST_FUNCTION.json").exists())
+            self.assertTrue((temp_path / "callables" / "methods" / "ZCL_TEST%3D%3EEXECUTE.json").exists())
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_sap_first_falls_back_to_cached_callable_when_sap_returns_no_signature(self):
+        temp_path = test_temp_path()
+        try:
+            cache = LocalCallableSignatureCache(temp_path / "callables")
+            cache.save_signature("Z_TEST_FUNCTION", cached_signature())
+            provider = ModeAwareCallableSignatureProvider(
+                cache,
+                SapCallableSignatureProvider(function_url=None),
+                mode="sap_first",
+            )
+
+            metadata = provider.get_signatures(["Z_TEST_FUNCTION"])
+
+            self.assertEqual(metadata["callable_signatures"]["Z_TEST_FUNCTION"], cached_signature())
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_cache_only_does_not_call_sap_or_rewrite_callable_cache(self):
+        temp_path = test_temp_path()
+        try:
+            cache = LocalCallableSignatureCache(temp_path / "callables")
+            cache.save_signature("Z_TEST_FUNCTION", cached_signature())
+            cache_path = temp_path / "callables" / "functions" / "Z_TEST_FUNCTION.json"
+            original = cache_path.read_text(encoding="utf-8")
+            session = RecordingSession({"https://sap.example.test/function": function_response()})
+            provider = ModeAwareCallableSignatureProvider(
+                cache,
+                SapCallableSignatureProvider(function_url="https://sap.example.test/function", session_factory=lambda: session),
+                mode="cache_only",
+            )
+
+            metadata = provider.get_signatures(["Z_TEST_FUNCTION", "Z_MISSING"])
+
+            self.assertEqual(set(metadata["callable_signatures"]), {"Z_TEST_FUNCTION"})
+            self.assertEqual(session.calls, [])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), original)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_sap_only_ignores_cache_and_saves_successful_callable_signature(self):
+        temp_path = test_temp_path()
+        try:
+            cache = LocalCallableSignatureCache(temp_path / "callables")
+            cache.save_signature("Z_TEST_FUNCTION", cached_signature())
+            session = RecordingSession({"https://sap.example.test/function": function_response()})
+            provider = ModeAwareCallableSignatureProvider(
+                cache,
+                SapCallableSignatureProvider(function_url="https://sap.example.test/function", session_factory=lambda: session),
+                mode="sap_only",
+            )
+
+            metadata = provider.get_signatures(["Z_TEST_FUNCTION"])
+
+            self.assertEqual([call["url"] for call in session.calls], ["https://sap.example.test/function"])
+            self.assertIn("IV_INPUT", metadata["callable_signatures"]["Z_TEST_FUNCTION"]["parameters"])
+            saved = json.loads((temp_path / "callables" / "functions" / "Z_TEST_FUNCTION.json").read_text(encoding="utf-8"))
+            self.assertIn("IV_INPUT", saved["parameters"])
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_configured_provider_uses_mode_aware_callable_cache_when_urls_are_configured(self):
+        provider = get_configured_callable_signature_provider(
+            {
+                "SAP_FUNCTION_SIGNATURE_URL": "https://sap.example.test/function",
+                "SAP_METHOD_SIGNATURE_URL": "https://sap.example.test/method",
+                "SAP_CALLABLE_CACHE_DIR": "cache/callables",
+                "SAP_CALLABLE_METADATA_MODE": "sap_first",
+            }
+        )
+
+        self.assertIsInstance(provider, ModeAwareCallableSignatureProvider)
+        self.assertEqual(provider.mode, "sap_first")
+        self.assertIsInstance(provider.sap_provider, SapCallableSignatureProvider)
+
 
 class RecordingSession:
     def __init__(self, responses):
@@ -98,6 +200,8 @@ class RecordingSession:
                 "verify": verify,
             }
         )
+        if url not in self.responses:
+            raise requests.exceptions.RequestException(f"No response for {url}")
         return RecordingResponse(self.responses[url])
 
 
@@ -161,6 +265,22 @@ def method_response():
   </soapenv:Body>
 </soapenv:Envelope>
 """
+
+
+def cached_signature():
+    return {
+        "parameters": {
+            "CACHED_INPUT": {
+                "direction": "IMPORTING",
+                "abap_type": "CHAR10",
+                "required": False,
+            }
+        }
+    }
+
+
+def test_temp_path():
+    return Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
 
 
 if __name__ == "__main__":

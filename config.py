@@ -68,6 +68,16 @@ class Config:
     SAP_API_TIMEOUT = env_int("SAP_API_TIMEOUT", 30)
     SAP_API_VERIFY = os.environ.get("SAP_API_VERIFY", "true").lower() != "false"
     SAP_API_CLIENT = os.environ.get("SAP_API_CLIENT", "100")
+    SAP_METADATA_CACHE_MODE = os.environ.get(
+        "SAP_METADATA_CACHE_MODE",
+        os.environ.get("SAP_DDIC_METADATA_MODE", "cache_first"),
+    )
+    SAP_METADATA_CACHE_DIR = os.environ.get("SAP_METADATA_CACHE_DIR", str(BASE_DIR / "cache"))
+    SAP_DDIC_METADATA_MODE = SAP_METADATA_CACHE_MODE
+    SAP_DDIC_CACHE_DIR = os.environ.get("SAP_DDIC_CACHE_DIR", str(Path(SAP_METADATA_CACHE_DIR) / "ddic"))
+    SAP_DDIC_CACHE_PATH = os.environ.get("SAP_DDIC_CACHE_PATH", str(Path(SAP_METADATA_CACHE_DIR) / "ddic_metadata.json"))
+    SAP_CALLABLE_METADATA_MODE = os.environ.get("SAP_CALLABLE_METADATA_MODE", SAP_METADATA_CACHE_MODE)
+    SAP_CALLABLE_CACHE_DIR = os.environ.get("SAP_CALLABLE_CACHE_DIR", str(Path(SAP_METADATA_CACHE_DIR) / "callables"))
     SAP_SYNTAX_CHECK_URL = os.environ.get("SAP_SYNTAX_CHECK_URL")
     SAP_SYNTAX_CHECK_TIMEOUT_SECONDS = env_int("SAP_SYNTAX_CHECK_TIMEOUT_SECONDS", SAP_API_TIMEOUT)
     SAP_FUNCTION_SIGNATURE_URL = os.environ.get("SAP_FUNCTION_SIGNATURE_URL")

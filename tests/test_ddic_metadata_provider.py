@@ -1,4 +1,8 @@
+import json
+from pathlib import Path
+import shutil
 import unittest
+from uuid import uuid4
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -6,6 +10,8 @@ from requests.auth import HTTPBasicAuth
 from services.ddic_metadata_provider import (
     DdicMetadataError,
     DdicMetadataTimeoutError,
+    LocalDdicMetadataCache,
+    ModeAwareDdicMetadataProvider,
     NoOpDdicMetadataProvider,
     SapDdicMetadataProvider,
     get_configured_ddic_metadata_provider,
@@ -138,6 +144,154 @@ class DdicMetadataProviderTest(unittest.TestCase):
         with self.assertRaisesRegex(DdicMetadataTimeoutError, "timed out"):
             provider.get_tables(["EDIDC"])
 
+    def test_cache_first_reuses_cache_and_fetches_only_missing_tables(self):
+        temp_path = test_temp_path()
+        try:
+            cache_dir = temp_path / "ddic"
+            write_cached_ddic(cache_dir, "EDIDC")
+            session = RecordingSession(sample_response())
+            provider = ModeAwareDdicMetadataProvider(
+                LocalDdicMetadataCache(cache_dir),
+                SapDdicMetadataProvider("https://sap.example.test/soap", session_factory=lambda: session),
+                mode="cache_first",
+            )
+
+            metadata = provider.get_tables(["EDIDC", "MARA"])
+
+            self.assertEqual(set(metadata["tables"]), {"EDIDC", "MARA"})
+            self.assertEqual([extract_tabname(call["data"]) for call in session.calls], ["MARA"])
+            self.assertTrue((cache_dir / "EDIDC.json").exists())
+            self.assertTrue((cache_dir / "MARA.json").exists())
+            self.assertEqual(json.loads((cache_dir / "EDIDC.json").read_text(encoding="utf-8")), cached_table("EDIDC"))
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_sap_first_uses_sap_and_saves_successful_metadata_to_cache(self):
+        temp_path = test_temp_path()
+        try:
+            cache_dir = temp_path / "ddic"
+            write_cached_ddic(cache_dir, "EDIDC")
+            session = RecordingSession(sample_response())
+            provider = ModeAwareDdicMetadataProvider(
+                LocalDdicMetadataCache(cache_dir),
+                SapDdicMetadataProvider("https://sap.example.test/soap", session_factory=lambda: session),
+                mode="sap_first",
+            )
+
+            metadata = provider.get_tables(["EDIDC"])
+
+            self.assertEqual([extract_tabname(call["data"]) for call in session.calls], ["EDIDC"])
+            self.assertEqual(metadata["tables"]["EDIDC"]["field_order"], ["DOCNUM", "MESTYP"])
+            saved = json.loads((cache_dir / "EDIDC.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["field_order"], ["DOCNUM", "MESTYP"])
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_cache_only_reads_cache_without_calling_sap(self):
+        temp_path = test_temp_path()
+        try:
+            cache_dir = temp_path / "ddic"
+            write_cached_ddic(cache_dir, "EDIDC")
+            original = (cache_dir / "EDIDC.json").read_text(encoding="utf-8")
+            session = RecordingSession(sample_response())
+            provider = ModeAwareDdicMetadataProvider(
+                LocalDdicMetadataCache(cache_dir),
+                SapDdicMetadataProvider("https://sap.example.test/soap", session_factory=lambda: session),
+                mode="cache_only",
+            )
+
+            metadata = provider.get_tables(["EDIDC", "MARA"])
+
+            self.assertEqual(set(metadata["tables"]), {"EDIDC"})
+            self.assertEqual(session.calls, [])
+            self.assertEqual((cache_dir / "EDIDC.json").read_text(encoding="utf-8"), original)
+            self.assertFalse((cache_dir / "MARA.json").exists())
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_sap_only_ignores_existing_cache_but_saves_successful_metadata(self):
+        temp_path = test_temp_path()
+        try:
+            cache_dir = temp_path / "ddic"
+            write_cached_ddic(cache_dir, "EDIDC")
+            session = RecordingSession(sample_response())
+            provider = ModeAwareDdicMetadataProvider(
+                LocalDdicMetadataCache(cache_dir),
+                SapDdicMetadataProvider("https://sap.example.test/soap", session_factory=lambda: session),
+                mode="sap_only",
+            )
+
+            metadata = provider.get_tables(["EDIDC"])
+
+            self.assertEqual([extract_tabname(call["data"]) for call in session.calls], ["EDIDC"])
+            self.assertEqual(metadata["tables"]["EDIDC"]["field_order"], ["DOCNUM", "MESTYP"])
+            saved = json.loads((cache_dir / "EDIDC.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["field_order"], ["DOCNUM", "MESTYP"])
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_sap_first_falls_back_to_cache_when_sap_is_unavailable(self):
+        temp_path = test_temp_path()
+        try:
+            cache_dir = temp_path / "ddic"
+            write_cached_ddic(cache_dir, "EDIDC")
+            provider = ModeAwareDdicMetadataProvider(
+                LocalDdicMetadataCache(cache_dir),
+                SapDdicMetadataProvider("https://sap.example.test/soap", session_factory=lambda: TimeoutSession()),
+                mode="sap_first",
+            )
+
+            metadata = provider.get_tables(["EDIDC"])
+
+            self.assertEqual(metadata["tables"]["EDIDC"], cached_table("EDIDC"))
+            self.assertIn({"object": "EDIDC", "event": "cache-hit"}, metadata["_diagnostics"])
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_cache_first_uses_existing_cache_without_rewriting_or_calling_sap(self):
+        temp_path = test_temp_path()
+        try:
+            cache_dir = temp_path / "ddic"
+            write_cached_ddic(cache_dir, "EDIDC")
+            original = (cache_dir / "EDIDC.json").read_text(encoding="utf-8")
+            session = RecordingSession(sample_response())
+            provider = ModeAwareDdicMetadataProvider(
+                LocalDdicMetadataCache(cache_dir),
+                SapDdicMetadataProvider("https://sap.example.test/soap", session_factory=lambda: session),
+                mode="cache_first",
+            )
+
+            metadata = provider.get_tables(["EDIDC"])
+
+            self.assertEqual(metadata["tables"]["EDIDC"], cached_table("EDIDC"))
+            self.assertEqual(session.calls, [])
+            self.assertEqual((cache_dir / "EDIDC.json").read_text(encoding="utf-8"), original)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_legacy_single_cache_file_is_reused_without_rewriting(self):
+        temp_path = test_temp_path()
+        try:
+            temp_path.mkdir()
+            cache_dir = temp_path / "ddic"
+            legacy_path = temp_path / "ddic_metadata.json"
+            original = json.dumps({"tables": {"EDIDC": cached_table("EDIDC")}}, indent=2)
+            legacy_path.write_text(original, encoding="utf-8")
+            session = RecordingSession(sample_response())
+            provider = ModeAwareDdicMetadataProvider(
+                LocalDdicMetadataCache(cache_dir, legacy_path=legacy_path),
+                SapDdicMetadataProvider("https://sap.example.test/soap", session_factory=lambda: session),
+                mode="cache_first",
+            )
+
+            provider.get_tables(["EDIDC", "MARA"])
+
+            self.assertEqual(legacy_path.read_text(encoding="utf-8"), original)
+            self.assertFalse((cache_dir / "EDIDC.json").exists())
+            self.assertTrue((cache_dir / "MARA.json").exists())
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def test_configured_provider_defaults_to_noop(self):
         provider = get_configured_ddic_metadata_provider({"SAP_DDIC_METADATA_ENABLED": False})
 
@@ -154,17 +308,21 @@ class DdicMetadataProviderTest(unittest.TestCase):
                 "SAP_API_VERIFY": False,
                 "SAP_API_CLIENT": "200",
                 "SAP_DDIC_CACHE_MAX_TABLES": 3,
+                "SAP_DDIC_CACHE_DIR": "cache/ddic",
+                "SAP_METADATA_CACHE_MODE": "sap_first",
             }
         )
 
-        self.assertIsInstance(provider, SapDdicMetadataProvider)
-        self.assertEqual(provider.url, "https://sap.example.test/soap")
-        self.assertEqual(provider.user, "user")
-        self.assertEqual(provider.password, "pass")
-        self.assertEqual(provider.timeout, 5)
-        self.assertFalse(provider.verify)
-        self.assertEqual(provider.sap_client, "200")
-        self.assertEqual(provider.cache_max_tables, 3)
+        self.assertIsInstance(provider, ModeAwareDdicMetadataProvider)
+        self.assertEqual(provider.mode, "sap_first")
+        self.assertIsInstance(provider.sap_provider, SapDdicMetadataProvider)
+        self.assertEqual(provider.sap_provider.url, "https://sap.example.test/soap")
+        self.assertEqual(provider.sap_provider.user, "user")
+        self.assertEqual(provider.sap_provider.password, "pass")
+        self.assertEqual(provider.sap_provider.timeout, 5)
+        self.assertFalse(provider.sap_provider.verify)
+        self.assertEqual(provider.sap_provider.sap_client, "200")
+        self.assertEqual(provider.sap_provider.cache_max_tables, 3)
 
 
 class RecordingSession:
@@ -247,6 +405,35 @@ def empty_response():
   </soapenv:Body>
 </soapenv:Envelope>
 """
+
+
+def cached_table(name):
+    return {
+        "name": name,
+        "field_count": 1,
+        "fields": {
+            "DOCNUM": {
+                "name": "DOCNUM",
+                "rollname": "EDI_DOCNUM",
+                "datatype": "NUMC",
+                "length": 16,
+                "decimals": 0,
+                "description": "Cached IDoc number",
+                "key": True,
+            }
+        },
+        "field_order": ["DOCNUM"],
+    }
+
+
+def test_temp_path():
+    return Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+
+
+def write_cached_ddic(cache_dir, name):
+    path = Path(cache_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / f"{name}.json").write_text(json.dumps(cached_table(name), indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

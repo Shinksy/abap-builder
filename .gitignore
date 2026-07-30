@@ -2,6 +2,7 @@
 __pycache__/
 jobs/
 uploads/
+cache/
 job_ctx_regression/
 *.py[cod]
 *$py.class

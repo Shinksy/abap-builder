@@ -37,6 +37,11 @@ from services.callable_signature_provider import (
     NoOpCallableSignatureProvider,
     resolve_callable_metadata,
 )
+from services.ddic_metadata_provider import (
+    DdicMetadataError,
+    LocalDdicMetadataCache,
+    ModeAwareDdicMetadataProvider,
+)
 from services.progress import create_job, get_progress, update_progress
 
 
@@ -2415,6 +2420,92 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
+    def test_application_continues_when_sap_unavailable_and_metadata_is_cached(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            uploads_folder = temp_path / "uploads"
+            jobs_folder = temp_path / "jobs"
+            prompt_path = temp_path / "create_abap.txt"
+            input_path = uploads_folder / "job" / "request.txt"
+            input_path.parent.mkdir(parents=True)
+            input_path.write_text(
+                "\n".join(
+                    [
+                        "Create a report using SAP table PA0000.",
+                        "# START PROCESSING RULES",
+                        "Move PA0000-PERNR to the output row.",
+                        "# END PROCESSING RULES",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            prompt_path.write_text("Generate ABAP.\n{{SPECIFICATION}}", encoding="utf-8")
+            cache_dir = temp_path / "cache" / "ddic"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "PA0000.json").write_text(
+                json.dumps(ddic_table("PA0000", ["PERNR"])),
+                encoding="utf-8",
+            )
+            provider = ModeAwareDdicMetadataProvider(
+                LocalDdicMetadataCache(cache_dir),
+                sap_provider=FailingDdicProvider(),
+                mode="sap_first",
+            )
+            job_id = create_job(jobs_folder)
+
+            def generator(prompt_text, _source_text, response_format=None):
+                if "Extract declaration requirements" in prompt_text:
+                    return {
+                        "text": json.dumps(
+                            {
+                                "report_name": "ztest",
+                                "output_structure_fields": [
+                                    {"name": "PERNR", "type_or_like": "TYPE PA0000-PERNR"}
+                                ],
+                            }
+                        ),
+                        "model": "test-model",
+                        "usage": None,
+                    }
+                if "Extract business-processing logic" in prompt_text:
+                    return {
+                        "text": json.dumps(
+                            {
+                                "processing_steps": [
+                                    {
+                                        "step": 1,
+                                        "operation": "MOVE",
+                                        "source": "PA0000-PERNR",
+                                        "target": "W_OUTPUT-PERNR",
+                                    }
+                                ]
+                            }
+                        ),
+                        "model": "test-model",
+                        "usage": None,
+                    }
+                return {"text": "REPORT ztest.", "model": "test-model", "usage": None}
+
+            with patch("services.create_abap.generate_abap", side_effect=generator):
+                run_create_abap(
+                    job_id,
+                    input_path,
+                    jobs_folder,
+                    prompt_path,
+                    ddic_metadata_provider=provider,
+                    processing_plan_review_required=True,
+                )
+
+            progress = get_progress(jobs_folder, job_id)
+            self.assertEqual(progress["status"], "Awaiting Review")
+            saved_metadata = json.loads((jobs_folder / job_id / "ddic_metadata.json").read_text(encoding="utf-8"))
+            self.assertIn("PA0000", saved_metadata["tables"])
+            diagnostics = json.loads((jobs_folder / job_id / PROCESSING_PLAN_DIAGNOSTICS_ARTIFACT).read_text(encoding="utf-8"))
+            self.assertEqual([], diagnostics["processing_contract_diagnostics"]["validation_errors"])
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def test_dependency_analysis_drives_pre_generation_provider_lookups(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
         temp_path.mkdir()
@@ -3748,6 +3839,11 @@ class StaticDdicProvider:
         self.requests.append(names)
         tables = self.metadata.get("tables", {})
         return {"tables": {name: tables.get(name, ddic_table(name, [])) for name in names}}
+
+
+class FailingDdicProvider:
+    def get_tables(self, table_names, progress_callback=None):
+        raise DdicMetadataError("SAP unavailable")
 
 
 class ProgressDdicProvider(StaticDdicProvider):
