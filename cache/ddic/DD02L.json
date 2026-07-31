@@ -1,0 +1,318 @@
+{
+  "name": "DD02L",
+  "field_count": 31,
+  "fields": {
+    "TABNAME": {
+      "name": "TABNAME",
+      "rollname": "TABNAME",
+      "datatype": "CHAR",
+      "length": 30,
+      "decimals": 0,
+      "description": "Table Name",
+      "key": true
+    },
+    "AS4LOCAL": {
+      "name": "AS4LOCAL",
+      "rollname": "AS4LOCAL",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Activation Status",
+      "key": true
+    },
+    "AS4VERS": {
+      "name": "AS4VERS",
+      "rollname": "AS4VERS",
+      "datatype": "NUMC",
+      "length": 4,
+      "decimals": 0,
+      "description": "Version",
+      "key": true
+    },
+    "TABCLASS": {
+      "name": "TABCLASS",
+      "rollname": "TABCLASS",
+      "datatype": "CHAR",
+      "length": 8,
+      "decimals": 0,
+      "description": "Table category",
+      "key": false
+    },
+    "SQLTAB": {
+      "name": "SQLTAB",
+      "rollname": "SQLAPPDTAB",
+      "datatype": "CHAR",
+      "length": 30,
+      "decimals": 0,
+      "description": "Pool/cluster name",
+      "key": false
+    },
+    "DATMIN": {
+      "name": "DATMIN",
+      "rollname": "DATMIN",
+      "datatype": "NUMC",
+      "length": 10,
+      "decimals": 0,
+      "description": "Min.no. of entries",
+      "key": false
+    },
+    "DATMAX": {
+      "name": "DATMAX",
+      "rollname": "DATMAX",
+      "datatype": "NUMC",
+      "length": 10,
+      "decimals": 0,
+      "description": "Max.no. of entries",
+      "key": false
+    },
+    "DATAVG": {
+      "name": "DATAVG",
+      "rollname": "DATAVG",
+      "datatype": "NUMC",
+      "length": 10,
+      "decimals": 0,
+      "description": "Av. no. of entries",
+      "key": false
+    },
+    "CLIDEP": {
+      "name": "CLIDEP",
+      "rollname": "CLIDEP",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Client-specific",
+      "key": false
+    },
+    "BUFFERED": {
+      "name": "BUFFERED",
+      "rollname": "BUFFERED",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Buff. allowed",
+      "key": false
+    },
+    "COMPRFLAG": {
+      "name": "COMPRFLAG",
+      "rollname": "COMPREX",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Compression",
+      "key": false
+    },
+    "LANGDEP": {
+      "name": "LANGDEP",
+      "rollname": "LANGDEP",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Language-dep.",
+      "key": false
+    },
+    "ACTFLAG": {
+      "name": "ACTFLAG",
+      "rollname": "ACTFLAG",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Activation flag",
+      "key": false
+    },
+    "APPLCLASS": {
+      "name": "APPLCLASS",
+      "rollname": "APPLCLASS",
+      "datatype": "CHAR",
+      "length": 4,
+      "decimals": 0,
+      "description": "Application Class",
+      "key": false
+    },
+    "AUTHCLASS": {
+      "name": "AUTHCLASS",
+      "rollname": "AUTHCLASS_",
+      "datatype": "NUMC",
+      "length": 2,
+      "decimals": 0,
+      "description": "Activation type",
+      "key": false
+    },
+    "AS4USER": {
+      "name": "AS4USER",
+      "rollname": "AS4USER",
+      "datatype": "CHAR",
+      "length": 12,
+      "decimals": 0,
+      "description": "Last Changed By",
+      "key": false
+    },
+    "AS4DATE": {
+      "name": "AS4DATE",
+      "rollname": "AS4DATE",
+      "datatype": "DATS",
+      "length": 8,
+      "decimals": 0,
+      "description": "Date",
+      "key": false
+    },
+    "AS4TIME": {
+      "name": "AS4TIME",
+      "rollname": "AS4TIME",
+      "datatype": "TIMS",
+      "length": 6,
+      "decimals": 0,
+      "description": "Time",
+      "key": false
+    },
+    "MASTERLANG": {
+      "name": "MASTERLANG",
+      "rollname": "MASTERLANG",
+      "datatype": "LANG",
+      "length": 1,
+      "decimals": 0,
+      "description": "Original Language",
+      "key": false
+    },
+    "MAINFLAG": {
+      "name": "MAINFLAG",
+      "rollname": "MAINTFLAG",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Table Maintenance",
+      "key": false
+    },
+    "CONTFLAG": {
+      "name": "CONTFLAG",
+      "rollname": "CONTFLAG",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Delivery class",
+      "key": false
+    },
+    "RESERVETAB": {
+      "name": "RESERVETAB",
+      "rollname": "RESERVETAB",
+      "datatype": "CHAR",
+      "length": 4,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "GLOBALFLAG": {
+      "name": "GLOBALFLAG",
+      "rollname": "GLOBALFLAG",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Object not global",
+      "key": false
+    },
+    "PROZPUFF": {
+      "name": "PROZPUFF",
+      "rollname": "PROZPUFF",
+      "datatype": "NUMC",
+      "length": 3,
+      "decimals": 0,
+      "description": "Buffer percentage",
+      "key": false
+    },
+    "VIEWCLASS": {
+      "name": "VIEWCLASS",
+      "rollname": "VIEWCLASS",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "View Type",
+      "key": false
+    },
+    "VIEWGRANT": {
+      "name": "VIEWGRANT",
+      "rollname": "VIEWGRANT",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Maint. status",
+      "key": false
+    },
+    "MULTIPLEX": {
+      "name": "MULTIPLEX",
+      "rollname": "MULTIPLEX",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Multiplex flag",
+      "key": false
+    },
+    "SHLPEXI": {
+      "name": "SHLPEXI",
+      "rollname": "SHLPEXI",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "PROXYTYPE": {
+      "name": "PROXYTYPE",
+      "rollname": "DDPROXYTY",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "Proxy Usage",
+      "key": false
+    },
+    "EXCLASS": {
+      "name": "EXCLASS",
+      "rollname": "DDRANKING",
+      "datatype": "NUMC",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    },
+    "WRONGCL": {
+      "name": "WRONGCL",
+      "rollname": "DDWRONGCL",
+      "datatype": "CHAR",
+      "length": 1,
+      "decimals": 0,
+      "description": "",
+      "key": false
+    }
+  },
+  "field_order": [
+    "TABNAME",
+    "AS4LOCAL",
+    "AS4VERS",
+    "TABCLASS",
+    "SQLTAB",
+    "DATMIN",
+    "DATMAX",
+    "DATAVG",
+    "CLIDEP",
+    "BUFFERED",
+    "COMPRFLAG",
+    "LANGDEP",
+    "ACTFLAG",
+    "APPLCLASS",
+    "AUTHCLASS",
+    "AS4USER",
+    "AS4DATE",
+    "AS4TIME",
+    "MASTERLANG",
+    "MAINFLAG",
+    "CONTFLAG",
+    "RESERVETAB",
+    "GLOBALFLAG",
+    "PROZPUFF",
+    "VIEWCLASS",
+    "VIEWGRANT",
+    "MULTIPLEX",
+    "SHLPEXI",
+    "PROXYTYPE",
+    "EXCLASS",
+    "WRONGCL"
+  ]
+}

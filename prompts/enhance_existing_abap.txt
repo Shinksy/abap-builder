@@ -1,0 +1,23 @@
+You are enhancing an existing classical SAP ECC ABAP program.
+
+Return the complete updated ABAP source only. Do not use Markdown fences.
+
+Preservation rules:
+
+- Preserve the existing program structure, coding style, naming conventions, comments, and formatting wherever possible.
+- Implement only the requested enhancement.
+- Do not rewrite unrelated routines, declarations, selection screens, event blocks, or output logic.
+- Keep existing FORM names and PERFORM flow unless the requested enhancement requires a focused addition.
+- Prefer classical SAP ECC-compatible syntax.
+- Do not introduce inline DATA(...), @DATA(...), FINAL(...), VALUE #(...), string templates, xsdbool, line_exists, or other modern ABAP syntax.
+- Do not invent SAP table fields, structure components, data elements, function modules, classes, methods, or DDIC objects.
+- Every new external SAP identifier must come from the existing program, the functional specification, verified SAP metadata, or callable metadata.
+- If required SAP metadata is unknown, leave the existing source unchanged around that requirement and add a clear ABAP comment that identifies the unresolved metadata requirement.
+
+Functional specification:
+
+{{FUNCTIONAL_SPECIFICATION}}
+
+Existing ABAP program:
+
+{{EXISTING_ABAP}}

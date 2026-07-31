@@ -11,10 +11,11 @@
       {% if value is number %}{{ "%.2f"|format(value) }}s{% else %}Unavailable{% endif %}
     {%- endmacro %}
     {% set section_durations = metrics.get("section_durations", {}) %}
+    {% set is_enhancement = metrics.get("job_mode") == "enhance_existing_abap" %}
     <main class="page">
       <section class="panel wide">
         <div class="result-header">
-          <h1>Generated ABAP</h1>
+          <h1>{% if is_enhancement %}Enhanced ABAP{% else %}Generated ABAP{% endif %}</h1>
           <a class="button-link" href="{{ url_for('home') }}">New</a>
         </div>
         <p class="job-id">Job ID: {{ job_id }}</p>
@@ -24,6 +25,8 @@
             <dl>
               <dt>Model</dt>
               <dd>{{ metrics.model or "Unavailable" }}</dd>
+              <dt>Mode</dt>
+              <dd>{% if is_enhancement %}Enhance Existing ABAP{% else %}Generate New Program{% endif %}</dd>
               <dt>Duration</dt>
               <dd>{% if metrics.duration_seconds is number %}{{ "%.2f"|format(metrics.duration_seconds) }}s{% else %}Unavailable{% endif %}</dd>
             </dl>
@@ -57,6 +60,12 @@
               <dd>{% if metrics.prompt_characters is number %}{{ "{:,}".format(metrics.prompt_characters) }}{% else %}Unavailable{% endif %}</dd>
               <dt>Specification characters</dt>
               <dd>{% if metrics.specification_characters is number %}{{ "{:,}".format(metrics.specification_characters) }}{% else %}Unavailable{% endif %}</dd>
+              {% if is_enhancement %}
+                <dt>Existing ABAP characters</dt>
+                <dd>{% if metrics.source_abap_characters is number %}{{ "{:,}".format(metrics.source_abap_characters) }}{% else %}Unavailable{% endif %}</dd>
+                <dt>Enhancement characters</dt>
+                <dd>{% if metrics.enhancement_specification_characters is number %}{{ "{:,}".format(metrics.enhancement_specification_characters) }}{% else %}Unavailable{% endif %}</dd>
+              {% endif %}
               <dt>ABAP characters</dt>
               <dd>{% if metrics.generated_abap_characters is number %}{{ "{:,}".format(metrics.generated_abap_characters) }}{% else %}Unavailable{% endif %}</dd>
               <dt>ABAP lines</dt>
@@ -340,7 +349,7 @@
           {% endif %}
         </details>
         <details class="code-panel">
-          <summary>Generated ABAP</summary>
+          <summary>{% if is_enhancement %}Enhanced ABAP{% else %}Generated ABAP{% endif %}</summary>
           {% set generated_abap_duration = section_durations.get("generated_abap") %}
           {% if generated_abap_duration is not number %}
             {% set generated_abap_duration = metrics.duration_seconds %}

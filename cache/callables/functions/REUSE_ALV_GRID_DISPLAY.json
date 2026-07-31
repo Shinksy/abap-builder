@@ -1,0 +1,292 @@
+{
+  "name": "REUSE_ALV_GRID_DISPLAY",
+  "parameters": {
+    "ES_EXIT_CAUSED_BY_USER": {
+      "direction": "EXPORTING",
+      "rawDirection": "E",
+      "abap_type": "SLIS_EXIT_BY_USER",
+      "field": "",
+      "required": true
+    },
+    "E_EXIT_CAUSED_BY_CALLER": {
+      "direction": "EXPORTING",
+      "rawDirection": "E",
+      "abap_type": "",
+      "field": "",
+      "required": true
+    },
+    "IR_SALV_FULLSCREEN_ADAPTER": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "REF TO CL_SALV_FULLSCREEN_ADAP",
+      "field": "",
+      "required": false
+    },
+    "IS_LAYOUT": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_LAYOUT_ALV",
+      "field": "",
+      "required": false
+    },
+    "IS_PRINT": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_PRINT_ALV",
+      "field": "",
+      "required": false
+    },
+    "IS_REPREP_ID": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_REPREP_ID",
+      "field": "",
+      "required": false
+    },
+    "IS_SEL_HIDE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_SEL_HIDE_ALV",
+      "field": "",
+      "required": false
+    },
+    "IS_VARIANT": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "DISVARIANT",
+      "field": "",
+      "required": false
+    },
+    "IT_ADD_FIELDCAT": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_T_ADD_FIELDCAT",
+      "field": "",
+      "required": false
+    },
+    "IT_ALV_GRAPHICS": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "DTC_T_TC",
+      "field": "",
+      "required": false
+    },
+    "IT_EVENTS": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_T_EVENT",
+      "field": "",
+      "required": false
+    },
+    "IT_EVENT_EXIT": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_T_EVENT_EXIT",
+      "field": "",
+      "required": false
+    },
+    "IT_EXCEPT_QINFO": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_T_QINFO_ALV",
+      "field": "",
+      "required": false
+    },
+    "IT_EXCLUDING": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_T_EXTAB",
+      "field": "",
+      "required": false
+    },
+    "IT_FIELDCAT": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_T_FIELDCAT_ALV",
+      "field": "",
+      "required": false
+    },
+    "IT_FILTER": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_T_FILTER_ALV",
+      "field": "",
+      "required": false
+    },
+    "IT_HYPERLINK": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "LVC_T_HYPE",
+      "field": "",
+      "required": false
+    },
+    "IT_SORT": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_T_SORTINFO_ALV",
+      "field": "",
+      "required": false
+    },
+    "IT_SPECIAL_GROUPS": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_T_SP_GROUP_ALV",
+      "field": "",
+      "required": false
+    },
+    "I_BACKGROUND_ID": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SDYDO_KEY",
+      "field": "",
+      "required": false
+    },
+    "I_BUFFER_ACTIVE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": false
+    },
+    "I_BYPASSING_BUFFER": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "CHAR01",
+      "field": "",
+      "required": false
+    },
+    "I_CALLBACK_HTML_END_OF_LIST": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_FORMNAME",
+      "field": "",
+      "required": false
+    },
+    "I_CALLBACK_HTML_TOP_OF_PAGE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_FORMNAME",
+      "field": "",
+      "required": false
+    },
+    "I_CALLBACK_PF_STATUS_SET": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_FORMNAME",
+      "field": "",
+      "required": false
+    },
+    "I_CALLBACK_PROGRAM": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SYST",
+      "field": "REPID",
+      "required": false
+    },
+    "I_CALLBACK_TOP_OF_PAGE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_FORMNAME",
+      "field": "",
+      "required": false
+    },
+    "I_CALLBACK_USER_COMMAND": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "SLIS_FORMNAME",
+      "field": "",
+      "required": false
+    },
+    "I_DEFAULT": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": false
+    },
+    "I_GRID_SETTINGS": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "LVC_S_GLAY",
+      "field": "",
+      "required": false
+    },
+    "I_GRID_TITLE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "LVC_TITLE",
+      "field": "",
+      "required": false
+    },
+    "I_HTML_HEIGHT_END": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "I",
+      "field": "",
+      "required": false
+    },
+    "I_HTML_HEIGHT_TOP": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "I",
+      "field": "",
+      "required": false
+    },
+    "I_INTERFACE_CHECK": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": false
+    },
+    "I_SAVE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": false
+    },
+    "I_SCREEN_END_COLUMN": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": false
+    },
+    "I_SCREEN_END_LINE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": false
+    },
+    "I_SCREEN_START_COLUMN": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": false
+    },
+    "I_SCREEN_START_LINE": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "",
+      "field": "",
+      "required": false
+    },
+    "I_STRUCTURE_NAME": {
+      "direction": "IMPORTING",
+      "rawDirection": "I",
+      "abap_type": "DD02L",
+      "field": "TABNAME",
+      "required": false
+    },
+    "T_OUTTAB": {
+      "direction": "TABLES",
+      "rawDirection": "T",
+      "abap_type": "",
+      "field": "",
+      "required": true
+    }
+  }
+}

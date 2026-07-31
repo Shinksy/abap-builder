@@ -23,52 +23,128 @@
           <p class="success">{{ metadata_success }}</p>
         {% endif %}
 
-        <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
-          <label for="abap_file">Upload Specification</label>
-          <input id="abap_file" name="abap_file" type="file" accept=".abap,.txt" required>
-          <div class="syntax-check-row">
-            <label class="checkbox-option">
-              <input name="run_sap_syntax_check" type="checkbox" value="1">
-              Run SAP Syntax
-            </label>
-            <input id="sap_syntax_check_attempts" class="syntax-attempts-input" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2" aria-label="SAP syntax API calls">
-          </div>
-          <button type="submit">Upload</button>
-        </form>
+        <div class="tab-view">
+          <input class="tab-input" id="tab-new" name="home_tab" type="radio" {% if active_tab != "enhance" and active_tab != "metadata" %}checked{% endif %}>
+          <label class="tab-label" for="tab-new">New Program</label>
+          <input class="tab-input" id="tab-enhance" name="home_tab" type="radio" {% if active_tab == "enhance" %}checked{% endif %}>
+          <label class="tab-label" for="tab-enhance">Enhance Program</label>
+          <input class="tab-input" id="tab-metadata" name="home_tab" type="radio" {% if active_tab == "metadata" %}checked{% endif %}>
+          <label class="tab-label" for="tab-metadata">Upload Meta Cache</label>
 
-        <section class="metadata-upload">
-          <h2>Upload Metadata Cache</h2>
-          {% if metadata_upload_confirm %}
-            <div class="status-callout warning-callout" role="alert">
-              {{ metadata_upload_confirm.destination_display_path }} already exists for {{ metadata_upload_confirm.object_name }}.
-            </div>
-            <form action="{{ url_for('upload_metadata_cache_file') }}" method="post">
-              <input type="hidden" name="metadata_type" value="{{ metadata_upload_confirm.metadata_type }}">
-              <input type="hidden" name="metadata_payload" value="{{ metadata_payload }}">
-              <input type="hidden" name="confirm_overwrite" value="1">
-              <div class="button-row">
-                <button type="submit">Overwrite</button>
-                <a class="button-link secondary-link" href="{{ url_for('home') }}">Cancel</a>
+          <section class="tab-panel tab-panel-new">
+            <h2>Generate New Program</h2>
+            <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+              <label for="abap_file">Upload Specification</label>
+              <input id="abap_file" name="abap_file" type="file" accept=".abap,.txt" required>
+              <div class="syntax-check-row">
+                <label class="checkbox-option">
+                  <input name="run_sap_syntax_check" type="checkbox" value="1">
+                  Run SAP Syntax
+                </label>
+                <input id="sap_syntax_check_attempts" class="syntax-attempts-input" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2" aria-label="SAP syntax API calls">
               </div>
+              <button type="submit">Generate</button>
             </form>
-          {% else %}
-            <form action="{{ url_for('upload_metadata_cache_file') }}" method="post" enctype="multipart/form-data">
-              <fieldset>
-                <legend>Metadata Type</legend>
-                {% for value, label in metadata_type_labels.items() %}
-                  <label class="radio-option">
-                    <input name="metadata_type" type="radio" value="{{ value }}" required>
-                    {{ label }}
-                  </label>
-                {% endfor %}
-              </fieldset>
-              <label for="metadata_file">Metadata JSON</label>
-              <input id="metadata_file" name="metadata_file" type="file" accept=".json,application/json" required>
-              <button type="submit">Upload Metadata</button>
+          </section>
+
+          <section class="tab-panel tab-panel-enhance">
+            <h2>Enhance Existing ABAP</h2>
+            <form action="{{ url_for('enhance_file') }}" method="post" enctype="multipart/form-data">
+              <label for="existing_abap_file">Upload Existing ABAP</label>
+              <input id="existing_abap_file" name="existing_abap_file" type="file" accept=".abap,.txt" required>
+              <label for="enhancement_specification">Functional Specification</label>
+              <textarea id="enhancement_specification" name="enhancement_specification" rows="8" required></textarea>
+              <div class="syntax-check-row">
+                <label class="checkbox-option">
+                  <input name="run_sap_syntax_check" type="checkbox" value="1">
+                  Run SAP Syntax
+                </label>
+                <input id="enhance_sap_syntax_check_attempts" class="syntax-attempts-input" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2" aria-label="SAP syntax API calls">
+              </div>
+              <button type="submit">Enhance</button>
             </form>
-          {% endif %}
-        </section>
+          </section>
+
+          <section class="tab-panel tab-panel-metadata">
+            <h2>Upload Metadata Cache</h2>
+            {% if metadata_export_code %}
+              <details class="metadata-code-panel">
+                <summary>ABAP Metadata Export Utility</summary>
+                <div class="code-toolbar">
+                  <button id="copy-metadata-export" type="button">Copy Code</button>
+                  <span id="metadata-export-copy-message" class="copy-message" aria-live="polite"></span>
+                </div>
+                <pre class="generated-abap-block metadata-export-block"><code id="metadata-export-code">{{ metadata_export_code }}</code></pre>
+              </details>
+            {% endif %}
+            {% if metadata_upload_confirm %}
+              <div class="status-callout warning-callout" role="alert">
+                {{ metadata_upload_confirm.destination_display_path }} already exists for {{ metadata_upload_confirm.object_name }}.
+              </div>
+              <form action="{{ url_for('upload_metadata_cache_file') }}" method="post">
+                <input type="hidden" name="metadata_type" value="{{ metadata_upload_confirm.metadata_type }}">
+                <input type="hidden" name="metadata_payload" value="{{ metadata_payload }}">
+                <input type="hidden" name="confirm_overwrite" value="1">
+                <div class="button-row">
+                  <button type="submit">Overwrite</button>
+                  <a class="button-link secondary-link" href="{{ url_for('home') }}">Cancel</a>
+                </div>
+              </form>
+            {% else %}
+              <form action="{{ url_for('upload_metadata_cache_file') }}" method="post" enctype="multipart/form-data">
+                <fieldset>
+                  <legend>Metadata Type</legend>
+                  {% for value, label in metadata_type_labels.items() %}
+                    <label class="radio-option">
+                      <input name="metadata_type" type="radio" value="{{ value }}" required>
+                      {{ label }}
+                    </label>
+                  {% endfor %}
+                </fieldset>
+                <label for="metadata_file">Metadata JSON</label>
+                <input id="metadata_file" name="metadata_file" type="file" accept=".json,application/json" required>
+                <button type="submit">Upload Metadata</button>
+              </form>
+            {% endif %}
+          </section>
+        </div>
       </section>
     </main>
+    <script>
+      const metadataExportCopyButton = document.getElementById("copy-metadata-export");
+      const metadataExportCopyMessage = document.getElementById("metadata-export-copy-message");
+      const metadataExportCode = document.getElementById("metadata-export-code");
+
+      async function copyHomeText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return;
+        }
+
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.setAttribute("readonly", "");
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textArea);
+      }
+
+      if (metadataExportCopyButton && metadataExportCopyMessage && metadataExportCode) {
+        metadataExportCopyButton.addEventListener("click", async () => {
+          try {
+            await copyHomeText(metadataExportCode.innerText);
+            metadataExportCopyMessage.textContent = "Copied to clipboard.";
+            setTimeout(() => {
+              metadataExportCopyMessage.textContent = "";
+            }, 2500);
+          } catch (error) {
+            metadataExportCopyMessage.textContent = "Copy failed.";
+          }
+        });
+      }
+    </script>
   </body>
 </html>

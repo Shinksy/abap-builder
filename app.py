@@ -36,6 +36,7 @@ from services.create_abap import (
     save_post_generation_diagnostics,
     start_create_abap_job,
 )
+from services.enhance_abap import start_enhance_abap_job
 
 
 def create_app(config_overrides=None):
@@ -62,9 +63,18 @@ def create_app(config_overrides=None):
     upload_folder.mkdir(parents=True, exist_ok=True)
     jobs_folder.mkdir(parents=True, exist_ok=True)
 
+    def home_template_context(active_tab="new", **kwargs):
+        context = {
+            "metadata_type_labels": METADATA_TYPE_LABELS,
+            "active_tab": active_tab,
+            "metadata_export_code": load_metadata_export_template(),
+        }
+        context.update(kwargs)
+        return context
+
     @app.get("/")
     def home():
-        return render_template("home.html", metadata_type_labels=METADATA_TYPE_LABELS)
+        return render_template("home.html", **home_template_context())
 
     @app.post("/metadata-cache/upload")
     def upload_metadata_cache_file():
@@ -78,25 +88,28 @@ def create_app(config_overrides=None):
         except MetadataCacheUploadError as exc:
             return render_template(
                 "home.html",
-                metadata_type_labels=METADATA_TYPE_LABELS,
-                metadata_error=str(exc),
+                **home_template_context(active_tab="metadata", metadata_error=str(exc)),
             ), 400
         destination_path = Path(prepared_upload["destination_path"])
         prepared_upload["destination_display_path"] = display_path(destination_path)
         if destination_path.exists() and request.form.get("confirm_overwrite") != "1":
             return render_template(
                 "home.html",
-                metadata_type_labels=METADATA_TYPE_LABELS,
-                metadata_upload_confirm=prepared_upload,
-                metadata_payload=json.dumps(prepared_upload["metadata"]),
+                **home_template_context(
+                    active_tab="metadata",
+                    metadata_upload_confirm=prepared_upload,
+                    metadata_payload=json.dumps(prepared_upload["metadata"]),
+                ),
             ), 409
         save_metadata_cache_upload(prepared_upload)
         return render_template(
             "home.html",
-            metadata_type_labels=METADATA_TYPE_LABELS,
-            metadata_success=(
-                f"Uploaded {prepared_upload['metadata_type_label']} metadata for "
-                f"{prepared_upload['object_name']} to {prepared_upload['destination_display_path']}."
+            **home_template_context(
+                active_tab="metadata",
+                metadata_success=(
+                    f"Uploaded {prepared_upload['metadata_type_label']} metadata for "
+                    f"{prepared_upload['object_name']} to {prepared_upload['destination_display_path']}."
+                ),
             ),
         )
 
@@ -104,7 +117,10 @@ def create_app(config_overrides=None):
     def upload_file():
         uploaded_file = request.files.get("abap_file")
         if not uploaded_file or not uploaded_file.filename:
-            return render_template("home.html", error="Select an ABAP file to upload.", metadata_type_labels=METADATA_TYPE_LABELS), 400
+            return render_template(
+                "home.html",
+                **home_template_context(active_tab="new", error="Select an ABAP file to upload."),
+            ), 400
 
         job_id = create_job(jobs_folder)
         run_sap_syntax_check = request.form.get("run_sap_syntax_check") == "1"
@@ -127,6 +143,52 @@ def create_app(config_overrides=None):
             input_path=input_path,
             jobs_folder=jobs_folder,
             prompt_path=Path(app.config["CREATE_ABAP_PROMPT"]),
+            signature_provider=app.config.get("CALLABLE_SIGNATURE_PROVIDER"),
+            ddic_metadata_provider=app.config.get("DDIC_METADATA_PROVIDER"),
+            sap_syntax_checker=app.config.get("SAP_SYNTAX_CHECKER"),
+            code_review_repairer=app.config.get("CODE_REVIEW_REPAIRER"),
+        )
+
+        return redirect(url_for("progress", job_id=job_id))
+
+    @app.post("/enhance")
+    def enhance_file():
+        uploaded_file = request.files.get("existing_abap_file")
+        enhancement_specification = request.form.get("enhancement_specification", "").strip()
+        if not uploaded_file or not uploaded_file.filename:
+            return render_template(
+                "home.html",
+                **home_template_context(active_tab="enhance", error="Select an existing ABAP program to enhance."),
+            ), 400
+        if not enhancement_specification:
+            return render_template(
+                "home.html",
+                **home_template_context(active_tab="enhance", error="Enter the enhancement specification."),
+            ), 400
+
+        job_id = create_job(jobs_folder)
+        run_sap_syntax_check = request.form.get("run_sap_syntax_check") == "1"
+        save_job_options(
+            jobs_folder,
+            job_id,
+            {
+                "run_sap_syntax_check": run_sap_syntax_check,
+                "sap_syntax_check_attempts": request.form.get("sap_syntax_check_attempts"),
+            },
+        )
+        job_upload_folder = upload_folder / job_id
+        job_upload_folder.mkdir(parents=True, exist_ok=True)
+        source_path = job_upload_folder / secure_filename(uploaded_file.filename)
+        specification_path = job_upload_folder / "enhancement_specification.txt"
+        uploaded_file.save(source_path)
+        specification_path.write_text(enhancement_specification, encoding="utf-8")
+
+        start_enhance_abap_job(
+            job_id=job_id,
+            source_path=source_path,
+            specification_path=specification_path,
+            jobs_folder=jobs_folder,
+            prompt_path=Path(app.config["ENHANCE_ABAP_PROMPT"]),
             signature_provider=app.config.get("CALLABLE_SIGNATURE_PROVIDER"),
             ddic_metadata_provider=app.config.get("DDIC_METADATA_PROVIDER"),
             sap_syntax_checker=app.config.get("SAP_SYNTAX_CHECKER"),
@@ -303,6 +365,14 @@ def display_path(path):
         return str(Path(path).resolve(strict=False).relative_to(Config.BASE_DIR))
     except ValueError:
         return str(path)
+
+
+def load_metadata_export_template():
+    path = Config.BASE_DIR / "templates" / "zabap_builder_metadata_export.abap"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def log_ddic_metadata_startup(app):

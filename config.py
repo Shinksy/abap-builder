@@ -58,6 +58,10 @@ class Config:
         "CREATE_ABAP_PROMPT",
         str(BASE_DIR / "prompts" / "create_abap.txt"),
     )
+    ENHANCE_ABAP_PROMPT = os.environ.get(
+        "ENHANCE_ABAP_PROMPT",
+        str(BASE_DIR / "prompts" / "enhance_existing_abap.txt"),
+    )
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
     OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
     SAP_DEPENDENCY_ANALYSIS_ENABLED = env_bool("SAP_DEPENDENCY_ANALYSIS_ENABLED", default=False)
