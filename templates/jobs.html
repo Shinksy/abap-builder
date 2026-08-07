@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Jobs - SAP AI ABAP Generator</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
   </head>
   <body>
     <nav class="app-nav" aria-label="Main navigation">
@@ -21,6 +21,16 @@
         {% if jobs %}
           <div class="jobs-table-wrap">
             <table class="jobs-table">
+              <colgroup>
+                <col class="jobs-date-col">
+                <col class="jobs-file-col">
+                <col class="jobs-mode-col">
+                <col class="jobs-preset-col">
+                <col class="jobs-status-col">
+                <col class="jobs-duration-col">
+                <col class="jobs-cost-col">
+                <col class="jobs-actions-col">
+              </colgroup>
               <thead>
                 <tr>
                   <th>Date/time</th>

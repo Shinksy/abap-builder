@@ -49,7 +49,7 @@ body {
 }
 
 .jobs-panel {
-  width: min(100%, 1320px);
+  width: min(100%, 1380px);
 }
 
 h1 {
@@ -353,7 +353,7 @@ summary {
 
 .metrics-table,
 .jobs-table {
-  min-width: 1060px;
+  min-width: 1180px;
   width: 100%;
   border-collapse: collapse;
   margin-top: 10px;
@@ -381,9 +381,57 @@ summary {
   overflow-x: auto;
 }
 
+.jobs-date-col {
+  width: 16%;
+}
+
+.jobs-file-col {
+  width: 28%;
+}
+
+.jobs-mode-col {
+  width: 15%;
+}
+
+.jobs-preset-col {
+  width: 14%;
+}
+
+.jobs-status-col {
+  width: 9%;
+}
+
+.jobs-duration-col {
+  width: 8%;
+}
+
+.jobs-cost-col {
+  width: 8%;
+}
+
+.jobs-actions-col {
+  width: 10%;
+}
+
+.jobs-table th,
+.jobs-table td {
+  font-size: 14px;
+  vertical-align: middle;
+}
+
+.jobs-table th:nth-child(2),
+.jobs-table td:nth-child(2) {
+  text-align: left;
+}
+
 .jobs-table td:nth-child(2) {
   white-space: nowrap;
   overflow-wrap: anywhere;
+}
+
+.jobs-table th:nth-child(8),
+.jobs-table td:nth-child(8) {
+  text-align: right;
 }
 
 .table-actions {

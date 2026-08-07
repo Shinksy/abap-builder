@@ -1130,6 +1130,8 @@ class CreateAbapFlowTest(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             html = response.data.decode("utf-8")
+            self.assertIn("style.css?v=", html)
+            self.assertIn("jobs-date-col", html)
             self.assertIn('href="/jobs"', html)
             self.assertLess(html.index(failed_job), html.index(completed_job))
             self.assertIn("07-08-2026 10:00:00", html)

@@ -65,6 +65,10 @@ def create_app(config_overrides=None):
     upload_folder.mkdir(parents=True, exist_ok=True)
     jobs_folder.mkdir(parents=True, exist_ok=True)
 
+    @app.context_processor
+    def asset_context():
+        return {"asset_version": static_asset_version("style.css")}
+
     def home_template_context(active_tab="new", **kwargs):
         context = {
             "metadata_type_labels": METADATA_TYPE_LABELS,
@@ -390,6 +394,14 @@ def load_metadata_export_template():
         return path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def static_asset_version(filename):
+    path = Config.BASE_DIR / "static" / filename
+    try:
+        return int(path.stat().st_mtime)
+    except OSError:
+        return 0
 
 
 def log_ddic_metadata_startup(app):
