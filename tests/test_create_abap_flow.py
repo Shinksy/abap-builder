@@ -23,8 +23,13 @@ from services.create_abap import (
     append_generation_contract,
     build_generation_contract,
     calculate_cost,
+    cost_breakdown_from_job_artifacts,
     extract_specification_callable_identities,
+    enrich_processing_rule_callable_metadata,
+    explicit_object_method_identities,
+    extract_processing_plan_for_review,
     generate_abap_with_orchestrator,
+    load_metrics,
     load_processing_plan_proposal,
     load_database_read_patterns,
     load_report_skeleton,
@@ -38,6 +43,7 @@ from services.create_abap import (
 )
 from services.callable_signature_provider import (
     NoOpCallableSignatureProvider,
+    normalize_provider_signatures,
     resolve_callable_metadata,
 )
 from services.ddic_metadata_provider import (
@@ -932,6 +938,108 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertIn(b'min="1"', response.data)
         self.assertIn(b'max="10"', response.data)
         self.assertIn(b'value="2"', response.data)
+
+    def test_home_includes_openai_model_presets_and_advanced_fields(self):
+        app = create_app({"TESTING": True})
+
+        response = app.test_client().get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'for="tab-settings">Settings</label>', response.data)
+        self.assertIn(b'<section class="tab-panel tab-panel-settings">', response.data)
+        self.assertIn(b'value="balanced" checked', response.data)
+        self.assertIn(b'value="economy"', response.data)
+        self.assertIn(b'value="best_quality"', response.data)
+        self.assertIn(b'value="advanced"', response.data)
+        self.assertIn(b'form="new-program-form"', response.data)
+        self.assertIn(b'form="enhance-program-form"', response.data)
+        self.assertIn(b'General: GPT-5.6 Luna', response.data)
+        self.assertIn(b'Dependency: GPT-5.6 Luna', response.data)
+        self.assertIn(b'Generation: GPT-5.6 Terra', response.data)
+        self.assertIn(b'Review: GPT-5.6 Luna', response.data)
+        self.assertIn(b'General: GPT-5.6 Terra', response.data)
+        self.assertIn(b'Generation: GPT-5.6 Sol', response.data)
+        self.assertIn(b'Review: GPT-5.6 Sol', response.data)
+        self.assertIn(b'name="OPENAI_MODEL"', response.data)
+        self.assertIn(b'name="OPENAI_ABAP_GENERATION_MODEL"', response.data)
+        self.assertIn(b'name="OPENAI_DEPENDENCY_ANALYSIS_MODEL"', response.data)
+        self.assertIn(b'name="OPENAI_CODE_REVIEW_MODEL"', response.data)
+        self.assertIn(b'GPT-5 Mini', response.data)
+        self.assertEqual(8, response.data.count(b'value="gpt-5-mini"'))
+
+    def test_upload_saves_default_balanced_model_settings(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            with patch("app.start_create_abap_job"):
+                response = app.test_client().post(
+                    "/upload",
+                    data={"abap_file": (BytesIO(b"Create a test report."), "request.txt")},
+                    content_type="multipart/form-data",
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            options = json.loads((jobs_folder / job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertEqual("balanced", options["model_settings"]["preset"])
+            self.assertEqual(
+                {
+                    "general": "gpt-5.6-luna",
+                    "dependency_analysis": "gpt-5.6-luna",
+                    "abap_generation": "gpt-5.6-terra",
+                    "code_review": "gpt-5.6-terra",
+                },
+                options["model_settings"]["models"],
+            )
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_upload_saves_advanced_model_settings(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            with patch("app.start_create_abap_job"):
+                response = app.test_client().post(
+                    "/upload",
+                    data={
+                        "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
+                        "model_preset": "advanced",
+                        "OPENAI_MODEL": "gpt-5-mini",
+                        "OPENAI_DEPENDENCY_ANALYSIS_MODEL": "gpt-5-mini",
+                        "OPENAI_ABAP_GENERATION_MODEL": "gpt-5-mini",
+                        "OPENAI_CODE_REVIEW_MODEL": "gpt-5-mini",
+                    },
+                    content_type="multipart/form-data",
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            options = json.loads((jobs_folder / job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertEqual("advanced", options["model_settings"]["preset"])
+            self.assertEqual("gpt-5-mini", options["model_settings"]["models"]["general"])
+            self.assertEqual("gpt-5-mini", options["model_settings"]["models"]["dependency_analysis"])
+            self.assertEqual("gpt-5-mini", options["model_settings"]["models"]["abap_generation"])
+            self.assertEqual("gpt-5-mini", options["model_settings"]["models"]["code_review"])
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
 
     def test_new_jobs_begin_at_queued(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
@@ -2645,6 +2753,78 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
+    def test_processing_rule_object_methods_are_prefetched_from_signature_provider(self):
+        provider = RecordingSignatureProvider()
+        rules = "\n".join(
+            [
+                "Call instance method SEND_REQUEST->SET_DOCUMENT.",
+                "Call instance method SEND_REQUEST->ADD_RECIPIENT.",
+                "Stores the result returned by SEND_REQUEST->SEND.",
+                "Call instance method SEND_REQUEST->SEND.",
+            ]
+        )
+
+        metadata = enrich_processing_rule_callable_metadata(rules, {"callable_signatures": {}}, provider)
+
+        self.assertEqual(
+            [
+                "SEND_REQUEST=>SET_DOCUMENT",
+                "SEND_REQUEST=>ADD_RECIPIENT",
+                "SEND_REQUEST=>SEND",
+            ],
+            provider.requests[0],
+        )
+        self.assertEqual(
+            provider.requests[0],
+            explicit_object_method_identities(rules),
+        )
+        self.assertEqual(
+            set(provider.requests[0]),
+            set(normalize_provider_signatures(metadata)),
+        )
+
+    def test_processing_plan_review_extraction_uses_dependency_analysis_model_role(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            job_id = create_job(jobs_folder)
+            job_folder = jobs_folder / job_id
+            calls = []
+
+            def dependency_generator(prompt_text, source_text, response_format=None):
+                calls.append((prompt_text, source_text, response_format))
+                if "Extract declaration requirements" in prompt_text:
+                    return {
+                        "text": json.dumps({"output_structure_fields": []}),
+                        "model": "gpt-5.6-luna",
+                        "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                    }
+                return {
+                    "text": json.dumps({"processing_steps": []}),
+                    "model": "gpt-5.6-luna",
+                    "usage": {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+                }
+
+            with patch("services.create_abap.generate_dependency_analysis", side_effect=dependency_generator):
+                declaration_requirements, processing_plan = extract_processing_plan_for_review(
+                    job_folder,
+                    jobs_folder,
+                    job_id,
+                    "Shared generation contract:\nExact callable identities: None\n",
+                    "# Processing Rules\nNo business processing required.",
+                    callable_metadata={},
+                    ddic_metadata={"tables": {}},
+                )
+
+            self.assertEqual("gpt-5.6-luna", declaration_requirements["model"])
+            self.assertEqual("gpt-5.6-luna", processing_plan["model"])
+            self.assertIn("Extract declaration requirements", calls[0][0])
+            self.assertIn("Extract business-processing logic", calls[1][0])
+            self.assertIsNotNone(calls[1][2])
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def test_processing_rule_ddic_dependencies_are_merged_before_metadata_lookup(self):
         dependency_analysis = {
             "ddic_objects": [{"name": "EDIDC", "structure": "st_edidc", "table": "t_edidc"}],
@@ -2758,6 +2938,128 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertEqual(cost["input"], 0.00125)
         self.assertEqual(cost["output"], 0.005)
         self.assertEqual(cost["total"], 0.00625)
+
+    def test_gpt_56_terra_cost_is_calculated(self):
+        cost = calculate_cost("gpt-5.6-terra", input_tokens=36144, output_tokens=8839)
+
+        self.assertEqual(cost["input"], 0.09036)
+        self.assertEqual(cost["output"], 0.132585)
+        self.assertEqual(cost["total"], 0.222945)
+
+    def test_existing_metrics_display_backfills_known_model_costs(self):
+        metrics = normalize_metrics_for_display(
+            {
+                "model": "gpt-5.6-terra",
+                "input_tokens": 36144,
+                "output_tokens": 8839,
+                "total_tokens": 44983,
+                "estimated_input_cost": None,
+                "estimated_output_cost": None,
+                "estimated_total_cost": None,
+            }
+        )
+
+        self.assertEqual(metrics["estimated_input_cost"], 0.09036)
+        self.assertEqual(metrics["estimated_output_cost"], 0.132585)
+        self.assertEqual(metrics["estimated_total_cost"], 0.222945)
+
+    def test_cost_breakdown_is_built_from_job_artifacts(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            job_folder = temp_path / "jobs" / "job"
+            job_folder.mkdir(parents=True)
+            (job_folder / "abap_generation_chunks.json").write_text(
+                json.dumps(
+                    {
+                        "declaration_requirements": {
+                            "model": "gpt-5.6-luna",
+                            "usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+                        },
+                        "chunks": [
+                            {
+                                "name": "declarations",
+                                "model": "gpt-5.6-terra",
+                                "usage": {"input_tokens": 2000, "output_tokens": 200, "total_tokens": 2200},
+                            },
+                            {
+                                "name": "processing_form",
+                                "model": "gpt-5.6-sol",
+                                "usage": {"input_tokens": 3000, "output_tokens": 300, "total_tokens": 3300},
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (job_folder / PROCESSING_PLAN_DIAGNOSTICS_ARTIFACT).write_text(
+                json.dumps(
+                    {
+                        "model": "gpt-5.6-luna",
+                        "usage": {"input_tokens": 4000, "output_tokens": 400, "total_tokens": 4400},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            breakdown = cost_breakdown_from_job_artifacts(job_folder)
+
+            self.assertEqual(
+                [row["label"] for row in breakdown["by_stage"]],
+                ["Declaration requirements", "Declarations chunk", "Processing form chunk", "Processing plan"],
+            )
+            totals_by_model = {row["model"]: row for row in breakdown["by_model"]}
+            self.assertEqual(totals_by_model["gpt-5.6-luna"]["input_tokens"], 5000)
+            self.assertEqual(totals_by_model["gpt-5.6-luna"]["output_tokens"], 500)
+            self.assertEqual(totals_by_model["gpt-5.6-luna"]["estimated_total_cost"], 0.008)
+            self.assertEqual(totals_by_model["gpt-5.6-terra"]["estimated_total_cost"], 0.008)
+            self.assertEqual(totals_by_model["gpt-5.6-sol"]["estimated_total_cost"], 0.024)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_load_metrics_backfills_cost_breakdown_for_existing_job_metrics(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            job_folder = jobs_folder / "job"
+            job_folder.mkdir(parents=True)
+            (job_folder / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "model": "gpt-5.6-terra",
+                        "input_tokens": 2000,
+                        "output_tokens": 200,
+                        "total_tokens": 2200,
+                        "estimated_input_cost": None,
+                        "estimated_output_cost": None,
+                        "estimated_total_cost": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (job_folder / "abap_generation_chunks.json").write_text(
+                json.dumps(
+                    {
+                        "chunks": [
+                            {
+                                "name": "main_program_flow",
+                                "model": "gpt-5.6-terra",
+                                "usage": {"input_tokens": 2000, "output_tokens": 200, "total_tokens": 2200},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            metrics = load_metrics(jobs_folder, "job")
+
+            self.assertEqual(metrics["estimated_total_cost"], 0.008)
+            self.assertEqual(metrics["cost_breakdown"]["by_stage"][0]["label"], "Main flow chunk")
+            self.assertEqual(metrics["cost_breakdown"]["by_model"][0]["estimated_total_cost"], 0.008)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
 
     def test_old_first_select_diagnostic_pipeline_is_not_used(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"

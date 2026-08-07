@@ -1,4 +1,5 @@
 import os
+from contextvars import ContextVar
 from urllib.parse import urlparse
 
 from flask import current_app, has_app_context
@@ -6,10 +7,29 @@ from flask import current_app, has_app_context
 from config import Config
 
 
+_current_model_settings = ContextVar("current_model_settings", default=None)
+
+
 def _config_value(name):
     if has_app_context():
         return current_app.config.get(name)
     return getattr(Config, name, None)
+
+
+def set_current_model_settings(model_settings):
+    return _current_model_settings.set(model_settings if isinstance(model_settings, dict) else None)
+
+
+def reset_current_model_settings(token):
+    _current_model_settings.reset(token)
+
+
+def _model_for_role(role, config_key):
+    settings = _current_model_settings.get()
+    models = settings.get("models") if isinstance(settings, dict) else {}
+    if isinstance(models, dict) and models.get(role):
+        return models[role]
+    return _config_value(config_key)
 
 
 def sanitize_openai_proxy_environment():
@@ -32,15 +52,32 @@ def sanitize_openai_proxy_environment():
 
 
 def generate_abap(prompt_text, source_text, response_format=None):
-    return call_openai(prompt_text, source_text, model_name="gpt-5-mini", response_format=response_format)
+    return call_openai(
+        prompt_text,
+        source_text,
+        model_name=_model_for_role("abap_generation", "OPENAI_ABAP_GENERATION_MODEL"),
+        response_format=response_format,
+    )
 
 
-def generate_dependency_analysis(prompt_text, source_text):
-    return call_openai(prompt_text, source_text)
+def generate_dependency_analysis(prompt_text, source_text, response_format=None):
+    return call_openai(
+        prompt_text,
+        source_text,
+        model_name=_model_for_role("dependency_analysis", "OPENAI_DEPENDENCY_ANALYSIS_MODEL"),
+        response_format=response_format,
+    )
 
 
 def generate_code_review_repair(prompt_text, source_text):
-    return call_openai(prompt_text, source_text)
+    return call_openai(prompt_text, source_text, model_name=_model_for_role("code_review", "OPENAI_CODE_REVIEW_MODEL"))
+
+
+def generate_with_model(model_name):
+    def generator(prompt_text, source_text, response_format=None):
+        return call_openai(prompt_text, source_text, model_name=model_name, response_format=response_format)
+
+    return generator
 
 
 def call_openai(prompt_text, source_text, model_name=None, response_format=None):
@@ -50,7 +87,7 @@ def call_openai(prompt_text, source_text, model_name=None, response_format=None)
 
     from openai import OpenAI
 
-    model = model_name or _config_value("OPENAI_MODEL") or "gpt-4.1-mini"
+    model = model_name or _model_for_role("general", "OPENAI_MODEL") or "gpt-5.6-luna"
     sanitize_openai_proxy_environment()
     client = OpenAI(api_key=api_key)
     request = {

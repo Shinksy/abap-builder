@@ -10,8 +10,16 @@
     {% macro processing_time(value) -%}
       {% if value is number %}{{ "%.2f"|format(value) }}s{% else %}Unavailable{% endif %}
     {%- endmacro %}
+    {% macro token_count(value) -%}
+      {% if value is number %}{{ "{:,}".format(value) }}{% else %}Unavailable{% endif %}
+    {%- endmacro %}
+    {% macro cost_value(value) -%}
+      {% if value is number %}${{ "%.6f"|format(value) }}{% else %}Unavailable{% endif %}
+    {%- endmacro %}
     {% set section_durations = metrics.get("section_durations", {}) %}
     {% set is_enhancement = metrics.get("job_mode") == "enhance_existing_abap" %}
+    {% set resolved_models = (metrics.get("model_settings", {}) or {}).get("models", {}) %}
+    {% set cost_breakdown = metrics.get("cost_breakdown", {}) or {} %}
     <main class="page">
       <section class="panel wide">
         <div class="result-header">
@@ -25,6 +33,16 @@
             <dl>
               <dt>Model</dt>
               <dd>{{ metrics.model or "Unavailable" }}</dd>
+              <dt>Preset</dt>
+              <dd>{{ (metrics.get("model_settings", {}) or {}).get("preset_label") or "Unavailable" }}</dd>
+              <dt>General</dt>
+              <dd>{{ resolved_models.get("general") or "Unavailable" }}</dd>
+              <dt>Dependency analysis</dt>
+              <dd>{{ resolved_models.get("dependency_analysis") or "Unavailable" }}</dd>
+              <dt>ABAP generation</dt>
+              <dd>{{ resolved_models.get("abap_generation") or "Unavailable" }}</dd>
+              <dt>Code review</dt>
+              <dd>{{ resolved_models.get("code_review") or "Unavailable" }}</dd>
               <dt>Mode</dt>
               <dd>{% if is_enhancement %}Enhance Existing ABAP{% else %}Generate New Program{% endif %}</dd>
               <dt>Duration</dt>
@@ -52,6 +70,68 @@
               <dt>Total cost</dt>
               <dd>{% if metrics.estimated_total_cost is number %}${{ "%.6f"|format(metrics.estimated_total_cost) }}{% else %}Unavailable{% endif %}</dd>
             </dl>
+          </details>
+          <details class="metric-card metric-card-wide">
+            <summary>Cost By Model</summary>
+            {% if cost_breakdown.get("by_model") %}
+              <div class="metrics-table-wrap">
+                <table class="metrics-table model-cost-table">
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>Input</th>
+                      <th>Output</th>
+                      <th>Total</th>
+                      <th>Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for row in cost_breakdown.get("by_model") %}
+                      <tr>
+                        <td>{{ row.model }}</td>
+                        <td>{{ token_count(row.input_tokens) }}</td>
+                        <td>{{ token_count(row.output_tokens) }}</td>
+                        <td>{{ token_count(row.total_tokens) }}</td>
+                        <td>{{ cost_value(row.estimated_total_cost) }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <p>Unavailable</p>
+            {% endif %}
+          </details>
+          <details class="metric-card metric-card-wide">
+            <summary>Cost By Stage</summary>
+            {% if cost_breakdown.get("by_stage") %}
+              <div class="metrics-table-wrap">
+                <table class="metrics-table stage-cost-table">
+                  <thead>
+                    <tr>
+                      <th>Stage</th>
+                      <th>Model</th>
+                      <th>Input</th>
+                      <th>Output</th>
+                      <th>Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for row in cost_breakdown.get("by_stage") %}
+                      <tr>
+                        <td>{{ row.label }}</td>
+                        <td>{{ row.model }}</td>
+                        <td>{{ token_count(row.input_tokens) }}</td>
+                        <td>{{ token_count(row.output_tokens) }}</td>
+                        <td>{{ cost_value(row.estimated_total_cost) }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <p>Unavailable</p>
+            {% endif %}
           </details>
           <details class="metric-card">
             <summary>Output Size</summary>
@@ -234,6 +314,13 @@
         </details>
         <details class="validation-panel">
           <summary>Developer Diagnostics</summary>
+          {% set diagnostic_model_settings = metrics.get("model_settings") or (abap_generation_diagnostics.get("model_settings") if abap_generation_diagnostics else {}) or {} %}
+          {% if diagnostic_model_settings %}
+            <dl>
+              <dt>Resolved OpenAI model settings</dt>
+              <dd><pre><code>{{ diagnostic_model_settings|tojson(indent=2) }}</code></pre></dd>
+            </dl>
+          {% endif %}
           {% if abap_generation_diagnostics and abap_generation_diagnostics.get("used_fallback") %}
             <p>Chunked ABAP generation fell back to full-program generation.</p>
             <dl>

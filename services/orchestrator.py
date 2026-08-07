@@ -2443,10 +2443,21 @@ def processing_rule_objects_in_line(line, field_index):
 
 def scan_processing_rule_callables(line, callable_index, dependencies, object_method_callables=None):
     upper_line = line.upper()
+    resolved_object_callables = object_method_callables_for_line(line, object_method_callables)
+    object_method_names = object_method_names_for_line(line) if resolved_object_callables else set()
+    ambiguous_aliases = ambiguous_callable_aliases(callable_index)
     for callable_name, parameters in callable_index.items():
+        exact_mention = processing_rule_mentions_exact_callable(line, callable_name)
         if (
-            not processing_rule_mentions_callable(line, callable_name)
-            and callable_name not in object_method_callables_for_line(line, object_method_callables)
+            resolved_object_callables
+            and callable_method_name(callable_name) in object_method_names
+            and callable_name not in resolved_object_callables
+            and not exact_mention
+        ):
+            continue
+        if (
+            not processing_rule_mentions_callable(line, callable_name, ambiguous_aliases=ambiguous_aliases)
+            and callable_name not in resolved_object_callables
         ):
             continue
         append_unique(dependencies["callables"], callable_name)
@@ -2457,20 +2468,43 @@ def scan_processing_rule_callables(line, callable_index, dependencies, object_me
                 add_processing_rule_reference(dependencies, "callable_parameter", parameter_name, callable_name, line)
 
 
-def processing_rule_mentions_callable(line, callable_name):
+def processing_rule_mentions_callable(line, callable_name, ambiguous_aliases=None):
     upper_line = str(line or "").upper()
     name = str(callable_name or "").strip().upper()
     if not name:
         return False
-    if re.search(rf"\b{re.escape(name)}\b", upper_line):
+    if processing_rule_mentions_exact_callable(line, name):
         return True
+    ambiguous_aliases = set(ambiguous_aliases or [])
     aliases = callable_name_aliases(name)
-    return any(re.search(rf"\b{re.escape(alias)}\b", upper_line) for alias in aliases)
+    return any(
+        alias not in ambiguous_aliases and re.search(rf"\b{re.escape(alias)}\b", upper_line)
+        for alias in aliases
+    )
+
+
+def processing_rule_mentions_exact_callable(line, callable_name):
+    upper_line = str(line or "").upper()
+    name = str(callable_name or "").strip().upper()
+    return bool(name and re.search(rf"\b{re.escape(name)}\b", upper_line))
+
+
+def ambiguous_callable_aliases(callable_index):
+    owners = {}
+    for callable_name in callable_index or {}:
+        for alias in callable_name_aliases(callable_name):
+            owners.setdefault(alias, set()).add(str(callable_name or "").strip().upper())
+    return {alias for alias, names in owners.items() if len(names) > 1}
 
 
 def callable_name_aliases(callable_name):
+    name = str(callable_name or "").upper()
+    if re.search(r"=>|->|~", name):
+        part = re.split(r"=>|->|~", name)[-1].strip("_")
+        shortened = re.sub(r"^(?:Z|Y|CL|IF)_", "", part)
+        return dedupe_preserve_order([alias for alias in (part, shortened) if len(alias) >= 3 and alias != name])
     aliases = []
-    for part in re.split(r"=>|->|~|/", str(callable_name or "").upper()):
+    for part in re.split(r"=>|->|~|/", name):
         part = part.strip("_")
         if len(part) >= 3:
             aliases.append(part)
@@ -2487,6 +2521,9 @@ def processing_rule_object_method_callables(text, callable_index):
     for match in re.finditer(r"\b([A-Za-z][A-Za-z0-9_]{1,29})\s*->\s*([A-Za-z][A-Za-z0-9_]{1,29})\b", str(text or "")):
         object_name = match.group(1).lower()
         method_name = match.group(2).upper()
+        object_identity = f"{object_name.upper()}=>{method_name}"
+        if object_identity in callables:
+            result.setdefault(match.group(0).upper(), set()).add(object_identity)
         class_name = object_classes.get(object_name)
         if not class_name:
             continue
@@ -2503,6 +2540,18 @@ def object_method_callables_for_line(line, object_method_callables=None):
         if expression in upper_line:
             matches.update(identities)
     return matches
+
+
+def object_method_names_for_line(line):
+    return {
+        match.group(2).upper()
+        for match in re.finditer(r"\b([A-Za-z][A-Za-z0-9_]{1,29})\s*->\s*([A-Za-z][A-Za-z0-9_]{1,29})\b", str(line or ""))
+    }
+
+
+def callable_method_name(callable_name):
+    parts = re.split(r"=>|->|~", str(callable_name or "").strip().upper())
+    return parts[-1] if len(parts) > 1 else ""
 
 
 def processing_rule_reference_object_classes(text):

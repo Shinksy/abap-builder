@@ -1,0 +1,25 @@
+{
+  "class": "CL_BCS",
+  "method": "SEND",
+  "parameters": {
+    "CX_SEND_REQ_BCS": {
+      "direction": "IMPORTING",
+      "rawDirection": "0",
+      "abap_type": "",
+      "required": true
+    },
+    "I_WITH_ERROR_SCREEN": {
+      "direction": "IMPORTING",
+      "rawDirection": "0",
+      "abap_type": "OS_BOOLEAN",
+      "required": true
+    }
+  },
+  "returning": {
+    "name": "RESULT",
+    "direction": "RETURNING",
+    "rawDirection": "3",
+    "abap_type": "OS_BOOLEAN",
+    "required": true
+  }
+}

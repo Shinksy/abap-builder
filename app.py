@@ -9,6 +9,7 @@ from services.callable_signature_provider import get_configured_callable_signatu
 from services.ddic_metadata_provider import get_configured_ddic_metadata_provider
 from services.job_options import load_job_options, save_job_options
 from services.llm import generate_code_review_repair
+from services.model_settings import model_options_from_form, model_settings_for_template, normalize_model_settings
 from services.metadata_cache_upload import (
     MetadataCacheUploadError,
     METADATA_TYPE_LABELS,
@@ -68,6 +69,7 @@ def create_app(config_overrides=None):
             "metadata_type_labels": METADATA_TYPE_LABELS,
             "active_tab": active_tab,
             "metadata_export_code": load_metadata_export_template(),
+            "model_settings": model_settings_for_template(app.config),
         }
         context.update(kwargs)
         return context
@@ -124,12 +126,14 @@ def create_app(config_overrides=None):
 
         job_id = create_job(jobs_folder)
         run_sap_syntax_check = request.form.get("run_sap_syntax_check") == "1"
+        model_settings = normalize_model_settings(model_options_from_form(request.form), app.config)
         save_job_options(
             jobs_folder,
             job_id,
             {
                 "run_sap_syntax_check": run_sap_syntax_check,
                 "sap_syntax_check_attempts": request.form.get("sap_syntax_check_attempts"),
+                "model_settings": model_settings,
             },
         )
         filename = secure_filename(uploaded_file.filename)
@@ -168,12 +172,14 @@ def create_app(config_overrides=None):
 
         job_id = create_job(jobs_folder)
         run_sap_syntax_check = request.form.get("run_sap_syntax_check") == "1"
+        model_settings = normalize_model_settings(model_options_from_form(request.form), app.config)
         save_job_options(
             jobs_folder,
             job_id,
             {
                 "run_sap_syntax_check": run_sap_syntax_check,
                 "sap_syntax_check_attempts": request.form.get("sap_syntax_check_attempts"),
+                "model_settings": model_settings,
             },
         )
         job_upload_folder = upload_folder / job_id

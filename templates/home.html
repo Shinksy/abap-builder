@@ -7,6 +7,49 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   </head>
   <body>
+    {% macro model_selector(prefix) -%}
+      <fieldset class="model-settings">
+        <legend>OpenAI Models</legend>
+        <div class="model-preset-grid">
+          {% for preset in model_settings.presets %}
+            <label class="radio-option model-preset-option">
+              <input name="model_preset" form="new-program-form" type="radio" value="{{ preset.name }}" {% if preset.name == model_settings.default_preset %}checked{% endif %}>
+              <span class="model-preset-copy">
+                <span class="model-preset-title">{{ preset.label }}</span>
+                <span class="model-preset-summary">General: {{ model_settings.model_display_names[preset.models.general] }}</span>
+                <span class="model-preset-summary">Dependency: {{ model_settings.model_display_names[preset.models.dependency_analysis] }}</span>
+                <span class="model-preset-summary">Generation: {{ model_settings.model_display_names[preset.models.abap_generation] }}</span>
+                <span class="model-preset-summary">Review: {{ model_settings.model_display_names[preset.models.code_review] }}</span>
+              </span>
+            </label>
+            <input class="enhance-model-control" name="model_preset" form="enhance-program-form" type="radio" value="{{ preset.name }}" {% if preset.name == model_settings.default_preset %}checked{% endif %}>
+          {% endfor %}
+          <label class="radio-option model-preset-option">
+            <input class="advanced-radio" name="model_preset" form="new-program-form" type="radio" value="advanced">
+            <span class="model-preset-copy">
+              <span class="model-preset-title">Advanced</span>
+              <span class="model-preset-summary">Select each model role separately.</span>
+            </span>
+          </label>
+          <input class="advanced-radio enhance-model-control" name="model_preset" form="enhance-program-form" type="radio" value="advanced">
+          <div class="advanced-model-fields">
+            {% for role, label in model_settings.role_labels.items() %}
+              <label for="{{ prefix }}_{{ role }}_model">{{ label }}</label>
+              <select id="{{ prefix }}_{{ role }}_model" name="{{ model_settings.role_env_keys[role] if model_settings.role_env_keys else role }}" form="new-program-form">
+                {% for model in model_settings.allowed_models %}
+                  <option value="{{ model }}" {% if model == model_settings.env_defaults[role] %}selected{% endif %}>{{ model_settings.model_display_names[model] }}</option>
+                {% endfor %}
+              </select>
+              <select class="enhance-model-select" name="{{ model_settings.role_env_keys[role] if model_settings.role_env_keys else role }}" form="enhance-program-form" aria-label="{{ label }}">
+                {% for model in model_settings.allowed_models %}
+                  <option value="{{ model }}" {% if model == model_settings.env_defaults[role] %}selected{% endif %}>{{ model_settings.model_display_names[model] }}</option>
+                {% endfor %}
+              </select>
+            {% endfor %}
+          </div>
+        </div>
+      </fieldset>
+    {%- endmacro %}
     <main class="page">
       <section class="panel">
         <h1>SAP AI ABAP Generator</h1>
@@ -30,10 +73,12 @@
           <label class="tab-label" for="tab-enhance">Enhance Program</label>
           <input class="tab-input" id="tab-metadata" name="home_tab" type="radio" {% if active_tab == "metadata" %}checked{% endif %}>
           <label class="tab-label" for="tab-metadata">Upload Meta Cache</label>
+          <input class="tab-input" id="tab-settings" name="home_tab" type="radio">
+          <label class="tab-label" for="tab-settings">Settings</label>
 
           <section class="tab-panel tab-panel-new">
             <h2>Generate New Program</h2>
-            <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+            <form id="new-program-form" action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
               <label for="abap_file">Upload Specification</label>
               <input id="abap_file" name="abap_file" type="file" accept=".abap,.txt" required>
               <div class="syntax-check-row">
@@ -49,7 +94,7 @@
 
           <section class="tab-panel tab-panel-enhance">
             <h2>Enhance Existing ABAP</h2>
-            <form action="{{ url_for('enhance_file') }}" method="post" enctype="multipart/form-data">
+            <form id="enhance-program-form" action="{{ url_for('enhance_file') }}" method="post" enctype="multipart/form-data">
               <label for="existing_abap_file">Upload Existing ABAP</label>
               <input id="existing_abap_file" name="existing_abap_file" type="file" accept=".abap,.txt" required>
               <label for="enhancement_specification">Functional Specification</label>
@@ -107,6 +152,10 @@
               </form>
             {% endif %}
           </section>
+          <section class="tab-panel tab-panel-settings">
+            <h2>Settings</h2>
+            {{ model_selector("settings") }}
+          </section>
         </div>
       </section>
     </main>
@@ -145,6 +194,38 @@
           }
         });
       }
+
+      const newModelControls = document.querySelectorAll('[form="new-program-form"][name="model_preset"], [form="new-program-form"][name^="OPENAI_"]');
+      const enhanceModelControls = document.querySelectorAll('[form="enhance-program-form"][name="model_preset"], [form="enhance-program-form"][name^="OPENAI_"]');
+      const enhanceForm = document.getElementById("enhance-program-form");
+
+      function matchingEnhanceControls(control) {
+        return Array.from(enhanceModelControls).filter((candidate) => candidate.name === control.name);
+      }
+
+      function syncModelSettingsToEnhance() {
+        newModelControls.forEach((control) => {
+          matchingEnhanceControls(control).forEach((target) => {
+            if (control.type === "radio") {
+              if (target.value === control.value) {
+                target.checked = control.checked;
+              }
+            } else {
+              target.value = control.value;
+            }
+          });
+        });
+      }
+
+      newModelControls.forEach((control) => {
+        control.addEventListener("change", syncModelSettingsToEnhance);
+      });
+
+      if (enhanceForm) {
+        enhanceForm.addEventListener("submit", syncModelSettingsToEnhance);
+      }
+
+      syncModelSettingsToEnhance();
     </script>
   </body>
 </html>

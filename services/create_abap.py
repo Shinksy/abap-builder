@@ -29,7 +29,13 @@ from services.ddic_metadata_context import (
 from services.ddic_metadata_provider import NoOpDdicMetadataProvider
 from services.fixer import auto_fix_abap
 from services.job_options import load_job_options
-from services.llm import generate_abap, generate_code_review_repair
+from services.llm import (
+    generate_abap,
+    generate_code_review_repair,
+    generate_dependency_analysis,
+    reset_current_model_settings,
+    set_current_model_settings,
+)
 from services.orchestrator import (
     ChunkedGenerationError,
     ProcessingContractValidationError,
@@ -135,10 +141,14 @@ def run_create_abap(
 ):
     job_folder = Path(jobs_folder) / job_id
     job_folder.mkdir(parents=True, exist_ok=True)
-    post_generation_diagnostics = {"stages": []}
     section_durations = dict(prior_section_durations or {})
+    options = load_job_options(jobs_folder, job_id)
+    model_settings = options.get("model_settings") or {}
+    post_generation_diagnostics = {"stages": [], "model_settings": model_settings}
+    model_settings_token = set_current_model_settings(model_settings)
 
     try:
+        save_model_settings(job_folder, model_settings)
         update_progress(
             jobs_folder,
             job_id,
@@ -170,6 +180,7 @@ def run_create_abap(
             enabled=True if dependency_analyzer else None,
             llm_analyzer=dependency_analyzer,
         )
+        dependency_analysis.setdefault("_diagnostics", {})["model_settings"] = model_settings
         merge_processing_rule_ddic_dependencies(dependency_analysis, source_text)
         merge_specification_callable_dependencies(dependency_analysis, source_text)
         add_section_duration(
@@ -220,6 +231,8 @@ def run_create_abap(
                 source_text,
                 callable_metadata=callable_metadata,
                 ddic_metadata=ddic_metadata,
+                signature_provider=signature_provider,
+                model_settings=model_settings,
             )
             add_section_duration(
                 section_durations,
@@ -246,6 +259,7 @@ def run_create_abap(
                             processing_plan.get("usage") if isinstance(processing_plan, dict) else None,
                         ]
                     ),
+                    "model_settings": model_settings,
                 },
             )
             save_dependency_analysis(job_folder, dependency_analysis)
@@ -288,6 +302,7 @@ def run_create_abap(
             pre_chunk_progress_callback=update_pre_chunk_progress,
             declaration_requirements=prepared_declaration_requirements,
             approved_processing_plan=approved_processing_plan,
+            model_settings=model_settings,
         )
         duration_seconds = time.perf_counter() - started_at
         add_section_duration(section_durations, "generated_abap", duration_seconds)
@@ -405,6 +420,9 @@ def run_create_abap(
         record_post_generation_stage(post_generation_diagnostics, "complete_source_immediately_before_final_save", final_abap)
         (job_folder / "generated.abap").write_text(final_abap, encoding="utf-8")
         save_post_generation_diagnostics(job_folder, post_generation_diagnostics)
+        cost_breakdown = cost_breakdown_from_job_artifacts(job_folder)
+        if not cost_breakdown_has_entries(cost_breakdown):
+            cost_breakdown = llm_cost_breakdown_from_result(llm_result)
         metrics = build_metrics(
             model_name=model_name,
             duration_seconds=active_processing_duration(section_durations, fallback=duration_seconds),
@@ -413,14 +431,28 @@ def run_create_abap(
             source_text=source_text,
             generated_abap=final_abap,
             section_durations=section_durations,
+            model_settings=model_settings,
+            cost_breakdown=cost_breakdown,
         )
         save_metrics(job_folder, metrics)
         update_progress(jobs_folder, job_id, "Complete", "ABAP generation complete.", stage="Complete")
     except Exception as exc:
         update_progress(jobs_folder, job_id, "Error", str(exc), stage="Error")
+    finally:
+        reset_current_model_settings(model_settings_token)
 
 
-def extract_processing_plan_for_review(job_folder, jobs_folder, job_id, prompt_text, source_text, callable_metadata=None, ddic_metadata=None):
+def extract_processing_plan_for_review(
+    job_folder,
+    jobs_folder,
+    job_id,
+    prompt_text,
+    source_text,
+    callable_metadata=None,
+    ddic_metadata=None,
+    signature_provider=None,
+    model_settings=None,
+):
     update_progress(
         jobs_folder,
         job_id,
@@ -430,7 +462,7 @@ def extract_processing_plan_for_review(job_folder, jobs_folder, job_id, prompt_t
     )
     declaration_requirements = extract_declaration_requirements(
         source_text,
-        generate_abap,
+        generate_dependency_analysis,
         metadata_context=prompt_text,
         callable_metadata=callable_metadata,
     )
@@ -449,10 +481,15 @@ def extract_processing_plan_for_review(job_folder, jobs_folder, job_id, prompt_t
     )
     processing_plan_source_text = extract_processing_rules_section(source_text)
     save_processing_plan_llm_source(job_folder, processing_plan_source_text)
+    callable_metadata = enrich_processing_rule_callable_metadata(
+        processing_plan_source_text,
+        callable_metadata,
+        signature_provider,
+    )
     try:
         processing_plan = extract_processing_plan(
             processing_plan_source_text,
-            generate_abap,
+            generate_dependency_analysis,
             metadata_context=prompt_text,
             callable_metadata=callable_metadata,
             declaration_requirements=declaration_requirements_text,
@@ -460,12 +497,16 @@ def extract_processing_plan_for_review(job_folder, jobs_folder, job_id, prompt_t
         )
     except ProcessingContractValidationError as exc:
         processing_plan = dict(exc.diagnostics or {})
+        processing_plan["model_settings"] = model_settings or {}
         save_processing_plan_extraction_failure(job_folder, processing_plan)
         save_processing_plan_diagnostics(job_folder, processing_plan)
         raise
     except ProcessingPlanValidationError as exc:
         processing_plan = dict(exc.diagnostics or {})
+        processing_plan["model_settings"] = model_settings or {}
         save_processing_plan_extraction_failure(job_folder, processing_plan)
+    if isinstance(processing_plan, dict):
+        processing_plan["model_settings"] = model_settings or {}
     declaration_requirements = declaration_requirements_with_processing_plan_variables(
         declaration_requirements,
         processing_plan,
@@ -473,6 +514,27 @@ def extract_processing_plan_for_review(job_folder, jobs_folder, job_id, prompt_t
     save_processing_plan_diagnostics(job_folder, processing_plan)
     save_processing_plan_proposal(job_folder, processing_plan)
     return declaration_requirements, processing_plan
+
+
+def enrich_processing_rule_callable_metadata(processing_rules_text, callable_metadata=None, signature_provider=None):
+    identities = explicit_object_method_identities(processing_rules_text)
+    if not identities:
+        return callable_metadata
+    return merge_callable_metadata(
+        callable_metadata,
+        resolve_callable_metadata_for_identities(identities, signature_provider=signature_provider),
+    )
+
+
+def explicit_object_method_identities(text):
+    result = []
+    seen = set()
+    for match in re.finditer(r"\b([A-Za-z][A-Za-z0-9_]{1,29})\s*->\s*([A-Za-z][A-Za-z0-9_]{1,29})\b", str(text or "")):
+        identity = f"{match.group(1).upper()}=>{match.group(2).upper()}"
+        if identity not in seen:
+            seen.add(identity)
+            result.append(identity)
+    return result
 
 
 def save_processing_plan_llm_source(job_folder, source_text):
@@ -1073,6 +1135,7 @@ def generate_abap_with_orchestrator(
     ddic_metadata=None,
     declaration_requirements=None,
     approved_processing_plan=None,
+    model_settings=None,
 ):
     generator = abap_generator or generate_abap
     try:
@@ -1101,6 +1164,8 @@ def generate_abap_with_orchestrator(
             "fallback_reason": f"{type(exc).__name__}: {exc}",
             "processing_plan": processing_plan,
         }
+    if isinstance(result, dict):
+        result["model_settings"] = model_settings or {}
     save_chunk_diagnostic(job_folder, result)
     return result
 
@@ -1441,7 +1506,17 @@ def enrich_metadata(
     return ddic_metadata, callable_metadata
 
 
-def build_metrics(model_name, duration_seconds, usage, prompt_text, source_text, generated_abap, section_durations=None):
+def build_metrics(
+    model_name,
+    duration_seconds,
+    usage,
+    prompt_text,
+    source_text,
+    generated_abap,
+    section_durations=None,
+    model_settings=None,
+    cost_breakdown=None,
+):
     input_tokens = usage.get("input_tokens") if usage else None
     output_tokens = usage.get("output_tokens") if usage else None
     total_tokens = usage.get("total_tokens") if usage else None
@@ -1461,6 +1536,8 @@ def build_metrics(model_name, duration_seconds, usage, prompt_text, source_text,
         "generated_abap_characters": len(generated_abap),
         "generated_abap_lines": len(generated_abap.splitlines()) if generated_abap else 0,
         "section_durations": section_durations or {},
+        "model_settings": model_settings or {},
+        "cost_breakdown": cost_breakdown or empty_cost_breakdown(),
     }
 
 
@@ -1522,22 +1599,237 @@ def save_metrics(job_folder, metrics):
     )
 
 
+def save_model_settings(job_folder, model_settings):
+    (Path(job_folder) / "model_settings.json").write_text(
+        json.dumps(model_settings or {}, indent=2),
+        encoding="utf-8",
+    )
+
+
 def load_metrics(jobs_folder, job_id):
     metrics_path = Path(jobs_folder) / job_id / "metrics.json"
     if not metrics_path.exists():
         return {}
-    return normalize_metrics_for_display(json.loads(metrics_path.read_text(encoding="utf-8")))
+    return normalize_metrics_for_display(
+        json.loads(metrics_path.read_text(encoding="utf-8")),
+        job_folder=metrics_path.parent,
+    )
 
 
-def normalize_metrics_for_display(metrics):
+def normalize_metrics_for_display(metrics, job_folder=None):
     if not isinstance(metrics, dict):
         return metrics
+    updated = dict(metrics)
     duration_seconds = active_processing_duration(metrics.get("section_durations"))
     if duration_seconds is None:
-        return metrics
-    updated = dict(metrics)
-    updated["duration_seconds"] = duration_seconds
+        duration_seconds = metrics.get("duration_seconds")
+    if duration_seconds is not None:
+        updated["duration_seconds"] = duration_seconds
+    if any(updated.get(key) is None for key in ("estimated_input_cost", "estimated_output_cost", "estimated_total_cost")):
+        costs = calculate_cost(updated.get("model"), updated.get("input_tokens"), updated.get("output_tokens"))
+        updated["estimated_input_cost"] = costs["input"]
+        updated["estimated_output_cost"] = costs["output"]
+        updated["estimated_total_cost"] = costs["total"]
+    breakdown = updated.get("cost_breakdown")
+    if not cost_breakdown_has_entries(breakdown) and job_folder:
+        breakdown = cost_breakdown_from_job_artifacts(job_folder)
+    if not cost_breakdown_has_entries(breakdown):
+        breakdown = cost_breakdown_from_metrics(updated)
+    updated["cost_breakdown"] = breakdown
     return updated
+
+
+def empty_cost_breakdown():
+    return {"by_model": [], "by_stage": []}
+
+
+def cost_breakdown_has_entries(breakdown):
+    return isinstance(breakdown, dict) and (
+        bool(breakdown.get("by_model")) or bool(breakdown.get("by_stage"))
+    )
+
+
+def llm_cost_breakdown_from_result(llm_result):
+    if not isinstance(llm_result, dict):
+        return empty_cost_breakdown()
+    rows = []
+    append_llm_cost_row(
+        rows,
+        "declaration_requirements",
+        "Declaration requirements",
+        (llm_result.get("declaration_requirements") or {}).get("model"),
+        (llm_result.get("declaration_requirements") or {}).get("usage"),
+    )
+    append_llm_cost_row(
+        rows,
+        "processing_plan",
+        "Processing plan",
+        (llm_result.get("processing_plan") or {}).get("model"),
+        (llm_result.get("processing_plan") or {}).get("usage"),
+    )
+    for chunk in llm_result.get("chunks") or []:
+        if not isinstance(chunk, dict):
+            continue
+        chunk_name = str(chunk.get("name") or chunk.get("chunk") or "chunk")
+        append_llm_cost_row(
+            rows,
+            f"chunk:{chunk_name}",
+            chunk_cost_stage_label(chunk_name),
+            chunk.get("model"),
+            chunk.get("usage"),
+        )
+    if llm_result.get("used_fallback"):
+        append_llm_cost_row(
+            rows,
+            "fallback_generation",
+            "Fallback generation",
+            llm_result.get("model"),
+            llm_result.get("usage"),
+        )
+    if not rows:
+        append_llm_cost_row(rows, "generation", "Generation", llm_result.get("model"), llm_result.get("usage"))
+    return build_cost_breakdown(rows)
+
+
+def cost_breakdown_from_metrics(metrics):
+    rows = []
+    append_llm_cost_row(
+        rows,
+        "generation",
+        "Generation",
+        metrics.get("model"),
+        {
+            "input_tokens": metrics.get("input_tokens"),
+            "output_tokens": metrics.get("output_tokens"),
+            "total_tokens": metrics.get("total_tokens"),
+        },
+    )
+    return build_cost_breakdown(rows)
+
+
+def cost_breakdown_from_job_artifacts(job_folder):
+    job_folder = Path(job_folder)
+    rows = []
+    chunks_path = job_folder / "abap_generation_chunks.json"
+    if chunks_path.exists():
+        try:
+            chunk_diagnostics = json.loads(chunks_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            chunk_diagnostics = {}
+        rows.extend((llm_cost_breakdown_from_result(chunk_diagnostics).get("by_stage") or []))
+    processing_plan_path = job_folder / PROCESSING_PLAN_DIAGNOSTICS_ARTIFACT
+    if processing_plan_path.exists():
+        try:
+            processing_plan_diagnostics = json.loads(processing_plan_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            processing_plan_diagnostics = {}
+        append_llm_cost_row(
+            rows,
+            "processing_plan",
+            "Processing plan",
+            processing_plan_diagnostics.get("model"),
+            processing_plan_diagnostics.get("usage"),
+        )
+    if rows:
+        return build_cost_breakdown(dedupe_cost_stage_rows(rows))
+    enhancement_path = job_folder / "enhancement_diagnostics.json"
+    if enhancement_path.exists():
+        try:
+            diagnostics = json.loads(enhancement_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return empty_cost_breakdown()
+        rows = []
+        append_llm_cost_row(rows, "enhancement", "Enhancement", diagnostics.get("model"), diagnostics.get("usage"))
+        return build_cost_breakdown(rows)
+    return empty_cost_breakdown()
+
+
+def dedupe_cost_stage_rows(rows):
+    result = []
+    seen = set()
+    for row in rows or []:
+        key = (
+            row.get("stage"),
+            row.get("model"),
+            row.get("input_tokens"),
+            row.get("output_tokens"),
+            row.get("total_tokens"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return result
+
+
+def append_llm_cost_row(rows, stage, label, model, usage):
+    if not isinstance(usage, dict) or not model:
+        return
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    total_tokens = usage.get("total_tokens")
+    if not any(isinstance(value, int) for value in (input_tokens, output_tokens, total_tokens)):
+        return
+    costs = calculate_cost(model, input_tokens, output_tokens)
+    rows.append(
+        {
+            "stage": stage,
+            "label": label,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "estimated_input_cost": costs["input"],
+            "estimated_output_cost": costs["output"],
+            "estimated_total_cost": costs["total"],
+        }
+    )
+
+
+def build_cost_breakdown(rows):
+    stage_rows = list(rows or [])
+    model_totals = {}
+    for row in stage_rows:
+        model = row.get("model")
+        if not model:
+            continue
+        total = model_totals.setdefault(
+            model,
+            {
+                "model": model,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "estimated_input_cost": 0.0,
+                "estimated_output_cost": 0.0,
+                "estimated_total_cost": 0.0,
+            },
+        )
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            value = row.get(key)
+            if isinstance(value, int):
+                total[key] += value
+        for key in ("estimated_input_cost", "estimated_output_cost", "estimated_total_cost"):
+            value = row.get(key)
+            if total.get(key) is None or not isinstance(value, (int, float)):
+                total[key] = None
+            else:
+                total[key] += float(value)
+    return {
+        "by_model": list(model_totals.values()),
+        "by_stage": stage_rows,
+    }
+
+
+def chunk_cost_stage_label(chunk_name):
+    labels = {
+        "declarations": "Declarations chunk",
+        "database_read_forms": "Database read chunk",
+        "processing_form": "Processing form chunk",
+        "output_forms": "Output forms chunk",
+        "main_program_flow": "Main flow chunk",
+    }
+    return labels.get(str(chunk_name or ""), str(chunk_name or "Chunk").replace("_", " ").title())
 
 
 def save_validation_issues(job_folder, issues):

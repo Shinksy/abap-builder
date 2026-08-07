@@ -12,6 +12,7 @@ from services.create_abap import (
     clean_response,
     enrich_metadata,
     fixer_diagnostic_stages,
+    llm_cost_breakdown_from_result,
     maybe_run_sap_syntax_check,
     merge_processing_rule_ddic_dependencies,
     merge_specification_callable_dependencies,
@@ -23,6 +24,7 @@ from services.create_abap import (
     save_ddic_metadata,
     save_dependency_analysis,
     save_fix_summary,
+    save_model_settings,
     save_post_generation_diagnostics,
     save_validation_issues,
 )
@@ -31,7 +33,8 @@ from services.ddic_metadata_context import (
     append_ddic_catalogue,
 )
 from services.fixer import auto_fix_abap
-from services.llm import generate_code_review_repair
+from services.job_options import load_job_options
+from services.llm import generate_code_review_repair, reset_current_model_settings, set_current_model_settings
 from services.modifier_guardrails import build_identifier_provenance
 from services.progress import update_progress
 from services.sap_dependency_analysis import analyze_sap_dependencies, normalize_identifiers
@@ -90,10 +93,14 @@ def run_enhance_abap(
 ):
     job_folder = Path(jobs_folder) / job_id
     job_folder.mkdir(parents=True, exist_ok=True)
-    post_generation_diagnostics = {"stages": []}
+    options = load_job_options(jobs_folder, job_id)
+    model_settings = options.get("model_settings") or {}
+    post_generation_diagnostics = {"stages": [], "model_settings": model_settings}
     section_durations = {}
+    model_settings_token = set_current_model_settings(model_settings)
 
     try:
+        save_model_settings(job_folder, model_settings)
         update_progress(
             jobs_folder,
             job_id,
@@ -129,6 +136,7 @@ def run_enhance_abap(
             enabled=True if dependency_analyzer else None,
             llm_analyzer=dependency_analyzer,
         )
+        dependency_analysis.setdefault("_diagnostics", {})["model_settings"] = model_settings
         merge_processing_rule_ddic_dependencies(dependency_analysis, enhancement_specification)
         merge_specification_callable_dependencies(dependency_analysis, enhancement_specification)
         add_section_duration(
@@ -196,6 +204,7 @@ def run_enhance_abap(
                 "raw_response": response_text,
                 "model": model_name,
                 "usage": usage,
+                "model_settings": model_settings,
             },
         )
 
@@ -299,6 +308,8 @@ def run_enhance_abap(
             source_text=source_context,
             generated_abap=final_abap,
             section_durations=section_durations,
+            model_settings=model_settings,
+            cost_breakdown=llm_cost_breakdown_from_result(llm_result),
         )
         metrics["job_mode"] = "enhance_existing_abap"
         metrics["source_abap_characters"] = len(existing_abap)
@@ -307,6 +318,8 @@ def run_enhance_abap(
         update_progress(jobs_folder, job_id, "Complete", "ABAP enhancement complete.", stage="Complete")
     except Exception as exc:
         update_progress(jobs_folder, job_id, "Error", str(exc), stage="Error")
+    finally:
+        reset_current_model_settings(model_settings_token)
 
 
 def render_enhance_prompt(prompt_template, existing_abap, enhancement_specification):

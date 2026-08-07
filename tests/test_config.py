@@ -7,7 +7,14 @@ from unittest.mock import Mock, patch
 
 from app import create_app
 from config import ENV_FILE_PATH, env_bool, load_env_file
-from services.llm import generate_abap, sanitize_openai_proxy_environment
+from services.llm import (
+    generate_abap,
+    generate_code_review_repair,
+    generate_dependency_analysis,
+    reset_current_model_settings,
+    sanitize_openai_proxy_environment,
+    set_current_model_settings,
+)
 
 
 class ConfigTest(unittest.TestCase):
@@ -121,7 +128,11 @@ class ConfigTest(unittest.TestCase):
                     os.environ[key] = value
 
     def test_generate_abap_passes_response_format_to_responses_api(self):
-        app = create_app({"TESTING": True, "OPENAI_API_KEY": "test-key"})
+        app = create_app({
+            "TESTING": True,
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_ABAP_GENERATION_MODEL": "gpt-5.6-sol",
+        })
         response = Mock()
         response.output_text = "{\"processing_steps\":[]}"
         response.usage = None
@@ -142,7 +153,85 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual("{\"processing_steps\":[]}", result["text"])
         request = client.responses.create.call_args.kwargs
         self.assertEqual({"format": response_format}, request["text"])
-        self.assertEqual("gpt-5-mini", request["model"])
+        self.assertEqual("gpt-5.6-sol", request["model"])
+
+    def test_generate_dependency_analysis_passes_response_format_to_responses_api(self):
+        app = create_app({
+            "TESTING": True,
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_DEPENDENCY_ANALYSIS_MODEL": "gpt-5.6-luna",
+        })
+        response = Mock()
+        response.output_text = "{\"processing_steps\":[]}"
+        response.usage = None
+        response.model_dump.return_value = {"id": "response-1"}
+
+        with app.app_context(), patch("openai.OpenAI") as openai_cls:
+            client = openai_cls.return_value
+            client.responses.create.return_value = response
+            response_format = {
+                "type": "json_schema",
+                "name": "processing_plan",
+                "strict": True,
+                "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            }
+
+            result = generate_dependency_analysis("Prompt", "Source", response_format=response_format)
+
+        self.assertEqual("{\"processing_steps\":[]}", result["text"])
+        request = client.responses.create.call_args.kwargs
+        self.assertEqual({"format": response_format}, request["text"])
+        self.assertEqual("gpt-5.6-luna", request["model"])
+
+    def test_llm_wrappers_use_configured_model_names(self):
+        app = create_app({
+            "TESTING": True,
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_DEPENDENCY_ANALYSIS_MODEL": "gpt-5.6-luna",
+            "OPENAI_CODE_REVIEW_MODEL": "gpt-5.6-terra",
+        })
+        response = Mock()
+        response.output_text = "ok"
+        response.usage = None
+        response.model_dump.return_value = {"id": "response-1"}
+
+        with app.app_context(), patch("openai.OpenAI") as openai_cls:
+            client = openai_cls.return_value
+            client.responses.create.return_value = response
+
+            generate_dependency_analysis("Prompt", "Source")
+            generate_code_review_repair("Prompt", "Source")
+
+        models = [call.kwargs["model"] for call in client.responses.create.call_args_list]
+        self.assertEqual(["gpt-5.6-luna", "gpt-5.6-terra"], models)
+
+    def test_llm_wrappers_use_current_job_model_settings(self):
+        app = create_app({"TESTING": True, "OPENAI_API_KEY": "test-key"})
+        response = Mock()
+        response.output_text = "ok"
+        response.usage = None
+        response.model_dump.return_value = {"id": "response-1"}
+        model_settings = {
+            "models": {
+                "dependency_analysis": "gpt-5.6-terra",
+                "abap_generation": "gpt-5.6-sol",
+                "code_review": "gpt-5.6-luna",
+            }
+        }
+
+        with app.app_context(), patch("openai.OpenAI") as openai_cls:
+            client = openai_cls.return_value
+            client.responses.create.return_value = response
+            token = set_current_model_settings(model_settings)
+            try:
+                generate_dependency_analysis("Prompt", "Source")
+                generate_abap("Prompt", "Source")
+                generate_code_review_repair("Prompt", "Source")
+            finally:
+                reset_current_model_settings(token)
+
+        models = [call.kwargs["model"] for call in client.responses.create.call_args_list]
+        self.assertEqual(["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"], models)
 
 
 if __name__ == "__main__":

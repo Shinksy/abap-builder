@@ -3469,6 +3469,53 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("required DDIC field PA0016-PROBATION_EMAIL_SENT is missing", errors)
         self.assertNotIn("O_SEND_REQUEST->SET_STATUS_ATTRIBUTES", errors)
 
+    def test_processing_contract_prefers_cached_object_method_identity(self):
+        metadata_context = (
+            "SAP DDIC metadata catalogue:\n"
+            "Shared generation contract:\n"
+            "Exact callable identities: "
+            "CL_BCS=>CREATE_PERSISTENT, CL_BCS=>SEND, CL_BCS=>SET_DOCUMENT, "
+            "CL_BCS=>ADD_RECIPIENT, CL_BCS=>SET_SENDER, SEND_REQUEST=>SEND, "
+            "SEND_REQUEST=>SET_DOCUMENT, SEND_REQUEST=>ADD_RECIPIENT, SEND_REQUEST=>SET_SENDER\n"
+        )
+        callable_metadata = {
+            "callable_signatures": {
+                "CL_BCS=>CREATE_PERSISTENT": {
+                    "returning": {"name": "RESULT", "direction": "RETURNING", "abap_type": "CL_BCS"}
+                },
+                "SEND_REQUEST=>SEND": {"parameters": {}},
+                "SEND_REQUEST=>SET_DOCUMENT": {"parameters": {}},
+                "SEND_REQUEST=>ADD_RECIPIENT": {"parameters": {}},
+                "SEND_REQUEST=>SET_SENDER": {"parameters": {}},
+            }
+        }
+
+        contract = build_processing_contract(
+            metadata_context=metadata_context,
+            callable_metadata=callable_metadata,
+            processing_rules_text=(
+                "- Send probation review reminder emails.\n"
+                "Send Emails\n"
+                "Description: Send Emails\n"
+                "Call static method CL_BCS=>CREATE_PERSISTENT.\n"
+                "Stores the result returned by SEND_REQUEST->SEND.\n"
+                "Call instance method SEND_REQUEST->SET_DOCUMENT.\n"
+                "Call instance method SEND_REQUEST->ADD_RECIPIENT.\n"
+                "Call instance method SEND_REQUEST->SET_SENDER.\n"
+                "Call instance method SEND_REQUEST->SEND."
+            ),
+        )
+
+        self.assertIn("SEND_REQUEST=>SEND", contract["final_processing_contract"]["callables"])
+        self.assertIn("SEND_REQUEST=>SET_DOCUMENT", contract["final_processing_contract"]["callables"])
+        self.assertIn("SEND_REQUEST=>ADD_RECIPIENT", contract["final_processing_contract"]["callables"])
+        self.assertIn("SEND_REQUEST=>SET_SENDER", contract["final_processing_contract"]["callables"])
+        self.assertNotIn("CL_BCS=>SEND", contract["final_processing_contract"]["callables"])
+        self.assertNotIn("CL_BCS=>SET_DOCUMENT", contract["final_processing_contract"]["callables"])
+        self.assertNotIn("CL_BCS=>ADD_RECIPIENT", contract["final_processing_contract"]["callables"])
+        self.assertNotIn("CL_BCS=>SET_SENDER", contract["final_processing_contract"]["callables"])
+        self.assertEqual([], contract["validation_errors"])
+
     def test_processing_contract_retains_rule_only_dependencies(self):
         declaration_requirements = json.dumps(
             {

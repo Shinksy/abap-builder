@@ -1,10 +1,13 @@
 import json
 from pathlib import Path
 
+from services.model_settings import DEFAULT_MODEL_PRESET, normalize_model_settings
+
 
 DEFAULT_JOB_OPTIONS = {
     "run_sap_syntax_check": False,
     "sap_syntax_check_attempts": 2,
+    "model_preset": DEFAULT_MODEL_PRESET,
 }
 MIN_SAP_SYNTAX_CHECK_ATTEMPTS = 1
 MAX_SAP_SYNTAX_CHECK_ATTEMPTS = 10
@@ -37,6 +40,11 @@ def normalize_job_options(options):
     normalized["sap_syntax_check_attempts"] = clamp_sap_syntax_check_attempts(
         normalized.get("sap_syntax_check_attempts")
     )
+    normalized["model_settings"] = normalize_model_settings(
+        normalized.get("model_settings") or normalized,
+        config={},
+    )
+    normalized["model_preset"] = normalized["model_settings"]["preset"]
     return normalized
 
 

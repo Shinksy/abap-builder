@@ -3,6 +3,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from services.model_settings import MODEL_PRESETS, DEFAULT_MODEL_PRESET, allowed_model
+
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE_PATH = BASE_DIR / ".env"
@@ -63,7 +65,17 @@ class Config:
         str(BASE_DIR / "prompts" / "enhance_existing_abap.txt"),
     )
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-    OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+    DEFAULT_OPENAI_MODELS = MODEL_PRESETS[DEFAULT_MODEL_PRESET]["models"]
+    OPENAI_MODEL = allowed_model(os.environ.get("OPENAI_MODEL"), DEFAULT_OPENAI_MODELS["general"])
+    OPENAI_ABAP_GENERATION_MODEL = allowed_model(
+        os.environ.get("OPENAI_ABAP_GENERATION_MODEL"),
+        DEFAULT_OPENAI_MODELS["abap_generation"],
+    )
+    OPENAI_DEPENDENCY_ANALYSIS_MODEL = allowed_model(
+        os.environ.get("OPENAI_DEPENDENCY_ANALYSIS_MODEL"),
+        OPENAI_MODEL,
+    )
+    OPENAI_CODE_REVIEW_MODEL = allowed_model(os.environ.get("OPENAI_CODE_REVIEW_MODEL"), OPENAI_MODEL)
     SAP_DEPENDENCY_ANALYSIS_ENABLED = env_bool("SAP_DEPENDENCY_ANALYSIS_ENABLED", default=False)
     SAP_DDIC_METADATA_ENABLED = env_bool("SAP_DDIC_METADATA_ENABLED", fallback_name="USE_SAP_METADATA")
     SAP_API_BASE_URL = os.environ.get("SAP_API_BASE_URL")
@@ -95,6 +107,18 @@ class Config:
         "gpt-5-mini": {
             "input_per_1m_tokens": 0.25,
             "output_per_1m_tokens": 2.00,
+        },
+        "gpt-5.6-luna": {
+            "input_per_1m_tokens": 1.00,
+            "output_per_1m_tokens": 6.00,
+        },
+        "gpt-5.6-terra": {
+            "input_per_1m_tokens": 2.50,
+            "output_per_1m_tokens": 15.00,
+        },
+        "gpt-5.6-sol": {
+            "input_per_1m_tokens": 5.00,
+            "output_per_1m_tokens": 30.00,
         }
     }
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024
