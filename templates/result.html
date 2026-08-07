@@ -7,6 +7,10 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   </head>
   <body>
+    <nav class="app-nav" aria-label="Main navigation">
+      <a href="{{ url_for('home') }}">New</a>
+      <a href="{{ url_for('jobs') }}">Jobs</a>
+    </nav>
     {% macro processing_time(value) -%}
       {% if value is number %}{{ "%.2f"|format(value) }}s{% else %}Unavailable{% endif %}
     {%- endmacro %}

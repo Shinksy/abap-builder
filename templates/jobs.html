@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Jobs - SAP AI ABAP Generator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <nav class="app-nav" aria-label="Main navigation">
+      <a href="{{ url_for('home') }}">New</a>
+      <a href="{{ url_for('jobs') }}">Jobs</a>
+    </nav>
+    <main class="page">
+      <section class="panel jobs-panel">
+        <div class="result-header">
+          <h1>Jobs</h1>
+          <a class="button-link" href="{{ url_for('home') }}">New</a>
+        </div>
+
+        {% if jobs %}
+          <div class="jobs-table-wrap">
+            <table class="jobs-table">
+              <thead>
+                <tr>
+                  <th>Date/time</th>
+                  <th>Specification/file name</th>
+                  <th>Job mode</th>
+                  <th>OpenAI model preset</th>
+                  <th>Status</th>
+                  <th>Total duration</th>
+                  <th>Total cost</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for job in jobs %}
+                  <tr>
+                    <td>{{ job.started_at_display }}</td>
+                    <td>{{ job.specification_name }}</td>
+                    <td>{{ job.job_mode_display }}</td>
+                    <td>{{ job.model_preset_label }}</td>
+                    <td>{{ job.status }}</td>
+                    <td>{{ job.duration_display }}</td>
+                    <td>{{ job.total_cost_display }}</td>
+                    <td>
+                      <div class="table-actions">
+                        {% if job.view_target == "result" %}
+                          <a class="button-link compact-link" href="{{ url_for('result', job_id=job.job_id) }}">View</a>
+                        {% else %}
+                          <a class="button-link compact-link" href="{{ url_for('progress', job_id=job.job_id) }}">View</a>
+                        {% endif %}
+                        <form action="{{ url_for('delete_job_route', job_id=job.job_id) }}" method="post" onsubmit="return confirm('Delete job {{ job.job_id }} and its uploaded/generated files?');">
+                          <button class="danger-button compact-button" type="submit">Delete</button>
+                        </form>
+                      </div>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p>No jobs found.</p>
+        {% endif %}
+      </section>
+    </main>
+  </body>
+</html>

@@ -9,8 +9,28 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
+.app-nav {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 24px 0;
+}
+
+.app-nav a {
+  padding: 8px 10px;
+  color: #0b7285;
+  border-radius: 6px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.app-nav a:hover,
+.app-nav a:focus {
+  background: #e6fffa;
+}
+
 .page {
-  min-height: 100vh;
+  min-height: calc(100vh - 54px);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -26,6 +46,10 @@ body {
 
 .panel.wide {
   width: min(100%, 900px);
+}
+
+.jobs-panel {
+  width: min(100%, 1320px);
 }
 
 h1 {
@@ -250,6 +274,16 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.danger-button {
+  background: #b42318;
+}
+
+.compact-button,
+.compact-link {
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
 .button-row {
   display: flex;
   flex-wrap: wrap;
@@ -317,7 +351,9 @@ summary {
   overflow-x: auto;
 }
 
-.metrics-table {
+.metrics-table,
+.jobs-table {
+  min-width: 1060px;
   width: 100%;
   border-collapse: collapse;
   margin-top: 10px;
@@ -325,7 +361,9 @@ summary {
 }
 
 .metrics-table th,
-.metrics-table td {
+.metrics-table td,
+.jobs-table th,
+.jobs-table td {
   padding: 8px;
   border-bottom: 1px solid #d9e2ec;
   text-align: right;
@@ -333,8 +371,30 @@ summary {
 }
 
 .metrics-table th:first-child,
-.metrics-table td:first-child {
+.metrics-table td:first-child,
+.jobs-table th:first-child,
+.jobs-table td:first-child {
   text-align: left;
+}
+
+.jobs-table-wrap {
+  overflow-x: auto;
+}
+
+.jobs-table td:nth-child(2) {
+  white-space: nowrap;
+  overflow-wrap: anywhere;
+}
+
+.table-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.table-actions form {
+  display: block;
 }
 
 .stage-cost-table th:nth-child(2),

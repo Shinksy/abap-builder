@@ -8,6 +8,7 @@ from config import Config
 from services.callable_signature_provider import get_configured_callable_signature_provider
 from services.ddic_metadata_provider import get_configured_ddic_metadata_provider
 from services.job_options import load_job_options, save_job_options
+from services.jobs import delete_job, list_jobs
 from services.llm import generate_code_review_repair
 from services.model_settings import model_options_from_form, model_settings_for_template, normalize_model_settings
 from services.metadata_cache_upload import (
@@ -77,6 +78,16 @@ def create_app(config_overrides=None):
     @app.get("/")
     def home():
         return render_template("home.html", **home_template_context())
+
+    @app.get("/jobs")
+    def jobs():
+        return render_template("jobs.html", jobs=list_jobs(jobs_folder, upload_folder))
+
+    @app.post("/jobs/<job_id>/delete")
+    def delete_job_route(job_id):
+        if not delete_job(jobs_folder, upload_folder, job_id):
+            abort(404)
+        return redirect(url_for("jobs"))
 
     @app.post("/metadata-cache/upload")
     def upload_metadata_cache_file():

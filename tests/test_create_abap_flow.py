@@ -99,6 +99,44 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
+    def write_job_fixture(
+        self,
+        jobs_folder,
+        uploads_folder,
+        job_id,
+        status,
+        stage,
+        started_at,
+        completed_at,
+        upload_name,
+        generated=False,
+        metrics=None,
+        options=None,
+    ):
+        job_folder = Path(jobs_folder) / job_id
+        upload_folder = Path(uploads_folder) / job_id
+        job_folder.mkdir(parents=True, exist_ok=True)
+        upload_folder.mkdir(parents=True, exist_ok=True)
+        (upload_folder / upload_name).write_text("Create a test report.", encoding="utf-8")
+        status_payload = {
+            "status": status,
+            "stage": stage,
+            "current_stage": stage,
+            "message": stage,
+            "stage_message": stage,
+            "started_at": started_at,
+            "updated_at": completed_at or started_at,
+            "completed_at": completed_at,
+            "activity_messages": [],
+        }
+        (job_folder / "status.json").write_text(json.dumps(status_payload), encoding="utf-8")
+        if generated:
+            (job_folder / "generated.abap").write_text("REPORT ztest.", encoding="utf-8")
+        if metrics is not None:
+            (job_folder / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+        if options is not None:
+            (job_folder / "options.json").write_text(json.dumps(options), encoding="utf-8")
+
     def test_skeleton_and_specification_are_inserted_into_prompt(self):
         rendered = render_create_prompt(
             "Header\n{{REPORT_SKELETON}}\n{{DATABASE_READ_PATTERNS}}\nBody\n{{SPECIFICATION}}",
@@ -947,8 +985,8 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'for="tab-settings">Settings</label>', response.data)
         self.assertIn(b'<section class="tab-panel tab-panel-settings">', response.data)
-        self.assertIn(b'value="balanced" checked', response.data)
-        self.assertIn(b'value="economy"', response.data)
+        self.assertIn(b'value="economy" checked', response.data)
+        self.assertIn(b'value="balanced"', response.data)
         self.assertIn(b'value="best_quality"', response.data)
         self.assertIn(b'value="advanced"', response.data)
         self.assertIn(b'form="new-program-form"', response.data)
@@ -967,7 +1005,7 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertIn(b'GPT-5 Mini', response.data)
         self.assertEqual(8, response.data.count(b'value="gpt-5-mini"'))
 
-    def test_upload_saves_default_balanced_model_settings(self):
+    def test_upload_saves_default_economy_model_settings(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
         temp_path.mkdir()
         try:
@@ -990,13 +1028,13 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertEqual(response.status_code, 302)
             job_id = response.headers["Location"].rsplit("/", 1)[-1]
             options = json.loads((jobs_folder / job_id / "options.json").read_text(encoding="utf-8"))
-            self.assertEqual("balanced", options["model_settings"]["preset"])
+            self.assertEqual("economy", options["model_settings"]["preset"])
             self.assertEqual(
                 {
                     "general": "gpt-5.6-luna",
                     "dependency_analysis": "gpt-5.6-luna",
                     "abap_generation": "gpt-5.6-terra",
-                    "code_review": "gpt-5.6-terra",
+                    "code_review": "gpt-5.6-luna",
                 },
                 options["model_settings"]["models"],
             )
@@ -1040,6 +1078,148 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertEqual("gpt-5-mini", options["model_settings"]["models"]["code_review"])
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_jobs_page_lists_newest_jobs_with_view_actions(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            completed_job = "completed_job"
+            failed_job = "failed_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                completed_job,
+                status="Complete",
+                stage="Complete",
+                started_at="2026-08-06T10:00:00+00:00",
+                completed_at="2026-08-06T10:00:12+00:00",
+                upload_name="old_spec.txt",
+                generated=True,
+                metrics={
+                    "job_mode": "create_abap",
+                    "duration_seconds": 12.5,
+                    "estimated_input_cost": 0.012345,
+                    "estimated_output_cost": 0.111111,
+                    "estimated_total_cost": 0.123456,
+                    "model_settings": {"preset": "balanced", "preset_label": "Balanced"},
+                },
+                options={"model_settings": {"preset": "balanced", "preset_label": "Balanced", "models": {}}},
+            )
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                failed_job,
+                status="Error",
+                stage="Analyzing dependencies",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at="2026-08-07T09:00:05+00:00",
+                upload_name="new_spec.txt",
+                generated=False,
+                metrics=None,
+                options={"model_settings": {"preset": "economy", "preset_label": "Economy", "models": {}}},
+            )
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            response = app.test_client().get("/jobs")
+
+            self.assertEqual(response.status_code, 200)
+            html = response.data.decode("utf-8")
+            self.assertIn('href="/jobs"', html)
+            self.assertLess(html.index(failed_job), html.index(completed_job))
+            self.assertIn("07-08-2026 10:00:00", html)
+            self.assertIn("06-08-2026 11:00:00", html)
+            self.assertNotIn("<th>Job ID</th>", html)
+            self.assertNotIn(f"<code>{failed_job}</code>", html)
+            self.assertNotIn(f"<code>{completed_job}</code>", html)
+            self.assertIn("new_spec.txt", html)
+            self.assertIn("old_spec.txt", html)
+            self.assertIn("Error", html)
+            self.assertIn("Complete", html)
+            self.assertIn("Economy", html)
+            self.assertIn("Balanced", html)
+            self.assertIn("12.50s", html)
+            self.assertIn("$0.123456", html)
+            self.assertIn(f'href="/progress/{failed_job}"', html)
+            self.assertIn(f'href="/result/{completed_job}"', html)
+            self.assertIn("return confirm(", html)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_jobs_view_links_open_existing_pages(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            completed_job = "completed_job"
+            running_job = "running_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                completed_job,
+                status="Complete",
+                stage="Complete",
+                started_at="2026-08-07T08:00:00+00:00",
+                completed_at="2026-08-07T08:00:03+00:00",
+                upload_name="complete_spec.txt",
+                generated=True,
+                metrics={"job_mode": "create_abap", "duration_seconds": 3.0},
+            )
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                running_job,
+                status="Running",
+                stage="Processing Chunk 1 of 5",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at=None,
+                upload_name="running_spec.txt",
+                generated=False,
+                metrics=None,
+            )
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+            client = app.test_client()
+
+            result_response = client.get(f"/result/{completed_job}")
+            progress_response = client.get(f"/progress/{running_job}")
+
+            self.assertEqual(result_response.status_code, 200)
+            self.assertIn(b"Generated ABAP", result_response.data)
+            self.assertEqual(progress_response.status_code, 200)
+            self.assertIn(b"Processing chunks", progress_response.data)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_jobs_delete_removes_job_and_upload_files(self):
+        jobs_folder = Path("jobs")
+        uploads_folder = Path("uploads")
+        job_id = "delete_job"
+        app = create_app({
+            "TESTING": True,
+            "UPLOAD_FOLDER": str(uploads_folder),
+            "JOBS_FOLDER": str(jobs_folder),
+        })
+
+        with patch("app.delete_job", return_value=True) as delete_job_mock:
+            response = app.test_client().post(f"/jobs/{job_id}/delete")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/jobs")
+        delete_job_mock.assert_called_once()
+        called_jobs_folder, called_uploads_folder, called_job_id = delete_job_mock.call_args.args
+        self.assertEqual(Path(called_jobs_folder), jobs_folder)
+        self.assertEqual(Path(called_uploads_folder), uploads_folder)
+        self.assertEqual(called_job_id, job_id)
 
     def test_new_jobs_begin_at_queued(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"

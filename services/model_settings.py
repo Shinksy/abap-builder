@@ -49,7 +49,7 @@ MODEL_PRESETS = {
     },
 }
 
-DEFAULT_MODEL_PRESET = "balanced"
+DEFAULT_MODEL_PRESET = "economy"
 
 
 def allowed_model(value, fallback):
@@ -58,8 +58,8 @@ def allowed_model(value, fallback):
 
 
 def env_default_model_settings(config):
-    balanced = MODEL_PRESETS[DEFAULT_MODEL_PRESET]["models"]
-    general = allowed_model(config.get("OPENAI_MODEL"), balanced["general"])
+    default_models = MODEL_PRESETS[DEFAULT_MODEL_PRESET]["models"]
+    general = allowed_model(config.get("OPENAI_MODEL"), default_models["general"])
     return {
         "general": general,
         "dependency_analysis": allowed_model(
@@ -68,7 +68,7 @@ def env_default_model_settings(config):
         ),
         "abap_generation": allowed_model(
             config.get("OPENAI_ABAP_GENERATION_MODEL"),
-            balanced["abap_generation"],
+            default_models["abap_generation"],
         ),
         "code_review": allowed_model(
             config.get("OPENAI_CODE_REVIEW_MODEL"),
