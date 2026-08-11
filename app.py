@@ -155,6 +155,7 @@ def create_app(config_overrides=None):
             {
                 "run_sap_syntax_check": run_sap_syntax_check,
                 "sap_syntax_check_attempts": request.form.get("sap_syntax_check_attempts"),
+                "final_assembly_mode": request.form.get("final_assembly_mode"),
                 "model_settings": model_settings,
             },
         )

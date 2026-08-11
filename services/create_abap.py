@@ -303,6 +303,7 @@ def run_create_abap(
             declaration_requirements=prepared_declaration_requirements,
             approved_processing_plan=approved_processing_plan,
             model_settings=model_settings,
+            final_assembly_mode=options.get("final_assembly_mode"),
         )
         duration_seconds = time.perf_counter() - started_at
         add_section_duration(section_durations, "generated_abap", duration_seconds)
@@ -1136,6 +1137,7 @@ def generate_abap_with_orchestrator(
     declaration_requirements=None,
     approved_processing_plan=None,
     model_settings=None,
+    final_assembly_mode=None,
 ):
     generator = abap_generator or generate_abap
     try:
@@ -1149,6 +1151,7 @@ def generate_abap_with_orchestrator(
             ddic_metadata=ddic_metadata,
             declaration_requirements=declaration_requirements,
             approved_processing_plan=approved_processing_plan,
+            final_assembly_mode=final_assembly_mode,
         )
     except Exception as exc:
         fallback = generator(prompt_text, source_text)
@@ -1163,6 +1166,7 @@ def generate_abap_with_orchestrator(
             "used_fallback": True,
             "fallback_reason": f"{type(exc).__name__}: {exc}",
             "processing_plan": processing_plan,
+            "final_assembly_mode": final_assembly_mode,
         }
     if isinstance(result, dict):
         result["model_settings"] = model_settings or {}

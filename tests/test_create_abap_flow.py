@@ -1028,6 +1028,7 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertEqual(response.status_code, 302)
             job_id = response.headers["Location"].rsplit("/", 1)[-1]
             options = json.loads((jobs_folder / job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertEqual("app", options["final_assembly_mode"])
             self.assertEqual("economy", options["model_settings"]["preset"])
             self.assertEqual(
                 {
@@ -1038,6 +1039,36 @@ class CreateAbapFlowTest(unittest.TestCase):
                 },
                 options["model_settings"]["models"],
             )
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_upload_saves_llm_final_assembly_mode(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            with patch("app.start_create_abap_job"):
+                response = app.test_client().post(
+                    "/upload",
+                    data={
+                        "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
+                        "final_assembly_mode": "llm",
+                    },
+                    content_type="multipart/form-data",
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            options = json.loads((jobs_folder / job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertEqual("llm", options["final_assembly_mode"])
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 

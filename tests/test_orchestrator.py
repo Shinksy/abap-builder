@@ -1138,6 +1138,65 @@ class OrchestratorTest(unittest.TestCase):
         self.assertLess(assembled.index("PARAMETERS:"), assembled.index("SELECT-OPTIONS:"))
         self.assertLess(assembled.index("SELECT-OPTIONS:"), assembled.index("START-OF-SELECTION."))
 
+    def test_app_assembly_deduplicates_global_table_declarations(self):
+        assembled = assemble_abap_chunks(
+            [
+                {
+                    "name": "declarations",
+                    "text": "\n".join(
+                        [
+                            "REPORT ztest.",
+                            "DATA: BEGIN OF t_output OCCURS 0, pernr TYPE pa0000-pernr, END OF t_output.",
+                            "TYPES: BEGIN OF ty_output,",
+                            "         pernr TYPE pa0000-pernr,",
+                            "       END OF ty_output.",
+                            "DATA: BEGIN OF t_output OCCURS 0,",
+                            "        pernr TYPE pa0000-pernr,",
+                            "      END OF t_output.",
+                        ]
+                    ),
+                },
+                {"name": "main_program_flow", "text": "START-OF-SELECTION."},
+            ],
+            final_assembly_mode="app",
+        )
+
+        self.assertEqual(1, assembled.lower().count("begin of t_output"))
+        self.assertIn("START-OF-SELECTION.", assembled)
+
+    def test_llm_final_assembly_mode_uses_final_model_call(self):
+        prompts = []
+
+        def generator(prompt_text, source_text):
+            prompts.append(prompt_text)
+            if "Chunk: declarations" in prompt_text:
+                return {"text": "REPORT zchunk.", "model": "chunk-model", "usage": {"input_tokens": 1}}
+            if "Chunk: database_read_forms" in prompt_text:
+                return {"text": "FORM read_data.\nENDFORM.", "model": "chunk-model", "usage": {"input_tokens": 1}}
+            if "Chunk: processing_form" in prompt_text:
+                return {"text": "FORM process_data.\nENDFORM.", "model": "chunk-model", "usage": {"input_tokens": 1}}
+            if "Chunk: main_program_flow" in prompt_text:
+                return {"text": "START-OF-SELECTION.", "model": "chunk-model", "usage": {"input_tokens": 1}}
+            if "Assemble ABAP generation chunks" in prompt_text:
+                self.assertIn("===== declarations =====", source_text)
+                self.assertIn("===== main_program_flow =====", source_text)
+                return {"text": "REPORT zfinal.", "model": "assembly-model", "usage": {"input_tokens": 2}}
+            return {"text": "", "model": "chunk-model", "usage": None}
+
+        result = generate_chunked_abap_program(
+            "Shared generation contract:\nExact FORM names: read_data, process_data",
+            "Create a report.",
+            abap_generator=generator,
+            declaration_requirements={"requirements": {"report_name": "ztest"}},
+            approved_processing_plan={"plan": {"processing_steps": []}},
+            final_assembly_mode="llm",
+        )
+
+        self.assertEqual("REPORT zfinal.", result["text"])
+        self.assertEqual("llm", result["final_assembly_mode"])
+        self.assertEqual("assembly-model", result["model"])
+        self.assertTrue(any("Assemble ABAP generation chunks" in prompt for prompt in prompts))
+
     def test_assembly_preserves_selection_screen_example_exactly(self):
         declaration_chunk = "\n".join(
             [

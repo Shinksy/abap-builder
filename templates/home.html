@@ -92,6 +92,17 @@
                 </label>
                 <input id="sap_syntax_check_attempts" class="syntax-attempts-input" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2" aria-label="SAP syntax API calls">
               </div>
+              <fieldset class="final-assembly-settings">
+                <legend>Final ABAP Assembly</legend>
+                <label class="radio-option">
+                  <input name="final_assembly_mode" type="radio" value="app" checked>
+                  Application assembler
+                </label>
+                <label class="radio-option">
+                  <input name="final_assembly_mode" type="radio" value="llm">
+                  LLM assembler
+                </label>
+              </fieldset>
               <button type="submit">Generate</button>
             </form>
           </section>

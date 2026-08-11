@@ -6,6 +6,12 @@ from time import perf_counter
 from services.abap_source import split_code_and_comment, statement_ends
 from services.callable_signature_provider import normalize_provider_signatures
 from services.ddic_metadata_context import field_detail, normalized_fields, normalized_tables
+from services.final_assembler import (
+    APP_FINAL_ASSEMBLY_MODE,
+    LLM_FINAL_ASSEMBLY_MODE,
+    assemble_final_abap_from_chunks,
+    normalize_final_assembly_mode,
+)
 from services.llm import generate_abap
 CHUNK_DIAGNOSTIC = "abap_generation_chunks.json"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +105,7 @@ def generate_chunked_abap_program(
     ddic_metadata=None,
     declaration_requirements=None,
     approved_processing_plan=None,
+    final_assembly_mode=APP_FINAL_ASSEMBLY_MODE,
 ):
     generator = abap_generator or generate_abap
     if declaration_requirements is None:
@@ -252,17 +259,49 @@ def generate_chunked_abap_program(
                 chunks + [failed],
                 processing_plan=processing_plan,
             ) from exc
+    assembly_mode = normalize_final_assembly_mode(final_assembly_mode)
+    final_assembly_result = None
+    if assembly_mode == LLM_FINAL_ASSEMBLY_MODE:
+        if pre_chunk_progress_callback:
+            pre_chunk_progress_callback("Assembling final ABAP with LLM")
+        started_at = perf_counter()
+        final_assembly_result = generator(
+            final_llm_assembly_prompt(),
+            final_llm_assembly_source(chunks),
+        )
+        final_text = clean_abap_response(response_text(final_assembly_result))
+        final_assembly_result = {
+            "mode": assembly_mode,
+            "prompt": final_llm_assembly_prompt(),
+            "source": final_llm_assembly_source(chunks),
+            "text": final_text,
+            "model": final_assembly_result.get("model") if isinstance(final_assembly_result, dict) else None,
+            "usage": final_assembly_result.get("usage") if isinstance(final_assembly_result, dict) else None,
+            "duration_seconds": perf_counter() - started_at,
+        }
+    else:
+        final_text = assemble_abap_chunks(chunks, final_assembly_mode=assembly_mode)
+        final_assembly_result = {
+            "mode": assembly_mode,
+            "text": final_text,
+            "model": None,
+            "usage": None,
+            "duration_seconds": None,
+        }
     return {
-        "text": assemble_abap_chunks(chunks),
+        "text": final_text,
         "chunks": chunks,
-        "model": first_value(chunk.get("model") for chunk in chunks),
+        "final_assembly_mode": assembly_mode,
+        "final_assembly": final_assembly_result,
+        "model": final_assembly_result.get("model") or first_value(chunk.get("model") for chunk in chunks),
         "usage": aggregate_usage(
             [declaration_requirements.get("usage"), processing_plan.get("usage")]
             + [chunk.get("usage") for chunk in chunks]
+            + [final_assembly_result.get("usage")]
         ),
         "declaration_requirements": declaration_requirements,
         "processing_plan": processing_plan,
-        "post_generation_source_stages": post_generation_source_stages(chunks),
+        "post_generation_source_stages": post_generation_source_stages(chunks, final_text),
     }
 
 
@@ -6020,7 +6059,36 @@ def prompt_block(prompt_text, start_marker, stop_markers):
     return text[start:end].strip()
 
 
-def assemble_abap_chunks(chunks):
+def assemble_abap_chunks(chunks, final_assembly_mode=APP_FINAL_ASSEMBLY_MODE):
+    if normalize_final_assembly_mode(final_assembly_mode) == APP_FINAL_ASSEMBLY_MODE:
+        return assemble_final_abap_from_chunks(chunks)
+    return assemble_abap_chunks_from_llm_sections(chunks)
+
+
+def final_llm_assembly_prompt():
+    return "\n".join(
+        [
+            "Assemble ABAP generation chunks into one complete classical SAP ECC ABAP report.",
+            "Use only the supplied chunk responses.",
+            "Preserve the implemented business logic, table reads, SELECT field lists, WHERE clauses, FORM names, and output behavior.",
+            "Resolve mechanical assembly problems such as duplicate global declarations, duplicate FORM blocks, misplaced declarations, or repeated REPORT statements.",
+            "Do not add fields to SELECT field lists unless they are explicitly required to be read or returned.",
+            "Fields used only in WHERE conditions must remain in the WHERE clause and must not be added to SELECT lists or output structures.",
+            "Return ABAP code only.",
+        ]
+    )
+
+
+def final_llm_assembly_source(chunks):
+    blocks = []
+    for chunk in chunks or []:
+        name = (chunk or {}).get("name", "chunk")
+        text = (chunk or {}).get("text", "")
+        blocks.append(f"===== {name} =====\n{text}".strip())
+    return "\n\n".join(blocks)
+
+
+def assemble_abap_chunks_from_llm_sections(chunks):
     sections = {
         "report_declarations": [],
         "selection_screen": [],
@@ -6049,7 +6117,7 @@ def assemble_abap_chunks(chunks):
     )
 
 
-def post_generation_source_stages(chunks):
+def post_generation_source_stages(chunks, assembled_source=None):
     declaration_chunk = next((chunk for chunk in chunks or [] if chunk.get("name") == "declarations"), None)
     stages = []
     if declaration_chunk:
@@ -6061,7 +6129,10 @@ def post_generation_source_stages(chunks):
             "declarations_immediately_before_assembly",
         ):
             stages.append({"stage": name, "source": diagnostics.get(name, "")})
-    stages.append({"stage": "complete_source_immediately_after_assembly", "source": assemble_abap_chunks(chunks)})
+    stages.append({
+        "stage": "complete_source_immediately_after_assembly",
+        "source": str(assembled_source) if assembled_source is not None else assemble_abap_chunks(chunks),
+    })
     return stages
 
 
@@ -6237,6 +6308,8 @@ def save_chunk_diagnostic(job_folder, generation_result):
     payload = {
         "chunks": (generation_result or {}).get("chunks", []),
         "assembled_abap": (generation_result or {}).get("text", ""),
+        "final_assembly_mode": (generation_result or {}).get("final_assembly_mode"),
+        "final_assembly": (generation_result or {}).get("final_assembly"),
         "post_generation_source_stages": (generation_result or {}).get("post_generation_source_stages", []),
         "used_fallback": bool((generation_result or {}).get("used_fallback")),
         "fallback_reason": (generation_result or {}).get("fallback_reason"),

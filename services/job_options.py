@@ -1,12 +1,14 @@
 import json
 from pathlib import Path
 
+from services.final_assembler import APP_FINAL_ASSEMBLY_MODE, normalize_final_assembly_mode
 from services.model_settings import DEFAULT_MODEL_PRESET, normalize_model_settings
 
 
 DEFAULT_JOB_OPTIONS = {
     "run_sap_syntax_check": False,
     "sap_syntax_check_attempts": 2,
+    "final_assembly_mode": APP_FINAL_ASSEMBLY_MODE,
     "model_preset": DEFAULT_MODEL_PRESET,
 }
 MIN_SAP_SYNTAX_CHECK_ATTEMPTS = 1
@@ -39,6 +41,9 @@ def normalize_job_options(options):
     normalized["run_sap_syntax_check"] = bool(normalized.get("run_sap_syntax_check"))
     normalized["sap_syntax_check_attempts"] = clamp_sap_syntax_check_attempts(
         normalized.get("sap_syntax_check_attempts")
+    )
+    normalized["final_assembly_mode"] = normalize_final_assembly_mode(
+        normalized.get("final_assembly_mode")
     )
     normalized["model_settings"] = normalize_model_settings(
         normalized.get("model_settings") or normalized,
