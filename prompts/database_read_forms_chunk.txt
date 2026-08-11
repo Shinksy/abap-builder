@@ -4,6 +4,14 @@ Generate only FORM...ENDFORM routines that read SAP database content.
 Rules:
 - Use classical SAP ECC Open SQL.
 - Use explicit SELECT field lists.
+- Include only fields explicitly required to be read or returned in each SELECT field list.
+- Fields used only in WHERE conditions are filter fields and must not be added to the SELECT field list.
+- Do not add WHERE-only fields to internal table structures, work areas, processing structures, or output structures unless they are explicitly required elsewhere in the specification.
+- Implement every table read explicitly requested in the specification, including dependent table reads.
+- Do not omit a table read because some or all of its fields are used only for filtering, or because its returned fields are used later for output or processing rather than selection.
+- For each requested table read, use only the fields listed as Read Fields in the SELECT field list.
+- Keep WHERE-only fields in the WHERE clause only.
+- Preserve the order and dependencies of table reads defined by the specification.
 - Use SELECT SINGLE only for one target row and INTO TABLE only for multi-row results.
 - Protect every FOR ALL ENTRIES query with an IS NOT INITIAL guard for the driving internal table.
 - Use only the DDIC fields shown in the supplied metadata.

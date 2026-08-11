@@ -5,14 +5,41 @@ Return the complete updated ABAP source only. Do not use Markdown fences.
 Preservation rules:
 
 - Preserve the existing program structure, coding style, naming conventions, comments, and formatting wherever possible.
+- Treat the existing source as authoritative.
 - Implement only the requested enhancement.
+- Make only the minimum source changes required to implement the requested enhancement.
+- Preserve existing statement structure, clause order, line breaks, indentation, spacing, comments, and punctuation wherever practical.
+- Do not modernise, reformat, normalise, reorder, or otherwise rewrite unaffected code.
+- Do not rename existing variables, change existing types, refactor existing declarations, correct apparent inconsistencies, or make cleanup changes that are not required by the requested enhancement.
+- An existing line may only be changed when that exact line change is necessary to implement the requested enhancement.
+- Do not change an existing declaration from one type to another merely because another type name appears more appropriate.
+- Do not regenerate an entire existing statement when only part of that statement needs changing.
+- When an enhancement changes an existing multi-line statement, keep every unaffected line of that statement exactly as-is and modify only the line or token that must change.
+- When adding to an existing statement, add the new item at the narrowest valid location in the existing statement instead of reconstructing the statement.
 - Do not rewrite unrelated routines, declarations, selection screens, event blocks, or output logic.
 - Keep existing FORM names and PERFORM flow unless the requested enhancement requires a focused addition.
+- Before adding new data access or a new routine, inspect the existing chunk for a suitable SELECT, READ TABLE, FORM, event block, LOOP, or processing block that can be safely extended.
+- If the required table or internal table is already being read in the existing code, extend that existing read or SELECT with the additional field or processing needed instead of creating a duplicate read.
+- Do not create a second SELECT, READ TABLE, or lookup for the same data source unless the requested enhancement genuinely requires a different key, cardinality, timing, or target.
+- Do not create a new FORM when the requested enhancement can be made safely inside an existing relevant routine.
+- Only create new logic when no appropriate existing statement, routine, or processing block can be extended.
+- Ensure every new variable, type, field symbol, selection parameter, routine, method, function module, and callable reference introduced by the enhancement has a matching existing or newly added definition.
+- Do not introduce duplicate DATA, TYPES, CONSTANTS, FIELD-SYMBOLS, PARAMETERS, SELECT-OPTIONS, FORM, method, or callable definitions.
+- Do not leave orphan PERFORM, method, function module, variable, or type references.
+- If the requested logic has already been implemented in an existing relevant block, do not add an extra wrapper FORM, PERFORM, method, or call around the same logic.
+- Coordinate changes across affected chunks: each new routine, internal table, work area, database read, and PERFORM call for the requested enhancement must have a single owner in the existing processing flow.
+- If another affected chunk already implements the same requested enhancement, reuse that implementation and do not generate a duplicate routine, duplicate declaration, duplicate database read, or duplicate call.
+- If two chunks would require conflicting versions of the same new routine or lookup, do not merge both versions.
 - Prefer classical SAP ECC-compatible syntax.
 - Do not introduce inline DATA(...), @DATA(...), FINAL(...), VALUE #(...), string templates, xsdbool, line_exists, or other modern ABAP syntax.
 - Do not invent SAP table fields, structure components, data elements, function modules, classes, methods, or DDIC objects.
 - Every new external SAP identifier must come from the existing program, the functional specification, verified SAP metadata, or callable metadata.
 - If required SAP metadata is unknown, leave the existing source unchanged around that requirement and add a clear ABAP comment that identifies the unresolved metadata requirement.
+
+Example of the expected edit style:
+
+- If a field must be added to an existing SELECT field list, add that field to the existing field list and preserve the SELECT statement's existing clause order, indentation, WHERE conditions, INTO target, and comments.
+- Apply the same minimal-edit rule generically to IF, LOOP, READ TABLE, CALL FUNCTION, PERFORM, DATA/TYPES declarations, APPEND/MOVE assignments, and any other existing ABAP statement.
 
 Functional specification:
 

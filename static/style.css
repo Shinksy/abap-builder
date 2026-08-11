@@ -501,6 +501,23 @@ summary {
   gap: 12px;
 }
 
+.review-summary {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 20px;
+}
+
+.review-summary dt {
+  color: #52606d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.review-summary dd {
+  margin: 0;
+  font-weight: 700;
+}
+
 .chunk-diagnostics {
   display: grid;
   gap: 12px;

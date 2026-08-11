@@ -1055,6 +1055,9 @@ def normalized_select_clause_order(statement_text):
     if not target_match:
         return None
 
+    if select_target_clause_is_before_trailing_clauses(body, target_match):
+        return None
+
     target_clause = target_match.group(0).strip()
     without_target = (body[: target_match.start()] + body[target_match.end() :]).strip()
     without_target = re.sub(r"\s+", " ", without_target)
@@ -1070,6 +1073,15 @@ def normalized_select_clause_order(statement_text):
         + without_target[insertion_index:].lstrip()
     ).strip()
     return re.sub(r"\s+", " ", fixed_body) + "."
+
+
+def select_target_clause_is_before_trailing_clauses(statement_body, target_match):
+    trailing_match = re.search(
+        r"\b(FOR\s+ALL\s+ENTRIES\s+IN|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|UP\s+TO|PACKAGE\s+SIZE)\b",
+        statement_body,
+        re.IGNORECASE,
+    )
+    return not trailing_match or target_match.start() < trailing_match.start()
 
 
 def select_target_clause_match(statement_body):

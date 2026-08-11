@@ -84,6 +84,31 @@ class DdicMetadataContextTest(unittest.TestCase):
 
         self.assertEqual(extract_relevant_ddic_names(text), ["VBAK", "VBAP", "BAPIRET2", "/ACME/V_ORD"])
 
+    def test_table_read_section_headings_extract_requested_tables(self):
+        text = "\n".join(
+            [
+                "## Table Reads",
+                "### PA0000",
+                "Read Fields:",
+                "* PERNR",
+                "### PA0002",
+                "Read PA0002 as a separate dependent table read.",
+                "Read Fields:",
+                "* PERNR",
+                "* VORNA",
+                "* NACHN",
+                "## Processing Rules",
+                "### NOT_A_TABLE",
+            ]
+        )
+
+        dependencies = extract_typed_ddic_dependencies(text)
+        dependency_keys = {(item["kind"], item["name"], item["source"]) for item in dependencies}
+
+        self.assertIn(("ddic_table", "PA0000", "table_read_heading"), dependency_keys)
+        self.assertIn(("ddic_table", "PA0002", "table_read_heading"), dependency_keys)
+        self.assertEqual(extract_relevant_ddic_names(text), ["PA0000", "PA0002"])
+
     def test_markdown_bullets_preserve_ddic_evidence_in_specification_mode(self):
         text = "\n".join(["* s_matnr FOR MARA-MATNR", "* s_kunnr FOR KNA1-KUNNR"])
 
@@ -194,6 +219,26 @@ class DdicMetadataContextTest(unittest.TestCase):
         self.assertIn("EDIDC:", catalogue)
         self.assertIn("DOCNUM [NUMC(16); key; IDoc number]", catalogue)
         self.assertIn("MESTYP [CHAR(30); Message Type]", catalogue)
+
+    def test_compact_catalogue_uses_provider_field_order_before_truncating(self):
+        catalogue = render_compact_ddic_catalogue(
+            {
+                "tables": {
+                    "ZREAD": {
+                        "fields": {
+                            "ALPHA": {"name": "ALPHA"},
+                            "BETA": {"name": "BETA"},
+                            "GAMMA": {"name": "GAMMA"},
+                        },
+                        "field_order": ["GAMMA", "ALPHA", "BETA"],
+                    }
+                }
+            },
+            max_fields_per_table=2,
+        )
+
+        self.assertIn("- ZREAD: GAMMA, ALPHA", catalogue)
+        self.assertNotIn("BETA", catalogue)
 
     def test_append_catalogue_is_noop_without_metadata(self):
         self.assertEqual(append_ddic_catalogue("Generate ABAP.", {"tables": {}}), "Generate ABAP.")

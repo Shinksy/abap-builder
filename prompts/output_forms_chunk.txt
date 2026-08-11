@@ -31,6 +31,10 @@ When ALV output is required:
 
 When file output is required:
 - Use the existing global filename variable from the supplied chunk contract.
+- Treat the filename variable as the dataset path only.
+- Do not use the filename variable as a CSV header, row, or concatenation buffer.
+- Use the exact CSV line variable from the supplied chunk contract for generated row text.
+- Build each CSV row in the CSV line variable, then TRANSFER the CSV line variable TO the filename variable.
 - Do not create local or undeclared filename variables.
 
 Output requirements:

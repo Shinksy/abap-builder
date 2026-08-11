@@ -52,6 +52,8 @@ Rules
 - For READ operations, include only fields required to locate a row in the already-populated internal table.
 - Do not put SQL WHERE filters, selection parameters, select-options, constants, or predicates already applied during SELECT into READ conditions.
 - The processing generator may assume internal tables already contain only rows that passed database extraction filters.
+- Only fields explicitly required to be read or returned should appear in processing fields.
+- Fields used only in SQL WHERE conditions are filter fields and must not be added to processing structures or output structures unless explicitly required elsewhere in the specification.
 - IF branches must contain then and else arrays. Use empty arrays when a branch has no explicit steps.
 - Output fields must be referenced as w_output-<field>.
 - When an output record is created:

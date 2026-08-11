@@ -221,6 +221,34 @@ class SapDependencyIdentificationTest(unittest.TestCase):
         self.assertIn("RADIO", rejected)
         self.assertEqual(rejected["RADIO"], "no explicit DDIC table, structure, or field evidence in specification")
 
+    def test_explicit_table_read_heading_keeps_llm_ddic_object(self):
+        specification = "\n".join(
+            [
+                "## Table Reads",
+                "### PA0000",
+                "Read Fields:",
+                "* PERNR",
+                "### PA0002",
+                "Read PA0002 as a separate dependent table read using the PA0000 employee numbers.",
+                "Read Fields:",
+                "* PERNR",
+                "* VORNA",
+                "* NACHN",
+                "WHERE Conditions:",
+                "* PERNR = PA0000-PERNR",
+                "* BEGDA LE current_date",
+                "* ENDDA GE current_date",
+            ]
+        )
+
+        analysis = normalize_dependency_analysis(
+            analysis_json(ddic_objects=[ddic_object("PA0000"), ddic_object("PA0002")]),
+            specification,
+        )
+
+        self.assertEqual(analysis["ddic_objects"], [ddic_object("PA0000"), ddic_object("PA0002")])
+        self.assertFalse([item for item in analysis["rejected_analysis_entries"] if item["name"] == "PA0002"])
+
     def test_missing_required_dependency_shape_falls_back(self):
         def analyzer(_prompt, _source):
             return {"text": json_dumps({"ddic_objects": []})}

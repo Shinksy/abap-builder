@@ -38,7 +38,7 @@
           <p><a href="{{ url_for('download', job_id=job_id) }}">Download generated.abap</a></p>
         </div>
         <div id="review-links" class="{% if progress.status != "Awaiting Review" %}hidden{% endif %}">
-          <p><a class="button-link" href="{{ url_for('processing_plan_review', job_id=job_id) }}">Review processing plan</a></p>
+          <p><a id="review-link" class="button-link" href="{{ review_url }}">{{ review_label }}</a></p>
         </div>
       </section>
     </main>
@@ -53,6 +53,7 @@
       const activityList = document.getElementById("activity-list");
       const resultLinks = document.getElementById("result-links");
       const reviewLinks = document.getElementById("review-links");
+      const reviewLink = document.getElementById("review-link");
 
       function renderProgress(progress) {
         currentStage.textContent = progress.current_stage_title || progress.current_stage;
@@ -77,6 +78,12 @@
         }));
         resultLinks.classList.toggle("hidden", progress.status !== "Complete");
         reviewLinks.classList.toggle("hidden", progress.status !== "Awaiting Review");
+        if (progress.review_url) {
+          reviewLink.href = progress.review_url;
+        }
+        if (progress.review_label) {
+          reviewLink.textContent = progress.review_label;
+        }
         return progress.is_active;
       }
 

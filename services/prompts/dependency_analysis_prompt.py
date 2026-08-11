@@ -31,6 +31,9 @@ Field rules:
 
 Classification rules:
 - Do not put data elements, domains, standalone ABAP types, fields, function-module parameters, or descriptive names in ddic_objects.
+- Treat fields used only in SQL WHERE conditions as filter fields, not as fields that must be read, returned, or represented in implementation structures.
+- Include every DDIC table or view whose table read is explicitly requested in the specification, even when some or all mentioned fields are used only as filters.
+- Preserve explicit dependencies between requested table reads when identifying required DDIC objects.
 - Do not classify local structures or variables as SAP DDIC merely because they appear after TYPE or LIKE.
 - Function-module names belong in callables, not ddic_objects.
 - Return candidates only when the specification provides explicit evidence.

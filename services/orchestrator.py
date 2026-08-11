@@ -3982,10 +3982,65 @@ def remove_database_read_declaration_units(source, declarations):
         return source
     kept = []
     for unit in abap_statement_units(source):
-        if database_read_declaration_unit_matches(unit, targets):
+        replacement = database_read_declaration_unit_without_targets(unit, targets)
+        if replacement is None:
             continue
-        kept.extend(unit)
+        kept.extend(replacement)
     return "\n".join(kept)
+
+
+def database_read_declaration_unit_without_targets(unit, targets):
+    type_segments = type_structure_segments(unit)
+    if type_segments:
+        preserved = []
+        changed = False
+        for segment in type_segments:
+            if segment["name"] in targets["types"]:
+                changed = True
+                continue
+            preserved.extend(standalone_type_structure_lines(segment))
+        if changed:
+            return preserved
+    if database_read_declaration_unit_matches(unit, targets):
+        return None
+    return unit
+
+
+def type_structure_segments(unit):
+    segments = []
+    lines = list(unit or [])
+    index = 0
+    while index < len(lines):
+        code = split_code_and_comment(lines[index])[0].strip()
+        begin_match = re.match(r"^(?:TYPES\s*:?\s*)?BEGIN\s+OF\s+([A-Z][A-Z0-9_]{0,29})\b", code, re.IGNORECASE)
+        if not begin_match:
+            index += 1
+            continue
+        name = begin_match.group(1).lower()
+        start = index
+        end = index
+        while end < len(lines):
+            end_code = split_code_and_comment(lines[end])[0].strip()
+            if re.match(rf"^END\s+OF\s+{re.escape(name)}\b", end_code, re.IGNORECASE):
+                break
+            end += 1
+        if end >= len(lines):
+            index += 1
+            continue
+        segments.append({"name": name, "lines": lines[start : end + 1]})
+        index = end + 1
+    return segments
+
+
+def standalone_type_structure_lines(segment):
+    lines = list((segment or {}).get("lines") or [])
+    if not lines:
+        return []
+    first = split_code_and_comment(lines[0])[0]
+    if not re.match(r"^\s*TYPES\b", first, re.IGNORECASE):
+        lines[0] = re.sub(r"^\s*BEGIN\b", "TYPES: BEGIN", lines[0], count=1, flags=re.IGNORECASE)
+    lines[-1] = re.sub(r",\s*(\".*)?$", r".\1", lines[-1])
+    return lines
 
 
 def database_read_declaration_targets(declarations):
@@ -4471,7 +4526,10 @@ def database_object_section_name(text, object_names):
         return ""
     heading_text = re.sub(r"^#{1,6}\s*", "", str(text or "")).strip()
     normalized = heading_text.upper()
-    return normalized if normalized in object_names else ""
+    if normalized in object_names:
+        return normalized
+    intro_name = database_object_intro_name(heading_text, object_names)
+    return intro_name
 
 
 def database_object_intro_name(text, object_names):
@@ -4851,12 +4909,23 @@ def explicit_ddic_fields_from_requirements(requirements, tables, object_names, a
 def contextual_database_read_fields(requirements, available):
     extracted = []
     current_object = ""
+    current_level = None
+    in_read_fields = False
     object_names = set(available)
     field_names_by_object = {
         table_name: {field["name"] for field in table.get("fields", [])}
         for table_name, table in available.items()
     }
     for unit in document_structure_units(requirements):
+        if (
+            current_level is not None
+            and unit["heading_level"] is not None
+            and unit["heading_level"] <= current_level
+            and not database_object_section_name(unit["text"], object_names)
+        ):
+            current_object = ""
+            current_level = None
+            in_read_fields = False
         section_object = (
             database_object_section_name(unit["text"], object_names)
             if unit["heading_level"] is not None
@@ -4864,8 +4933,18 @@ def contextual_database_read_fields(requirements, available):
         )
         if section_object:
             current_object = section_object
+            current_level = unit["heading_level"]
+            in_read_fields = False
             continue
         if not current_object:
+            continue
+        if re.match(r"^#{1,6}\s+read\s+fields\b|^read\s+fields\b", unit["text"], re.IGNORECASE):
+            in_read_fields = True
+            continue
+        if re.match(r"^#{1,6}\s+where\s+conditions\b|^where\s+conditions\b", unit["text"], re.IGNORECASE):
+            in_read_fields = False
+            continue
+        if not in_read_fields:
             continue
         tokens = simple_database_field_tokens(unit["text"])
         if not tokens:
@@ -5512,6 +5591,10 @@ def required_form_global_variables(base_prompt=None, source_text=None, declarati
             result,
             {"name": "w_filename", "declaration": "DATA w_filename TYPE string."},
         )
+        add_global_variable_requirement(
+            result,
+            {"name": "w_csv_line", "declaration": "DATA w_csv_line TYPE string."},
+        )
     for item in required_global_variable_declarations(declaration_requirements):
         add_global_variable_requirement(result, item)
     return result
@@ -5531,6 +5614,11 @@ def file_output_global_contract_lines(source_text=None, base_prompt=None, declar
     return [
         "Exact file-output global variable: w_filename.",
         "- Use existing global variable w_filename directly; it is already declared TYPE string.",
+        "- Treat w_filename as the dataset path only; do not use it as a CSV content buffer.",
+        "Exact CSV line global variable: w_csv_line.",
+        "- Use existing global variable w_csv_line directly; it is already declared TYPE string.",
+        "- Build CSV header or row content in w_csv_line before TRANSFER when the content is not a literal.",
+        "- TRANSFER literals or w_csv_line TO w_filename; never TRANSFER w_filename TO w_filename.",
         "- Do not create local filename variables such as lv_filename, l_filename, or filename.",
     ]
 
@@ -5612,13 +5700,8 @@ def database_read_selected_field_context(base_prompt, source_text=None, declarat
         declaration_requirements=declaration_requirements,
         base_prompt=base_prompt,
     )
-    extracted_fields = explicit_ddic_fields_from_requirements(
-        field_source,
-        parsed["tables"],
-        object_names,
-        aliases=ddic_identifier_aliases_from_contract(contract),
-        contextual_unqualified=True,
-    )
+    available = {name: parsed["tables"][name] for name in object_names if name in parsed["tables"]}
+    extracted_fields = contextual_database_read_fields(field_source, available)
     return {
         "selected_fields_in_spec_order": matched_ddic_fields(extracted_fields, parsed["tables"]),
         "full_sap_metadata_returned": full_sap_metadata_returned(parsed["tables"], object_names),

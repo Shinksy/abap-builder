@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Enhancement Review - SAP AI Assistant Next</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
+  </head>
+  <body>
+    <nav class="app-nav" aria-label="Main navigation">
+      <a href="{{ url_for('home') }}">New</a>
+      <a href="{{ url_for('jobs') }}">Jobs</a>
+    </nav>
+    <main class="page">
+      <section class="panel wide">
+        <div class="result-header">
+          <h1>Enhancement Review</h1>
+          <div class="button-row">
+            <a class="button-link" href="{{ url_for('home') }}">New</a>
+            <a class="button-link" href="{{ url_for('progress', job_id=job_id) }}">Progress</a>
+          </div>
+        </div>
+
+        <div class="status-callout warning-callout" role="status">
+          Review and approve the proposed ABAP changes before final results are generated.
+        </div>
+
+        <dl class="review-summary">
+          <dt>Change summary</dt>
+          <dd>{{ proposal.summary }}</dd>
+        </dl>
+
+        <details class="code-panel" open>
+          <summary>Proposed Diff</summary>
+          <pre><code>{{ proposal.diff if proposal.diff else "No text differences detected." }}</code></pre>
+        </details>
+
+        <details class="code-panel">
+          <summary>Functional Specification</summary>
+          <pre><code>{{ proposal.enhancement_specification }}</code></pre>
+        </details>
+
+        <details class="code-panel">
+          <summary>Proposed ABAP</summary>
+          <pre><code>{{ proposal.proposed_abap }}</code></pre>
+        </details>
+
+        <form method="post">
+          <div class="button-row">
+            <button type="submit" name="action" value="approve">Approve changes</button>
+            <button type="submit" name="action" value="reject" class="secondary-button">Reject</button>
+          </div>
+        </form>
+
+        <p class="job-id">Job ID: {{ job_id }}</p>
+      </section>
+    </main>
+  </body>
+</html>

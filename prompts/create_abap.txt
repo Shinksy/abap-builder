@@ -69,6 +69,14 @@ Use the supplied database access patterns.
 
 - Use SELECT SINGLE whenever one row is expected.
 - Use SELECT ... INTO TABLE only when multiple rows are required.
+- Include only fields explicitly required to be read or returned in each SELECT field list.
+- Fields used only in WHERE conditions are filter fields and must not be added to the SELECT field list.
+- Do not add WHERE-only fields to internal table structures, work areas, processing structures, or output structures unless they are explicitly required elsewhere in the specification.
+- Implement every table read explicitly requested in the specification, including dependent table reads.
+- Do not omit a table read because some or all of its fields are used only for filtering, or because its returned fields are used later for output or processing rather than selection.
+- For each requested table read, use only the fields listed as Read Fields in the SELECT field list.
+- Keep WHERE-only fields in the WHERE clause only.
+- Preserve the order and dependencies of table reads defined by the specification.
 - Do not generate nested SELECTs or SQL subqueries.
 - Use FOR ALL ENTRIES only with the supplied protected pattern.
 - In a FOR ALL ENTRIES statement, the WHERE clause must reference the internal table named after FOR ALL ENTRIES IN.

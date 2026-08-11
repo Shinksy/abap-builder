@@ -24,6 +24,7 @@ PROGRESS_STAGES = [
 STAGE_ALIASES = {
     "extracting_processing_plan": ("Extracting processing plan", 33),
     "awaiting_processing_plan_review": ("Extracting processing plan", 34),
+    "awaiting_enhancement_review": ("Processing chunks", 54),
     "processing_plan_approved": ("Extracting processing plan", 34),
     "processing_plan_rejected": ("Extracting processing plan", 34),
     "generating_abap": ("Processing chunks", 35),

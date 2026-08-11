@@ -685,12 +685,13 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(globals_by_name["t_fieldcat"], "DATA t_fieldcat TYPE slis_t_fieldcat_alv.")
         self.assertEqual(globals_by_name["w_fieldcat"], "DATA w_fieldcat TYPE slis_fieldcat_alv.")
         self.assertEqual(globals_by_name["w_filename"], "DATA w_filename TYPE string.")
+        self.assertEqual(globals_by_name["w_csv_line"], "DATA w_csv_line TYPE string.")
 
         prompts = {chunk["name"]: chunk["prompt"] for chunk in result["chunks"]}
         for chunk_name in ("database_read_forms", "output_forms"):
             self.assertIn(
                 "Allowed global variables for FORM chunks: "
-                "t_edidc, st_edidc, t_output, w_output, t_fieldcat, w_fieldcat, w_filename",
+                "t_edidc, st_edidc, t_output, w_output, t_fieldcat, w_fieldcat, w_filename, w_csv_line",
                 prompts[chunk_name],
             )
             self.assertIn(
@@ -703,6 +704,7 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("DATA t_edidc TYPE STANDARD TABLE OF ty_edidc.", declaration_text)
         self.assertIn("DATA t_output TYPE STANDARD TABLE OF ty_output.", declaration_text)
         self.assertIn("DATA w_filename TYPE string.", declaration_text)
+        self.assertIn("DATA w_csv_line TYPE string.", declaration_text)
         self.assertLess(declaration_text.index("DATA t_edidc"), result["text"].index("FORM read_edidc."))
 
     def test_ensure_required_global_declarations_only_adds_missing_globals(self):
@@ -1475,6 +1477,49 @@ class OrchestratorTest(unittest.TestCase):
             declarations_prompt,
         )
 
+    def test_database_read_field_order_contract_uses_only_read_fields(self):
+        source_text = (
+            "## Table Reads\n"
+            "### ZHEAD\n"
+            "Read Fields:\n"
+            "* KEY1\n"
+            "WHERE Conditions:\n"
+            "* FILTER1 using selection option\n"
+            "* DATE_FROM LE current_date\n"
+            "### ZITEM\n"
+            "Read ZITEM as a separate dependent table read using the ZHEAD keys.\n"
+            "Read Fields:\n"
+            "* KEY1\n"
+            "* NAME1\n"
+            "* NAME2\n"
+            "WHERE Conditions:\n"
+            "* KEY1 = ZHEAD-KEY1\n"
+            "* DATE_FROM LE current_date\n"
+            "* DATE_TO GE current_date"
+        )
+        base_prompt = (
+            "SAP DDIC metadata catalogue:\n"
+            "- ZHEAD: KEY1 [CHAR(10); key], FILTER1 [CHAR(1)], DATE_FROM [DATS(8)], DATE_TO [DATS(8)]\n"
+            "- ZITEM: KEY1 [CHAR(10); key], NAME1 [CHAR(40)], NAME2 [CHAR(40)], DATE_FROM [DATS(8)], DATE_TO [DATS(8)]\n"
+            "Shared generation contract:\n"
+            "Exact internal-table names: t_zhead, t_zitem\n"
+            "Exact work-area names: st_zhead, st_zitem\n"
+            "Exact FORM names: read_zhead, read_zitem\n"
+            "- ZHEAD: structure st_zhead, table t_zhead, work area st_zhead\n"
+            "- ZITEM: structure st_zitem, table t_zitem, work area st_zitem"
+        )
+
+        prompt = chunk_prompt_text(
+            base_prompt,
+            {"name": "database_read_forms", "instruction": "Generate database reads."},
+            source_text=source_text,
+        )
+
+        self.assertIn("- ZHEAD: KEY1", prompt)
+        self.assertIn("- ZITEM: KEY1, NAME1, NAME2", prompt)
+        self.assertNotIn("- ZHEAD: KEY1, FILTER1", prompt)
+        self.assertNotIn("- ZITEM: KEY1, NAME1, NAME2, DATE_FROM", prompt)
+
     def test_declaration_post_processing_generates_subset_database_read_row_type(self):
         source_text = (
             "# Data Extraction\n"
@@ -1599,6 +1644,52 @@ class OrchestratorTest(unittest.TestCase):
         ]
         positions = [result.index(marker) for marker in ordered_markers]
         self.assertEqual(positions, sorted(positions))
+
+    def test_database_read_declaration_replacement_preserves_output_type_in_chained_types(self):
+        base_prompt = (
+            "SAP DDIC metadata catalogue:\n"
+            "- PA0000: PERNR [NUMC(8); key], STAT2 [CHAR(1)], BEGDA [DATS(8)], ENDDA [DATS(8)]\n"
+            "- PA0001: PERNR [NUMC(8); key], ABKRS [CHAR(2)], KOSTL [CHAR(10)], BEGDA [DATS(8)], ENDDA [DATS(8)]\n"
+            "- PA0002: NACHN [CHAR(40)], BEGDA [DATS(8)], ENDDA [DATS(8)]\n"
+            "Shared generation contract:\n"
+            "Exact internal-table names: t_pa0000, t_pa0001, t_pa0002\n"
+            "Exact work-area names: st_pa0000, st_pa0001, st_pa0002\n"
+            "- PA0000: structure st_pa0000, table t_pa0000, work area st_pa0000\n"
+            "- PA0001: structure st_pa0001, table t_pa0001, work area st_pa0001\n"
+            "- PA0002: structure st_pa0002, table t_pa0002, work area st_pa0002"
+        )
+        source_text = "Read PA0000-PERNR PA0000-STAT2 PA0000-BEGDA PA0000-ENDDA PA0001-PERNR PA0001-ABKRS PA0001-KOSTL PA0001-BEGDA PA0001-ENDDA PA0002-NACHN PA0002-BEGDA PA0002-ENDDA."
+        source = "\n".join(
+            [
+                "REPORT tesco_mobile_file.",
+                "TYPES: BEGIN OF ty_pa0000,",
+                "         pernr TYPE pa0000-pernr,",
+                "       END OF ty_pa0000,",
+                "       BEGIN OF ty_pa0001,",
+                "         pernr TYPE pa0001-pernr,",
+                "       END OF ty_pa0001,",
+                "       BEGIN OF ty_pa0002,",
+                "         nachn TYPE pa0002-nachn,",
+                "       END OF ty_pa0002,",
+                "       BEGIN OF ty_output,",
+                "         pernr TYPE pa0000-pernr,",
+                "         nachn TYPE pa0002-nachn,",
+                "       END OF ty_output.",
+                "DATA w_output TYPE ty_output.",
+            ]
+        )
+
+        result = ensure_database_read_declarations(
+            source,
+            base_prompt,
+            source_text=source_text,
+            declaration_requirements=json.dumps({"parameters": [], "select_options": [], "output_structure_fields": []}),
+        )
+
+        self.assertIn("TYPES: BEGIN OF ty_output,", result)
+        self.assertIn("       END OF ty_output.", result)
+        self.assertIn("DATA w_output TYPE ty_output.", result)
+        self.assertLess(result.index("TYPES: BEGIN OF ty_output,"), result.index("DATA w_output TYPE ty_output."))
 
     def test_standard_report_header_is_added_after_report_statement(self):
         result = ensure_standard_report_header(
@@ -4358,6 +4449,11 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn(expected_contract, prompt)
         self.assertIn("Exact output structure fields: DOCNUM", prompt)
         self.assertIn("Exact output FORM names: output_data, display_alv, write_csv", prompt)
+        self.assertIn("Exact file-output global variable: w_filename.", prompt)
+        self.assertIn("Treat w_filename as the dataset path only; do not use it as a CSV content buffer.", prompt)
+        self.assertIn("Exact CSV line global variable: w_csv_line.", prompt)
+        self.assertIn("TRANSFER literals or w_csv_line TO w_filename; never TRANSFER w_filename TO w_filename.", prompt)
+        self.assertIn("Do not use the filename variable as a CSV header, row, or concatenation buffer.", prompt)
 
     def test_output_forms_prompt_omits_output_data_when_processing_plan_builds_output(self):
         declaration_requirements = json.dumps(

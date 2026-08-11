@@ -247,9 +247,11 @@ def render_compact_ddic_catalogue(metadata, max_fields_per_table=40):
         "- Do not invent SAP table fields or substitute similar-looking field names.",
     ]
     for table_name in sorted(tables):
-        fields = normalized_fields(tables[table_name])
+        table_metadata = tables[table_name]
+        fields = normalized_fields(table_metadata)
+        field_names = ordered_field_names(table_metadata, fields)
         field_parts = []
-        for field_name in sorted(fields)[:max_fields_per_table]:
+        for field_name in field_names[:max_fields_per_table]:
             field = fields[field_name]
             details = field_detail(field)
             field_parts.append(f"{field_name}{details}")
@@ -258,6 +260,16 @@ def render_compact_ddic_catalogue(metadata, max_fields_per_table=40):
         else:
             lines.append(f"- {table_name}: no fields returned")
     return "\n".join(lines)
+
+
+def ordered_field_names(table_metadata, fields):
+    ordered = []
+    for field_name in table_metadata.get("field_order", []) if isinstance(table_metadata, dict) else []:
+        normalized_name = str(field_name or "").upper()
+        if normalized_name in fields and normalized_name not in ordered:
+            ordered.append(normalized_name)
+    ordered.extend(field_name for field_name in sorted(fields) if field_name not in ordered)
+    return ordered
 
 
 def append_ddic_catalogue(prompt_text, metadata):
@@ -369,6 +381,7 @@ def strip_comments_and_strings(text, mode=SPECIFICATION_MODE):
 def typed_ddic_dependencies_from_text(text):
     dependencies = []
     dependencies.extend(extract_typed_named_metadata_references(text))
+    dependencies.extend(extract_typed_table_read_section_headings(text))
     dependencies.extend(extract_typed_qualified_field_references(text))
     dependencies.extend(extract_typed_sql_tables(text))
     dependencies.extend(extract_typed_tables_statements(text))
@@ -401,6 +414,37 @@ def extract_typed_named_metadata_references(text):
         re.IGNORECASE,
     ):
         add_typed_field_dependency(dependencies, match.group(1), match.group(2), match.start(1), "reference_field_label")
+    return dependencies
+
+
+def extract_typed_table_read_section_headings(text):
+    dependencies = []
+    in_table_read_section = False
+    section_level = None
+    offset = 0
+    for line in str(text or "").splitlines(True):
+        heading = re.match(r"^\s*(#{1,6})\s+(.+?)\s*$", line)
+        if heading:
+            level = len(heading.group(1))
+            heading_text = heading.group(2).strip()
+            heading_position = offset + heading.start(2)
+            if re.search(r"\b(?:table|database)\s+reads?\b", heading_text, re.IGNORECASE):
+                in_table_read_section = True
+                section_level = level
+            elif in_table_read_section and section_level is not None and level <= section_level:
+                in_table_read_section = False
+                section_level = None
+            elif in_table_read_section:
+                object_match = re.match(rf"({OBJECT_PATTERN})\b", heading_text, re.IGNORECASE)
+                if object_match and is_strong_literal_object(object_match.group(1)):
+                    add_typed_object_dependency(
+                        dependencies,
+                        "ddic_table",
+                        object_match.group(1),
+                        heading_position + object_match.start(1),
+                        "table_read_heading",
+                    )
+        offset += len(line)
     return dependencies
 
 

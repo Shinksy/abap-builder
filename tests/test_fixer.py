@@ -189,6 +189,39 @@ class FixerTest(unittest.TestCase):
         self.assertEqual(result["fixed_source"], source)
         self.assertNotIn("SELECT_CLAUSE_ORDER", result["diagnostics"]["changed_rules"])
 
+    def test_classic_multiline_select_into_before_from_is_unchanged(self):
+        source = "\n".join(
+            [
+                "FORM read_customers .",
+                "",
+                "  SELECT knvp~kunn2",
+                "         knb1~kunnr",
+                "         knb1~zhomebran",
+                "         kna1~zslsman1",
+                "         kna1~sortl",
+                "         kna1~name2",
+                "         INTO TABLE t_customers",
+                "         FROM knb1 AS knb1",
+                "         INNER JOIN knvp AS knvp",
+                "         ON knvp~kunnr   EQ knb1~kunnr",
+                "         AND knvp~vkorg  EQ '1001'",
+                "         AND knvp~vtweg  EQ '3'",
+                "         AND knvp~parvw  EQ 'RG'",
+                "         INNER JOIN kna1 AS kna1",
+                "         ON kna1~kunnr EQ knb1~kunnr",
+                "         WHERE knb1~kunnr     IN s_kunnr",
+                "           AND knb1~zhomebran IN s_branch",
+                "           AND knb1~zstatus   EQ 'C'.",
+                "",
+                "ENDFORM.                    \" READ_CUSTOMERS",
+            ]
+        )
+
+        result = auto_fix_abap(source)
+
+        self.assertEqual(result["fixed_source"], source)
+        self.assertNotIn("SELECT_CLAUSE_ORDER", result["diagnostics"]["changed_rules"])
+
     def test_misplaced_select_into_table_is_moved_before_where(self):
         source = "\n".join(
             [

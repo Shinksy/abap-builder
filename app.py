@@ -38,7 +38,14 @@ from services.create_abap import (
     save_post_generation_diagnostics,
     start_create_abap_job,
 )
-from services.enhance_abap import start_enhance_abap_job
+from services.enhance_abap import (
+    approve_enhancement_for_job,
+    load_enhancement_generation_chunks,
+    load_enhancement_generation_diagnostics,
+    load_enhancement_proposal,
+    reject_enhancement_for_job,
+    start_enhance_abap_job,
+)
 
 
 def create_app(config_overrides=None):
@@ -221,14 +228,70 @@ def create_app(config_overrides=None):
     @app.get("/progress/<job_id>")
     def progress(job_id):
         job_progress = get_progress(jobs_folder, job_id)
-        return render_template("progress.html", job_id=job_id, progress=job_progress)
+        return render_template(
+            "progress.html",
+            job_id=job_id,
+            progress=job_progress,
+            review_url=review_url_for_job(jobs_folder, job_id),
+            review_label=review_label_for_job(jobs_folder, job_id),
+        )
 
     @app.get("/progress/<job_id>/status")
     def progress_status(job_id):
         progress_payload = get_progress(jobs_folder, job_id)
         if progress_payload.get("status") == "Awaiting Review":
-            progress_payload["processing_plan_review_url"] = url_for("processing_plan_review", job_id=job_id)
+            progress_payload["review_url"] = review_url_for_job(jobs_folder, job_id)
+            progress_payload["review_label"] = review_label_for_job(jobs_folder, job_id)
+            if not (jobs_folder / job_id / "enhancement_proposal.json").exists():
+                progress_payload["processing_plan_review_url"] = url_for("processing_plan_review", job_id=job_id)
         return jsonify(progress_payload)
+
+    @app.get("/enhancement-review/<job_id>")
+    def enhancement_review(job_id):
+        proposal = load_enhancement_proposal(jobs_folder, job_id)
+        if not proposal:
+            abort(404)
+        return render_template(
+            "enhancement_review.html",
+            job_id=job_id,
+            proposal=proposal,
+            progress=get_progress(jobs_folder, job_id),
+        )
+
+    @app.post("/enhancement-review/<job_id>")
+    def enhancement_action(job_id):
+        action = request.form.get("action")
+        if action == "reject":
+            reject_enhancement_for_job(jobs_folder, job_id)
+            return redirect(url_for("progress", job_id=job_id))
+        if action == "approve":
+            proposal = load_enhancement_proposal(jobs_folder, job_id)
+            approved = approve_enhancement_for_job(jobs_folder, job_id, proposal)
+            if not approved:
+                abort(400)
+            job_folder = jobs_folder / job_id
+            update_progress(
+                jobs_folder,
+                job_id,
+                "Running",
+                "Enhancement changes approved. Final processing is starting.",
+                stage="generating_abap",
+            )
+            start_enhance_abap_job(
+                job_id=job_id,
+                source_path=job_folder / "original_existing.abap",
+                specification_path=job_folder / "enhancement_specification.txt",
+                jobs_folder=jobs_folder,
+                prompt_path=Path(app.config["ENHANCE_ABAP_PROMPT"]),
+                signature_provider=app.config.get("CALLABLE_SIGNATURE_PROVIDER"),
+                ddic_metadata_provider=app.config.get("DDIC_METADATA_PROVIDER"),
+                sap_syntax_checker=app.config.get("SAP_SYNTAX_CHECKER"),
+                code_review_repairer=app.config.get("CODE_REVIEW_REPAIRER"),
+                enhancement_review_required=False,
+                approved_enhancement=approved,
+            )
+            return redirect(url_for("progress", job_id=job_id))
+        abort(400)
 
     @app.get("/processing-plan/<job_id>")
     def processing_plan_review(job_id):
@@ -335,19 +398,26 @@ def create_app(config_overrides=None):
         dependency_analysis = load_dependency_analysis(jobs_folder, job_id)
         ddic_metadata = load_ddic_metadata(jobs_folder, job_id)
         options = load_job_options(jobs_folder, job_id)
+        metrics = load_metrics(jobs_folder, job_id)
+        if metrics.get("job_mode") == "enhance_existing_abap":
+            abap_generation_diagnostics = load_enhancement_generation_diagnostics(jobs_folder, job_id)
+            abap_generation_chunks = load_enhancement_generation_chunks(jobs_folder, job_id)
+        else:
+            abap_generation_diagnostics = load_abap_generation_diagnostics(jobs_folder, job_id)
+            abap_generation_chunks = load_abap_generation_chunks(jobs_folder, job_id)
         return render_template(
             "result.html",
             job_id=job_id,
             generated_abap=generated_abap,
-            metrics=load_metrics(jobs_folder, job_id),
+            metrics=metrics,
             fix_summary=load_fix_summary(jobs_folder, job_id),
             validation_issues=load_validation_issues(jobs_folder, job_id),
             dependency_analysis=dependency_analysis,
             ddic_metadata=ddic_metadata,
             sap_metadata_requests=sap_metadata_requests(dependency_analysis, ddic_metadata),
             sap_syntax_check=load_sap_syntax_check(jobs_folder, job_id, options),
-            abap_generation_diagnostics=load_abap_generation_diagnostics(jobs_folder, job_id),
-            abap_generation_chunks=load_abap_generation_chunks(jobs_folder, job_id),
+            abap_generation_diagnostics=abap_generation_diagnostics,
+            abap_generation_chunks=abap_generation_chunks,
         )
 
     @app.get("/download/<job_id>")
@@ -358,6 +428,20 @@ def create_app(config_overrides=None):
         return send_file(generated_path, as_attachment=True, download_name="generated.abap")
 
     return app
+
+
+def review_url_for_job(jobs_folder, job_id):
+    job_folder = Path(jobs_folder) / job_id
+    if (job_folder / "enhancement_proposal.json").exists():
+        return url_for("enhancement_review", job_id=job_id)
+    return url_for("processing_plan_review", job_id=job_id)
+
+
+def review_label_for_job(jobs_folder, job_id):
+    job_folder = Path(jobs_folder) / job_id
+    if (job_folder / "enhancement_proposal.json").exists():
+        return "Review proposed changes"
+    return "Review processing plan"
 
 
 def record_result_page_source(job_folder, generated_abap):
