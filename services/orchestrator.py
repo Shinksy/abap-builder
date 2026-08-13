@@ -1306,11 +1306,27 @@ def normalize_read_conditions(item, context):
 
 
 def normalize_read_lookup_conditions(source, into, conditions, context):
+    qualified = [
+        normalize_read_lookup_condition(source, into, condition, context)
+        for condition in conditions or []
+    ]
     return [
         condition
-        for condition in conditions or []
+        for condition in qualified
         if is_read_lookup_condition(source, into, condition, context)
     ]
+
+
+def normalize_read_lookup_condition(source, into, condition, context):
+    if not isinstance(condition, dict):
+        return condition
+    normalized = dict(condition)
+    for side, other_side in (("left", "right"), ("right", "left")):
+        value = normalized.get(side)
+        other = normalized.get(other_side)
+        if read_condition_side_is_bare_lookup_field(value, context) and not read_condition_side_is_sql_filter_value(other, context):
+            normalized[side] = f"{normalize_plan_identifier(into)}-{normalize_plan_identifier(value)}"
+    return normalized
 
 
 def is_read_lookup_condition(source, into, condition, context):
@@ -1334,6 +1350,15 @@ def is_read_lookup_condition(source, into, condition, context):
 def read_condition_side_targets_read_row(value, source, into):
     prefix = plan_reference_prefix(value)
     return bool(prefix and prefix in {normalize_plan_identifier(source), normalize_plan_identifier(into)})
+
+
+def read_condition_side_is_bare_lookup_field(value, context):
+    identifier = normalize_plan_identifier(value)
+    if not identifier:
+        return False
+    if identifier in (context or {}).get("selection_parameters", set()):
+        return False
+    return not identifier.startswith(GLOBAL_STYLE_PREFIXES)
 
 
 def read_condition_side_is_sql_filter_value(value, context):
@@ -3962,6 +3987,18 @@ STANDARD_REPORT_HEADER_TEMPLATE = """*******************************************
 ************************************************************************"""
 
 
+def format_standard_report_header(report_name):
+    report_field_width = 24
+    report_field = f"{report_name:<{report_field_width}}"
+    if len(report_name) >= report_field_width:
+        report_field = f"{report_name} "
+    report_line = f"*  Report      : {report_field}Author :                      *"
+    return STANDARD_REPORT_HEADER_TEMPLATE.replace(
+        "*  Report      : Z_REPORT                Author :                      *",
+        report_line,
+    ).replace("Z_REPORT", report_name)
+
+
 def ensure_standard_report_header(source):
     units = abap_statement_units(source)
     if not units:
@@ -3974,7 +4011,7 @@ def ensure_standard_report_header(source):
         if not match:
             continue
         report_name = match.group(1)
-        header = STANDARD_REPORT_HEADER_TEMPLATE.replace("Z_REPORT", report_name)
+        header = format_standard_report_header(report_name)
         assembled = units[: index + 1] + [header.splitlines()] + units[index + 1 :]
         return "\n".join(line for assembled_unit in assembled for line in assembled_unit)
     return source

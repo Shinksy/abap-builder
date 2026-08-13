@@ -1819,6 +1819,21 @@ class OrchestratorTest(unittest.TestCase):
         self.assertLess(result.index("*  Revision History"), result.index("TYPES: BEGIN OF ty_pa0000,"))
         self.assertEqual(result, ensure_standard_report_header(result))
 
+    def test_standard_report_header_aligns_author_after_long_report_name(self):
+        result = ensure_standard_report_header(
+            "\n".join(
+                [
+                    "REPORT ztesco_mobile_file.",
+                    "DATA gv_count TYPE i.",
+                ]
+            )
+        )
+
+        self.assertIn(
+            "*  Report      : ztesco_mobile_file      Author :                      *",
+            result,
+        )
+
     def test_form_chunks_reject_local_data_and_types_declarations(self):
         source = "\n".join(
             [
@@ -2341,6 +2356,78 @@ class OrchestratorTest(unittest.TestCase):
         self.assertNotIn("s_status", serialized)
         self.assertNotIn("p_type", serialized)
         self.assertNotIn("FLAG", serialized)
+
+    def test_processing_plan_normalization_qualifies_bare_read_lookup_fields(self):
+        declaration_requirements = json.dumps(
+            {
+                "output_structure_fields": [
+                    {"name": "PERNR", "type_or_like": "TYPE PA0002-PERNR"},
+                    {"name": "VORNA", "type_or_like": "TYPE PA0002-VORNA"},
+                    {"name": "NACHN", "type_or_like": "TYPE PA0002-NACHN"},
+                ]
+            }
+        )
+        base_prompt = (
+            "Shared generation contract:\n"
+            "Exact internal-table names: t_pa0000, t_pa0001, t_pa0002\n"
+            "Exact work-area names: st_pa0000, st_pa0001, st_pa0002\n"
+            "- PA0000: structure st_pa0000, table t_pa0000, work area st_pa0000\n"
+            "- PA0001: structure st_pa0001, table t_pa0001, work area st_pa0001\n"
+            "- PA0002: structure st_pa0002, table t_pa0002, work area st_pa0002"
+        )
+
+        normalized = normalize_processing_plan(
+            {
+                "processing_steps": [
+                    {
+                        "operation": "LOOP",
+                        "source": "t_pa0000",
+                        "into": "st_pa0000",
+                        "steps": [
+                            {
+                                "operation": "READ",
+                                "source": "t_pa0001",
+                                "into": "st_pa0001",
+                                "conditions": [{"left": "PERNR", "operator": "=", "right": "st_pa0000-PERNR"}],
+                            },
+                            {
+                                "operation": "IF",
+                                "conditions": [{"left": "st_pa0001", "operator": "IS NOT INITIAL"}],
+                                "then": [
+                                    {
+                                        "operation": "READ",
+                                        "source": "t_pa0002",
+                                        "into": "st_pa0002",
+                                        "conditions": [{"left": "PERNR", "operator": "=", "right": "st_pa0001-PERNR"}],
+                                    },
+                                    {"operation": "CLEAR", "target": "w_output"},
+                                    {"operation": "MOVE", "source": "st_pa0002-PERNR", "target": "w_output-PERNR"},
+                                    {"operation": "MOVE", "source": "st_pa0002-VORNA", "target": "w_output-VORNA"},
+                                    {"operation": "MOVE", "source": "st_pa0002-NACHN", "target": "w_output-NACHN"},
+                                    {"operation": "APPEND", "source": "w_output", "target": "t_output"},
+                                ],
+                                "else": [],
+                            },
+                        ],
+                    }
+                ]
+            },
+            base_prompt=base_prompt,
+            declaration_requirements=declaration_requirements,
+        )
+
+        loop = normalized["processing_steps"][0]
+        self.assertEqual(["READ", "IF"], [step["operation"] for step in loop["steps"]])
+        self.assertEqual(
+            [{"left": "st_pa0001-pernr", "operator": "=", "right": "st_pa0000-pernr"}],
+            loop["steps"][0]["conditions"],
+        )
+        nested_read = loop["steps"][1]["then"][0]
+        self.assertEqual("READ", nested_read["operation"])
+        self.assertEqual(
+            [{"left": "st_pa0002-pernr", "operator": "=", "right": "st_pa0001-pernr"}],
+            nested_read["conditions"],
+        )
 
     def test_processing_generation_does_not_repeat_select_predicates_after_read_table(self):
         processing_prompts = []
