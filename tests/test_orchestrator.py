@@ -1579,6 +1579,56 @@ class OrchestratorTest(unittest.TestCase):
         self.assertNotIn("- ZHEAD: KEY1, FILTER1", prompt)
         self.assertNotIn("- ZITEM: KEY1, NAME1, NAME2, DATE_FROM", prompt)
 
+    def test_database_read_contract_uses_full_metadata_for_read_fields_beyond_compact_catalogue(self):
+        source_text = (
+            "## Table Reads\n"
+            "### ZMD_MPE0001\n"
+            "Join to ZMD_MPE0001-DOCNUM_IN = EDIDC-DOCNUM\n"
+            "Selection Fields\n"
+            "IDENTIFIER\n"
+            "Read Fields\n"
+            "IDENTIFIER\n"
+            "DOCNUM_IN"
+        )
+        base_prompt = (
+            "SAP DDIC metadata catalogue:\n"
+            "- ZMD_MPE0001: IDENTIFIER [CHAR(32); key; Identifier]\n"
+            "Shared generation contract:\n"
+            "Exact internal-table names: t_zmd_mpe0001\n"
+            "Exact work-area names: st_zmd_mpe0001\n"
+            "Exact FORM names: read_zmd_mpe0001\n"
+            "- ZMD_MPE0001: structure st_zmd_mpe0001, table t_zmd_mpe0001, work area st_zmd_mpe0001"
+        )
+        ddic_metadata = {
+            "tables": {
+                "ZMD_MPE0001": {
+                    "fields": {
+                        "IDENTIFIER": {"datatype": "CHAR", "length": 32, "key": True},
+                        "DOCNUM_IN": {"datatype": "NUMC", "length": 16},
+                        "COUNTER": {"datatype": "NUMC", "length": 3},
+                    },
+                    "field_order": ["IDENTIFIER", "DOCNUM_IN", "COUNTER"],
+                }
+            }
+        }
+
+        database_prompt = chunk_prompt_text(
+            base_prompt,
+            {"name": "database_read_forms", "instruction": "Generate database reads."},
+            source_text=source_text,
+            ddic_metadata=ddic_metadata,
+        )
+        declarations = ensure_database_read_declarations(
+            "REPORT ztest.",
+            base_prompt,
+            source_text=source_text,
+            declaration_requirements=json.dumps({"parameters": [], "select_options": [], "output_structure_fields": []}),
+            ddic_metadata=ddic_metadata,
+        )
+
+        self.assertIn("- ZMD_MPE0001: IDENTIFIER, DOCNUM_IN", database_prompt)
+        self.assertIn("docnum_in TYPE ZMD_MPE0001-DOCNUM_IN", declarations)
+
     def test_declaration_post_processing_generates_subset_database_read_row_type(self):
         source_text = (
             "# Data Extraction\n"

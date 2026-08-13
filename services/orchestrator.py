@@ -160,6 +160,7 @@ def generate_chunked_abap_program(
             prompt_text,
             declaration_requirements=declaration_requirements_text,
             processing_plan=chunk_processing_plan,
+            ddic_metadata=ddic_metadata,
         )
         ddic_diagnostics = chunk_ddic_diagnostics(
             chunk_name,
@@ -168,6 +169,7 @@ def generate_chunked_abap_program(
             chunk_requirements=chunk_source_text,
             declaration_requirements=declaration_requirements_text,
             processing_plan=chunk_processing_plan,
+            ddic_metadata=ddic_metadata,
         )
         filtered_ddic_metadata = ddic_diagnostics["final_filtered_metadata"]
         chunk_contract = chunk_generation_contract_block(
@@ -176,6 +178,7 @@ def generate_chunked_abap_program(
             source_text=source_text,
             declaration_requirements=declaration_requirements_text,
             processing_plan=chunk_processing_plan,
+            ddic_metadata=ddic_metadata,
         )
         chunk_prompt = chunk_prompt_text(
             prompt_text,
@@ -183,6 +186,7 @@ def generate_chunked_abap_program(
             source_text=source_text,
             declaration_requirements=declaration_requirements_text,
             processing_plan=chunk_processing_plan,
+            ddic_metadata=ddic_metadata,
         )
         started_at = None
         result = {}
@@ -205,6 +209,7 @@ def generate_chunked_abap_program(
                     prompt_text,
                     source_text=source_text,
                     declaration_requirements=declaration_requirements_text,
+                    ddic_metadata=ddic_metadata,
                 )
                 text = group_declaration_statements_by_prefix(text)
             elif chunk_name in FORM_GENERATING_CHUNKS:
@@ -3859,11 +3864,12 @@ def required_global_variable_declarations(declaration_requirements=None):
     return result
 
 
-def ensure_database_read_declarations(source, base_prompt=None, source_text=None, declaration_requirements=None):
+def ensure_database_read_declarations(source, base_prompt=None, source_text=None, declaration_requirements=None, ddic_metadata=None):
     declarations = deterministic_database_read_declarations(
         base_prompt,
         source_text=source_text,
         declaration_requirements=declaration_requirements,
+        ddic_metadata=ddic_metadata,
     )
     if not declarations:
         return source
@@ -3871,8 +3877,8 @@ def ensure_database_read_declarations(source, base_prompt=None, source_text=None
     return insert_declaration_statements(cleaned, database_read_declaration_lines(declarations))
 
 
-def deterministic_database_read_declarations(base_prompt=None, source_text=None, declaration_requirements=None):
-    context = database_read_selected_field_context(base_prompt, source_text, declaration_requirements)
+def deterministic_database_read_declarations(base_prompt=None, source_text=None, declaration_requirements=None, ddic_metadata=None):
+    context = database_read_selected_field_context(base_prompt, source_text, declaration_requirements, ddic_metadata=ddic_metadata)
     selected_fields = context.get("selected_fields_in_spec_order") or []
     if not selected_fields:
         return []
@@ -4238,7 +4244,7 @@ def is_call_function_parameter_name(code, match):
     return bool(re.match(r"\s*=", after))
 
 
-def chunk_prompt_text(base_prompt, chunk, source_text=None, declaration_requirements=None, processing_plan=None):
+def chunk_prompt_text(base_prompt, chunk, source_text=None, declaration_requirements=None, processing_plan=None, ddic_metadata=None):
     chunk_name = chunk.get("name")
     context = chunk_template_context_prompt(
         chunk_name,
@@ -4246,6 +4252,7 @@ def chunk_prompt_text(base_prompt, chunk, source_text=None, declaration_requirem
         source_text,
         declaration_requirements=declaration_requirements,
         processing_plan=processing_plan,
+        ddic_metadata=ddic_metadata,
     )
     return (
         "Chunked generation mode:\n"
@@ -4276,13 +4283,14 @@ def render_declarations_chunk_prompt(source_text=None, ddic_catalogue=None, decl
     )
 
 
-def chunk_template_context_prompt(chunk_name, base_prompt, source_text=None, declaration_requirements=None, processing_plan=None):
+def chunk_template_context_prompt(chunk_name, base_prompt, source_text=None, declaration_requirements=None, processing_plan=None, ddic_metadata=None):
     chunk_requirements = chunk_requirement_block(
         chunk_name,
         source_text,
         base_prompt,
         declaration_requirements=declaration_requirements,
         processing_plan=processing_plan,
+        ddic_metadata=ddic_metadata,
     )
     chunk_contract = chunk_generation_contract_block(
         base_prompt,
@@ -4290,6 +4298,7 @@ def chunk_template_context_prompt(chunk_name, base_prompt, source_text=None, dec
         source_text=source_text,
         declaration_requirements=declaration_requirements,
         processing_plan=processing_plan,
+        ddic_metadata=ddic_metadata,
     )
     return render_chunk_prompt_template(
         chunk_name,
@@ -4301,6 +4310,7 @@ def chunk_template_context_prompt(chunk_name, base_prompt, source_text=None, dec
             chunk_requirements=chunk_requirements,
             declaration_requirements=declaration_requirements,
             processing_plan=processing_plan,
+            ddic_metadata=ddic_metadata,
         ),
         callable_catalogue=chunk_callable_catalogue(chunk_name, base_prompt, processing_plan=processing_plan),
         chunk_contract=chunk_contract,
@@ -4345,7 +4355,7 @@ def load_declarations_chunk_prompt(path=DECLARATIONS_CHUNK_PROMPT_PATH):
     return Path(path).read_text(encoding="utf-8")
 
 
-def chunk_requirement_block(chunk_name, source_text, base_prompt, declaration_requirements=None, processing_plan=None):
+def chunk_requirement_block(chunk_name, source_text, base_prompt, declaration_requirements=None, processing_plan=None, ddic_metadata=None):
     if chunk_name == "declarations":
         return str(declaration_requirements or "").strip() or "None"
     if chunk_name == "processing_form":
@@ -4367,6 +4377,7 @@ def chunk_requirement_block(chunk_name, source_text, base_prompt, declaration_re
         source_text=source_text,
         declaration_requirements=declaration_requirements,
         processing_plan=processing_plan,
+        ddic_metadata=ddic_metadata,
     )
     if contract:
         sections.append("Relevant naming contract:\n" + contract)
@@ -4649,6 +4660,7 @@ def chunk_ddic_catalogue(
     chunk_requirements=None,
     declaration_requirements=None,
     processing_plan=None,
+    ddic_metadata=None,
 ):
     return chunk_ddic_diagnostics(
         chunk_name,
@@ -4657,6 +4669,7 @@ def chunk_ddic_catalogue(
         chunk_requirements=chunk_requirements,
         declaration_requirements=declaration_requirements,
         processing_plan=processing_plan,
+        ddic_metadata=ddic_metadata,
     )["final_filtered_metadata"]
 
 
@@ -4667,6 +4680,7 @@ def chunk_ddic_diagnostics(
     chunk_requirements=None,
     declaration_requirements=None,
     processing_plan=None,
+    ddic_metadata=None,
 ):
     empty = {
         "raw_extracted_database_read_requirements": "",
@@ -4688,7 +4702,7 @@ def chunk_ddic_diagnostics(
         "SAP DDIC metadata catalogue:",
         ("SAP callable signature catalogue:", "Shared generation contract:"),
     )
-    if not catalogue:
+    if not catalogue and not normalized_tables(ddic_metadata):
         return empty
     contract = chunk_generation_contract_block(
         base_prompt,
@@ -4696,6 +4710,7 @@ def chunk_ddic_diagnostics(
         source_text=source_text,
         declaration_requirements=declaration_requirements,
         processing_plan=processing_plan,
+        ddic_metadata=ddic_metadata,
     )
     field_source = (
         str(declaration_requirements or "").strip()
@@ -4715,6 +4730,7 @@ def chunk_ddic_diagnostics(
         chunk_name,
         contract,
         field_source,
+        ddic_metadata=ddic_metadata,
     )
 
 
@@ -4750,7 +4766,7 @@ def specification_excerpt_section(requirements):
     return text[start:end].strip()
 
 
-def filter_ddic_catalogue_for_chunk(catalogue, chunk_name, contract, field_source):
+def filter_ddic_catalogue_for_chunk(catalogue, chunk_name, contract, field_source, ddic_metadata=None):
     empty = {
         "raw_extracted_database_read_requirements": "",
         "normalized_database_read_requirements": [],
@@ -4763,7 +4779,7 @@ def filter_ddic_catalogue_for_chunk(catalogue, chunk_name, contract, field_sourc
         "complete_row_type_objects": [],
         "final_filtered_metadata": "",
     }
-    parsed = parse_ddic_catalogue(catalogue)
+    parsed = full_or_compact_ddic_catalogue(catalogue, ddic_metadata)
     if not parsed["tables"]:
         return empty
     object_names = ddic_objects_for_chunk(contract, parsed["tables"])
@@ -4849,6 +4865,13 @@ def parse_ddic_catalogue(catalogue):
                 fields.append({"name": field_name, "text": part})
         result["tables"][table_name] = {"line": line, "fields": fields}
     return result
+
+
+def full_or_compact_ddic_catalogue(catalogue=None, ddic_metadata=None):
+    parsed = parse_ddic_metadata_for_processing_contract(ddic_metadata)
+    if parsed["tables"]:
+        return parsed
+    return parse_ddic_catalogue(catalogue)
 
 
 def processing_contract_ddic_catalogue(metadata_context=None, ddic_metadata=None):
@@ -5177,7 +5200,7 @@ def chunk_callable_catalogue(chunk_name, base_prompt, processing_plan=None):
     return "\n".join(lines).strip()
 
 
-def chunk_generation_contract_block(base_prompt, chunk_name, source_text=None, declaration_requirements=None, processing_plan=None):
+def chunk_generation_contract_block(base_prompt, chunk_name, source_text=None, declaration_requirements=None, processing_plan=None, ddic_metadata=None):
     if chunk_name == "processing_form":
         return processing_plan_contract_block(
             base_prompt,
@@ -5195,11 +5218,11 @@ def chunk_generation_contract_block(base_prompt, chunk_name, source_text=None, d
     if chunk_name == "declarations":
         kept.extend(tables_declaration_contract_lines(declaration_requirements))
         kept.extend(global_variable_declaration_contract_lines(declaration_requirements))
-        kept.extend(database_read_local_type_contract_lines(base_prompt, source_text, declaration_requirements))
+        kept.extend(database_read_local_type_contract_lines(base_prompt, source_text, declaration_requirements, ddic_metadata=ddic_metadata))
         kept.extend(output_naming_contract_lines(declaration_requirements))
         kept.extend(alv_field_catalog_declaration_contract_lines(source_text, base_prompt))
     if chunk_name == "database_read_forms":
-        kept.extend(database_read_select_field_order_contract_lines(base_prompt, source_text, declaration_requirements))
+        kept.extend(database_read_select_field_order_contract_lines(base_prompt, source_text, declaration_requirements, ddic_metadata=ddic_metadata))
         kept.extend(form_allowed_global_contract_lines(base_prompt, source_text, declaration_requirements, chunk_name))
     if chunk_name == "processing_form":
         kept.extend(form_allowed_global_contract_lines(base_prompt, source_text, declaration_requirements, chunk_name))
@@ -5662,8 +5685,8 @@ def file_output_global_contract_lines(source_text=None, base_prompt=None, declar
     ]
 
 
-def database_read_local_type_contract_lines(base_prompt, source_text=None, declaration_requirements=None):
-    context = database_read_selected_field_context(base_prompt, source_text, declaration_requirements)
+def database_read_local_type_contract_lines(base_prompt, source_text=None, declaration_requirements=None, ddic_metadata=None):
+    context = database_read_selected_field_context(base_prompt, source_text, declaration_requirements, ddic_metadata=ddic_metadata)
     selected_fields = context.get("selected_fields_in_spec_order") or []
     if not selected_fields:
         return []
@@ -5693,8 +5716,8 @@ def database_read_local_type_contract_lines(base_prompt, source_text=None, decla
     return lines if len(lines) > 3 else []
 
 
-def database_read_select_field_order_contract_lines(base_prompt, source_text=None, declaration_requirements=None):
-    context = database_read_selected_field_context(base_prompt, source_text, declaration_requirements)
+def database_read_select_field_order_contract_lines(base_prompt, source_text=None, declaration_requirements=None, ddic_metadata=None):
+    context = database_read_selected_field_context(base_prompt, source_text, declaration_requirements, ddic_metadata=ddic_metadata)
     selected_fields = context.get("selected_fields_in_spec_order") or []
     fields_by_object = requested_fields_by_ddic_object(selected_fields)
     if not fields_by_object:
@@ -5711,13 +5734,13 @@ def database_read_select_field_order_contract_lines(base_prompt, source_text=Non
     return lines
 
 
-def database_read_selected_field_context(base_prompt, source_text=None, declaration_requirements=None):
+def database_read_selected_field_context(base_prompt, source_text=None, declaration_requirements=None, ddic_metadata=None):
     catalogue = prompt_block(
         base_prompt,
         "SAP DDIC metadata catalogue:",
         ("SAP callable signature catalogue:", "Shared generation contract:"),
     )
-    parsed = parse_ddic_catalogue(catalogue)
+    parsed = full_or_compact_ddic_catalogue(catalogue, ddic_metadata)
     if not parsed["tables"]:
         return {
             "selected_fields_in_spec_order": [],
