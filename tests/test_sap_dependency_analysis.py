@@ -221,6 +221,33 @@ class SapDependencyIdentificationTest(unittest.TestCase):
         self.assertIn("RADIO", rejected)
         self.assertEqual(rejected["RADIO"], "no explicit DDIC table, structure, or field evidence in specification")
 
+    def test_llm_ddic_objects_are_kept_for_prose_table_evidence(self):
+        specification = "\n".join(
+            [
+                "Personnel number selection based on PA0000.",
+                "Payroll area selection based on PA0001.",
+                "Read the current PA0001 record for each employee identified from PA0000.",
+                "Read the current PA0002 record for each retained employee.",
+            ]
+        )
+
+        analysis = normalize_dependency_analysis(
+            analysis_json(
+                ddic_objects=[
+                    ddic_object("PA0000"),
+                    ddic_object("PA0001"),
+                    ddic_object("PA0002"),
+                ]
+            ),
+            specification_text=specification,
+        )
+
+        self.assertEqual(
+            analysis["ddic_objects"],
+            [ddic_object("PA0000"), ddic_object("PA0001"), ddic_object("PA0002")],
+        )
+        self.assertEqual(analysis["rejected_analysis_entries"], [])
+
     def test_explicit_table_read_heading_keeps_llm_ddic_object(self):
         specification = "\n".join(
             [

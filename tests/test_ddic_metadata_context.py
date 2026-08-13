@@ -109,6 +109,36 @@ class DdicMetadataContextTest(unittest.TestCase):
         self.assertIn(("ddic_table", "PA0002", "table_read_heading"), dependency_keys)
         self.assertEqual(extract_relevant_ddic_names(text), ["PA0000", "PA0002"])
 
+    def test_prose_table_references_extract_requested_tables(self):
+        text = "\n".join(
+            [
+                "Personnel number selection based on PA0000.",
+                "Payroll area selection based on PA0001.",
+                "Read the current PA0001 record for each employee.",
+                "Read the current PA0002 record for each retained employee.",
+                "Only PA0002 records valid on the current date are considered.",
+            ]
+        )
+
+        dependencies = extract_typed_ddic_dependencies(text)
+        dependency_keys = {(item["kind"], item["name"], item["source"]) for item in dependencies}
+
+        self.assertIn(("ddic_table", "PA0000", "prose_table_reference"), dependency_keys)
+        self.assertIn(("ddic_table", "PA0001", "prose_table_reference"), dependency_keys)
+        self.assertIn(("ddic_table", "PA0002", "prose_table_reference"), dependency_keys)
+        self.assertEqual(extract_relevant_ddic_names(text), ["PA0000", "PA0001", "PA0002"])
+
+    def test_prose_table_references_are_generic_but_not_business_nouns(self):
+        text = "\n".join(
+            [
+                "Read employee records for the report.",
+                "Read ZHR_PAYROLL records for selected employees.",
+                "Department selection based on /ACME/ORG_UNIT.",
+            ]
+        )
+
+        self.assertEqual(extract_relevant_ddic_names(text), ["ZHR_PAYROLL", "/ACME/ORG_UNIT"])
+
     def test_markdown_bullets_preserve_ddic_evidence_in_specification_mode(self):
         text = "\n".join(["* s_matnr FOR MARA-MATNR", "* s_kunnr FOR KNA1-KUNNR"])
 

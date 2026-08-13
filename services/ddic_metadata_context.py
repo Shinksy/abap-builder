@@ -382,6 +382,7 @@ def typed_ddic_dependencies_from_text(text):
     dependencies = []
     dependencies.extend(extract_typed_named_metadata_references(text))
     dependencies.extend(extract_typed_table_read_section_headings(text))
+    dependencies.extend(extract_typed_prose_table_references(text))
     dependencies.extend(extract_typed_qualified_field_references(text))
     dependencies.extend(extract_typed_sql_tables(text))
     dependencies.extend(extract_typed_tables_statements(text))
@@ -445,6 +446,27 @@ def extract_typed_table_read_section_headings(text):
                         "table_read_heading",
                     )
         offset += len(line)
+    return dependencies
+
+
+def extract_typed_prose_table_references(text):
+    dependencies = []
+    patterns = [
+        rf"\bread\s+(?:the\s+)?(?:current\s+)?({OBJECT_PATTERN})(?:\s+records?|\b)",
+        rf"\b({OBJECT_PATTERN})\s+records?\b",
+        rf"\bbased\s+on\s+({OBJECT_PATTERN})\b",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            candidate = match.group(1)
+            if is_strong_literal_object(candidate):
+                add_typed_object_dependency(
+                    dependencies,
+                    "ddic_table",
+                    candidate,
+                    match.start(1),
+                    "prose_table_reference",
+                )
     return dependencies
 
 
