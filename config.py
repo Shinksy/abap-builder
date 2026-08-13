@@ -60,6 +60,10 @@ class Config:
         "CREATE_ABAP_PROMPT",
         str(BASE_DIR / "prompts" / "create_abap.txt"),
     )
+    PREPARE_FUNCTIONAL_SPEC_PROMPT = os.environ.get(
+        "PREPARE_FUNCTIONAL_SPEC_PROMPT",
+        str(BASE_DIR / "prompts" / "prepare_functional_specification.txt"),
+    )
     ENHANCE_ABAP_PROMPT = os.environ.get(
         "ENHANCE_ABAP_PROMPT",
         str(BASE_DIR / "prompts" / "enhance_existing_abap.txt"),

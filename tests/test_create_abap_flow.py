@@ -41,6 +41,10 @@ from services.create_abap import (
     run_create_abap,
     usage_for_final_metrics,
 )
+from services.functional_spec_preparation import (
+    ACCEPTED_FUNCTIONAL_SPEC_ARTIFACT,
+    FUNCTIONAL_SPEC_PROPOSAL_ARTIFACT,
+)
 from services.callable_signature_provider import (
     NoOpCallableSignatureProvider,
     normalize_provider_signatures,
@@ -256,6 +260,109 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertTrue((jobs_folder / job_id / "abap_generation_chunks.json").exists())
             self.assertEqual(len([call for call in calls if "Extract business-processing logic" in call[0]]), 1)
             self.assertIn("REPORT ztest.", (jobs_folder / job_id / "generated.abap").read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_optional_functional_spec_preparation_requires_acceptance_before_generation(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            uploads_folder = temp_path / "uploads"
+            jobs_folder = temp_path / "jobs"
+            create_prompt_path = temp_path / "create_abap.txt"
+            prepare_prompt_path = temp_path / "prepare_functional_specification.txt"
+            create_prompt_path.write_text("Generate ABAP.\n{{REPORT_SKELETON}}\n{{DATABASE_READ_PATTERNS}}\n{{SPECIFICATION}}", encoding="utf-8")
+            prepare_prompt_path.write_text("Prepare functional specification.", encoding="utf-8")
+            responses = chunked_test_responses()
+            generation_calls = []
+            dependency_calls = []
+            preparation_calls = []
+
+            def prepare_generator(prompt_text, source_text):
+                preparation_calls.append((prompt_text, source_text))
+                return {
+                    "text": "# Functional Specification\n\n## Processing Rules\n1. Read VBAK and output VBELN.",
+                    "model": "prepare-model",
+                    "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+                }
+
+            def generator(prompt_text, source_text):
+                generation_calls.append((prompt_text, source_text))
+                chunk_name = next(name for name in responses if f"Chunk: {name}" in prompt_text)
+                return {"text": responses[chunk_name], "model": "test-model", "usage": None}
+
+            def dependency_generator(prompt_text, source_text, response_format=None):
+                dependency_calls.append((prompt_text, source_text))
+                if "Extract declaration requirements" in prompt_text:
+                    return {"text": json.dumps({"report_name": "ztest"}), "model": "test-model", "usage": None}
+                if "Extract business-processing logic" in prompt_text:
+                    return {"text": json.dumps({"processing_steps": []}), "model": "test-model", "usage": None}
+                return {"text": json.dumps({"ddic_objects": [], "callables": []}), "model": "test-model", "usage": None}
+
+            with patch("services.functional_spec_preparation.generate_functional_specification", side_effect=prepare_generator), patch(
+                "services.create_abap.generate_abap",
+                side_effect=generator,
+            ), patch("services.create_abap.generate_dependency_analysis", side_effect=dependency_generator):
+                app = create_app(
+                    {
+                        "TESTING": True,
+                        "UPLOAD_FOLDER": str(uploads_folder),
+                        "JOBS_FOLDER": str(jobs_folder),
+                        "CREATE_ABAP_PROMPT": str(create_prompt_path),
+                        "PREPARE_FUNCTIONAL_SPEC_PROMPT": str(prepare_prompt_path),
+                    }
+                )
+                client = app.test_client()
+
+                upload = client.post(
+                    "/upload",
+                    data={
+                        "prepare_functional_specification": "1",
+                        "abap_file": (BytesIO(b"Legacy source spec text."), "source_spec.txt"),
+                    },
+                    content_type="multipart/form-data",
+                    follow_redirects=False,
+                )
+
+                self.assertEqual(upload.status_code, 302)
+                job_id = upload.headers["Location"].rsplit("/", 1)[-1]
+                paused = wait_for_status(jobs_folder, job_id, "Awaiting Review")
+                self.assertEqual(paused["current_stage"], "awaiting_functional_specification_review")
+                self.assertTrue((jobs_folder / job_id / FUNCTIONAL_SPEC_PROPOSAL_ARTIFACT).exists())
+                self.assertFalse((jobs_folder / job_id / "abap_generation_chunks.json").exists())
+                self.assertEqual(len(preparation_calls), 1)
+                self.assertEqual(preparation_calls[0][1], "Legacy source spec text.")
+
+                review = client.get(f"/functional-specification/{job_id}")
+                self.assertEqual(review.status_code, 200)
+                self.assertIn(b"Original Upload", review.data)
+                self.assertIn(b"Prepared Functional Specification", review.data)
+
+                accept = client.post(
+                    f"/functional-specification/{job_id}",
+                    data={
+                        "action": "accept",
+                        "prepared_specification": "# Functional Specification\n\n## Processing Rules\n1. Read VBAK and output VBELN.\n2. Edited by reviewer.",
+                    },
+                    follow_redirects=False,
+                )
+                self.assertEqual(accept.status_code, 302)
+                paused_again = wait_for_stage(jobs_folder, job_id, "awaiting_processing_plan_review")
+                self.assertEqual(paused_again["current_stage"], "awaiting_processing_plan_review")
+                self.assertEqual(
+                    (jobs_folder / job_id / ACCEPTED_FUNCTIONAL_SPEC_ARTIFACT).read_text(encoding="utf-8"),
+                    "# Functional Specification\n\n## Processing Rules\n1. Read VBAK and output VBELN.\n2. Edited by reviewer.",
+                )
+                processing_call = next(call for call in dependency_calls if "Extract business-processing logic" in call[0])
+                self.assertIn("Edited by reviewer.", processing_call[1])
+                progress_status = client.get(f"/progress/{job_id}/status").get_json()
+                self.assertEqual(progress_status["review_url"], f"/processing-plan/{job_id}")
+                self.assertEqual(progress_status["review_label"], "Review processing plan")
+
+                approve = client.post(f"/processing-plan/{job_id}", data={"action": "approve"}, follow_redirects=False)
+                self.assertEqual(approve.status_code, 302)
+                wait_for_status(jobs_folder, job_id, "Complete")
+                self.assertTrue((jobs_folder / job_id / "generated.abap").exists())
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -4369,6 +4476,16 @@ def wait_for_status(jobs_folder, job_id, expected_status, timeout=5):
     while real_time.time() < deadline:
         progress = get_progress(jobs_folder, job_id)
         if progress["status"] == expected_status:
+            return progress
+        real_time.sleep(0.02)
+    return get_progress(jobs_folder, job_id)
+
+
+def wait_for_stage(jobs_folder, job_id, expected_stage, timeout=5):
+    deadline = real_time.time() + timeout
+    while real_time.time() < deadline:
+        progress = get_progress(jobs_folder, job_id)
+        if progress["current_stage"] == expected_stage:
             return progress
         real_time.sleep(0.02)
     return get_progress(jobs_folder, job_id)

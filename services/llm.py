@@ -69,6 +69,15 @@ def generate_dependency_analysis(prompt_text, source_text, response_format=None)
     )
 
 
+def generate_functional_specification(prompt_text, source_text, response_format=None):
+    return call_openai(
+        prompt_text,
+        source_text,
+        model_name=_model_for_role("general", "OPENAI_MODEL"),
+        response_format=response_format,
+    )
+
+
 def generate_code_review_repair(prompt_text, source_text):
     return call_openai(prompt_text, source_text, model_name=_model_for_role("code_review", "OPENAI_CODE_REVIEW_MODEL"))
 

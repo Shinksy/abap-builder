@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Functional Specification Review - SAP AI Assistant Next</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
+  </head>
+  <body>
+    <nav class="app-nav" aria-label="Main navigation">
+      <a href="{{ url_for('home') }}">New</a>
+      <a href="{{ url_for('jobs') }}">Jobs</a>
+    </nav>
+    <main class="page">
+      <section class="panel wide">
+        <div class="result-header">
+          <h1>Functional Specification Review</h1>
+          <div class="button-row">
+            <a class="button-link" href="{{ url_for('home') }}">New</a>
+            <a class="button-link" href="{{ url_for('progress', job_id=job_id) }}">Progress</a>
+          </div>
+        </div>
+
+        {% if error %}
+          <div class="status-callout error-callout" role="alert">{{ error }}</div>
+        {% else %}
+          <div class="status-callout warning-callout" role="status">
+            Review and edit the prepared functional specification before generation starts.
+          </div>
+        {% endif %}
+
+        <details class="code-panel">
+          <summary>Original Upload</summary>
+          <pre><code>{{ proposal.original_specification }}</code></pre>
+        </details>
+
+        <form method="post">
+          <label for="prepared_specification">Prepared Functional Specification</label>
+          <textarea id="prepared_specification" name="prepared_specification" rows="28">{{ proposal.converted_specification }}</textarea>
+          <div class="button-row">
+            <button type="submit" name="action" value="accept">Accept and generate</button>
+            <button type="submit" name="action" value="reject" class="secondary-button">Reject</button>
+          </div>
+        </form>
+
+        <p class="job-id">Job ID: {{ job_id }}</p>
+      </section>
+    </main>
+  </body>
+</html>

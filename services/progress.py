@@ -22,6 +22,10 @@ PROGRESS_STAGES = [
     ("Complete", 100),
 ]
 STAGE_ALIASES = {
+    "preparing_functional_specification": ("Reading specification", 10),
+    "awaiting_functional_specification_review": ("Reading specification", 12),
+    "functional_specification_accepted": ("Reading specification", 12),
+    "functional_specification_rejected": ("Reading specification", 12),
     "extracting_processing_plan": ("Extracting processing plan", 33),
     "awaiting_processing_plan_review": ("Extracting processing plan", 34),
     "awaiting_enhancement_review": ("Processing chunks", 54),

@@ -85,6 +85,10 @@
             <form id="new-program-form" action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
               <label for="abap_file">Upload Specification</label>
               <input id="abap_file" name="abap_file" type="file" accept=".abap,.txt" required>
+              <label class="checkbox-option">
+                <input name="prepare_functional_specification" type="checkbox" value="1">
+                Prepare Functional Specification
+              </label>
               <div class="syntax-check-row">
                 <label class="checkbox-option">
                   <input name="run_sap_syntax_check" type="checkbox" value="1">

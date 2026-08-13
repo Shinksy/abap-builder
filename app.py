@@ -19,6 +19,13 @@ from services.metadata_cache_upload import (
     save_metadata_cache_upload,
 )
 from services.progress import create_job, get_progress, update_progress
+from services.functional_spec_preparation import (
+    accept_functional_spec_for_job,
+    load_functional_spec_context,
+    load_functional_spec_proposal,
+    reject_functional_spec_for_job,
+    start_prepare_functional_spec_job,
+)
 from services.sap_syntax_check import get_configured_sap_syntax_checker
 from services.create_abap import (
     approve_processing_plan_for_job,
@@ -165,6 +172,16 @@ def create_app(config_overrides=None):
         input_path = job_upload_folder / filename
         uploaded_file.save(input_path)
 
+        if request.form.get("prepare_functional_specification") == "1":
+            start_prepare_functional_spec_job(
+                job_id=job_id,
+                source_path=input_path,
+                jobs_folder=jobs_folder,
+                prompt_path=Path(app.config["PREPARE_FUNCTIONAL_SPEC_PROMPT"]),
+                model_settings=model_settings,
+            )
+            return redirect(url_for("progress", job_id=job_id))
+
         start_create_abap_job(
             job_id=job_id,
             input_path=input_path,
@@ -243,9 +260,73 @@ def create_app(config_overrides=None):
         if progress_payload.get("status") == "Awaiting Review":
             progress_payload["review_url"] = review_url_for_job(jobs_folder, job_id)
             progress_payload["review_label"] = review_label_for_job(jobs_folder, job_id)
-            if not (jobs_folder / job_id / "enhancement_proposal.json").exists():
+            if (
+                (jobs_folder / job_id / "functional_specification_proposal.json").exists()
+                and not (jobs_folder / job_id / "accepted_functional_specification.txt").exists()
+            ):
+                progress_payload["functional_spec_review_url"] = url_for("functional_spec_review", job_id=job_id)
+            elif not (jobs_folder / job_id / "enhancement_proposal.json").exists():
                 progress_payload["processing_plan_review_url"] = url_for("processing_plan_review", job_id=job_id)
         return jsonify(progress_payload)
+
+    @app.get("/functional-specification/<job_id>")
+    def functional_spec_review(job_id):
+        proposal = load_functional_spec_proposal(jobs_folder, job_id)
+        if not proposal:
+            abort(404)
+        return render_template(
+            "functional_spec_review.html",
+            job_id=job_id,
+            proposal=proposal,
+            progress=get_progress(jobs_folder, job_id),
+        )
+
+    @app.post("/functional-specification/<job_id>")
+    def functional_spec_action(job_id):
+        action = request.form.get("action")
+        if action == "reject":
+            reject_functional_spec_for_job(jobs_folder, job_id)
+            return redirect(url_for("progress", job_id=job_id))
+        if action == "accept":
+            proposal = load_functional_spec_proposal(jobs_folder, job_id)
+            if not proposal:
+                abort(404)
+            accepted_path = accept_functional_spec_for_job(
+                jobs_folder,
+                job_id,
+                request.form.get("prepared_specification"),
+            )
+            if not accepted_path:
+                proposal = dict(proposal)
+                return render_template(
+                    "functional_spec_review.html",
+                    job_id=job_id,
+                    proposal=proposal,
+                    progress=get_progress(jobs_folder, job_id),
+                    error="Enter a prepared functional specification before accepting.",
+                ), 400
+            context = load_functional_spec_context(jobs_folder, job_id)
+            update_progress(
+                jobs_folder,
+                job_id,
+                "Running",
+                "Functional specification accepted. ABAP generation is starting.",
+                stage="functional_specification_accepted",
+            )
+            start_create_abap_job(
+                job_id=job_id,
+                input_path=accepted_path,
+                jobs_folder=jobs_folder,
+                prompt_path=Path(app.config["CREATE_ABAP_PROMPT"]),
+                signature_provider=app.config.get("CALLABLE_SIGNATURE_PROVIDER"),
+                ddic_metadata_provider=app.config.get("DDIC_METADATA_PROVIDER"),
+                sap_syntax_checker=app.config.get("SAP_SYNTAX_CHECKER"),
+                code_review_repairer=app.config.get("CODE_REVIEW_REPAIRER"),
+                prior_section_durations=context.get("section_durations"),
+                prior_usage=context.get("usage"),
+            )
+            return redirect(url_for("progress", job_id=job_id))
+        abort(400)
 
     @app.get("/enhancement-review/<job_id>")
     def enhancement_review(job_id):
@@ -433,6 +514,11 @@ def create_app(config_overrides=None):
 
 def review_url_for_job(jobs_folder, job_id):
     job_folder = Path(jobs_folder) / job_id
+    if (
+        (job_folder / "functional_specification_proposal.json").exists()
+        and not (job_folder / "accepted_functional_specification.txt").exists()
+    ):
+        return url_for("functional_spec_review", job_id=job_id)
     if (job_folder / "enhancement_proposal.json").exists():
         return url_for("enhancement_review", job_id=job_id)
     return url_for("processing_plan_review", job_id=job_id)
@@ -440,6 +526,11 @@ def review_url_for_job(jobs_folder, job_id):
 
 def review_label_for_job(jobs_folder, job_id):
     job_folder = Path(jobs_folder) / job_id
+    if (
+        (job_folder / "functional_specification_proposal.json").exists()
+        and not (job_folder / "accepted_functional_specification.txt").exists()
+    ):
+        return "Review functional specification"
     if (job_folder / "enhancement_proposal.json").exists():
         return "Review proposed changes"
     return "Review processing plan"
