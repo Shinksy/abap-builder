@@ -329,6 +329,14 @@ def run_enhance_abap(
             record_post_generation_stage(post_generation_diagnostics, "original_existing_abap", existing_abap)
             record_post_generation_stage(post_generation_diagnostics, "approved_enhanced_abap", enhanced_abap)
 
+        cleaned_enhanced_abap = remove_duplicate_start_package_processing_when_read_form_owns_package(
+            existing_abap,
+            enhanced_abap,
+        )
+        if cleaned_enhanced_abap != enhanced_abap:
+            enhanced_abap = cleaned_enhanced_abap
+            record_post_generation_stage(post_generation_diagnostics, "after_enhancement_package_owner_cleanup", enhanced_abap)
+
         generated_ddic = classify_post_generation_ddic_candidates(enhanced_abap)
         record_post_generation_ddic_diagnostics(dependency_analysis, generated_ddic)
         generated_callables = callable_identities_from_source(enhanced_abap, parse_callable_invocations)
@@ -374,6 +382,10 @@ def run_enhance_abap(
         if repaired_final_abap != final_abap:
             final_abap = repaired_final_abap
             record_post_generation_stage(post_generation_diagnostics, "after_enhancement_structure_component_repair", final_abap)
+        cleaned_final_abap = remove_required_start_of_selection_performs(final_abap, enhancement_specification)
+        if cleaned_final_abap != final_abap:
+            final_abap = cleaned_final_abap
+            record_post_generation_stage(post_generation_diagnostics, "after_enhancement_required_perform_removal", final_abap)
 
         final_ddic = classify_post_generation_ddic_candidates(final_abap)
         record_post_generation_ddic_diagnostics(dependency_analysis, final_ddic)
@@ -691,6 +703,7 @@ def generate_targeted_enhancement(original_source, chunks, affected_chunks, prom
         if result["chunk"] in replacements:
             result["text"] = replacements[result["chunk"]]
     merged = merge_enhanced_chunks(original_source, chunks, replacements)
+    merged = remove_duplicate_start_package_processing_when_read_form_owns_package(original_source, merged)
     usage = aggregate_usage([result.get("usage") for result in chunk_results])
     model = next((result.get("model") for result in chunk_results if result.get("model")), None)
     return {
@@ -789,6 +802,8 @@ def preserve_authoritative_existing_lines(original_chunk_text, updated_chunk_tex
 
 
 def preserve_replaced_block(original_block, updated_block, spec_terms):
+    if package_select_replacement_is_requested(original_block, updated_block, spec_terms):
+        return list(updated_block)
     preserved = []
     matcher = SequenceMatcher(
         a=[normalize_structural_line(line) for line in original_block],
@@ -815,6 +830,18 @@ def preserve_replaced_block(original_block, updated_block, spec_terms):
                 preserved.extend(original_subblock)
                 preserved.extend(updated_subblock)
     return preserved
+
+
+def package_select_replacement_is_requested(original_block, updated_block, spec_terms):
+    if "package" not in spec_terms:
+        return False
+    original_text = "\n".join(original_block)
+    updated_text = "\n".join(updated_block)
+    if not re.search(r"\bSELECT\b", original_text, re.IGNORECASE):
+        return False
+    if not re.search(r"\bSELECT\b", updated_text, re.IGNORECASE):
+        return False
+    return bool(re.search(r"\bPACKAGE\s+SIZE\b", updated_text, re.IGNORECASE))
 
 
 def existing_line_change_is_enhancement_related(original_line, updated_line, spec_terms):
@@ -863,6 +890,7 @@ def reconcile_enhancement_chunk_replacements(original_source, chunks, replacemen
         "performs": {},
     }
     issues = []
+    seed_existing_select_owners(owners["selects"], chunks)
 
     for chunk in ordered_chunks:
         chunk_id = chunk["id"]
@@ -905,8 +933,11 @@ def reconcile_enhancement_chunk_replacements(original_source, chunks, replacemen
             key = statement["table"]
             if not key or multiple_database_reads_explicitly_requested(enhancement_specification, key):
                 continue
-            if key not in owners["selects"]:
+            owner = owners["selects"].get(key)
+            if owner is None:
                 owners["selects"][key] = chunk_id
+                continue
+            if owner == chunk_id:
                 continue
             remove_ranges.append((statement["start"], statement["end"]))
 
@@ -923,6 +954,14 @@ def reconcile_enhancement_chunk_replacements(original_source, chunks, replacemen
                 cleaned_text = chunk.get("text", "")
             reconciled[chunk_id] = cleaned_text
     return reconciled, issues
+
+
+def seed_existing_select_owners(select_owners, chunks):
+    for chunk in sorted(chunks, key=lambda item: item["start_line"]):
+        for statement in select_statements(chunk.get("text", "")):
+            table = statement.get("table")
+            if table and table not in select_owners:
+                select_owners[table] = chunk["id"]
 
 
 def introduced_chunk_features(
@@ -1151,6 +1190,75 @@ def merge_enhanced_chunks(original_source, chunks, replacements):
     return "\n".join(merged)
 
 
+def remove_duplicate_start_package_processing_when_read_form_owns_package(original_source, final_source):
+    form_package_tables = package_select_tables_in_forms(final_source)
+    if not form_package_tables:
+        return final_source
+    lines = str(final_source or "").splitlines()
+    remove_ranges = []
+    for statement in select_statements_in_start_of_selection(final_source):
+        table = statement.get("table")
+        if table not in form_package_tables:
+            continue
+        if not re.search(r"\bPACKAGE\s+SIZE\b", statement.get("text", ""), re.IGNORECASE):
+            continue
+        start = statement["start"]
+        while start > 0:
+            code = strip_abap_comment(lines[start - 1]).strip()
+            if not code or re.match(r"^CLEAR\s+(?:w_lines_total|t_data_temp)(?:\[\])?\s*\.", code, re.IGNORECASE):
+                start -= 1
+                continue
+            break
+        end = statement["end"]
+        while end + 1 < len(lines):
+            code = strip_abap_comment(lines[end + 1]).strip()
+            if not code or re.match(r"^(?:w_lines\s*=\s*w_lines_total|CLEAR\s+(?:w_lines_total|t_data_temp)(?:\[\])?)\s*\.", code, re.IGNORECASE):
+                end += 1
+                continue
+            break
+        remove_ranges.append((start, end))
+    if not remove_ranges:
+        return final_source
+    return remove_line_ranges(lines, remove_ranges)
+
+
+def package_select_tables_in_forms(source):
+    tables = set()
+    lines = str(source or "").splitlines()
+    for form_entries in collect_form_definitions(source).values():
+        for form in form_entries:
+            form_text = "\n".join(lines[form["start"] : form["end"] + 1])
+            for statement in select_statements(form_text):
+                if re.search(r"\bPACKAGE\s+SIZE\b", statement.get("text", ""), re.IGNORECASE):
+                    tables.add(statement.get("table"))
+    return {table for table in tables if table}
+
+
+def select_statements_in_start_of_selection(source):
+    lines = str(source or "").splitlines()
+    start_line_numbers = {line_number for line_number, _line in start_of_selection_lines(source)}
+    return [
+        statement
+        for statement in select_statements(source)
+        if statement["start"] + 1 in start_line_numbers
+    ]
+
+
+def remove_required_start_of_selection_performs(source, enhancement_specification=None):
+    required_removals = start_of_selection_perform_removals_requested(enhancement_specification)
+    if not required_removals:
+        return source
+    remove_ranges = []
+    for line_number, line in start_of_selection_lines(source):
+        code = strip_abap_comment(line).strip()
+        match = re.match(r"^PERFORM\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+        if match and match.group(1).lower() in required_removals:
+            remove_ranges.append((line_number - 1, line_number - 1))
+    if not remove_ranges:
+        return source
+    return remove_line_ranges(str(source or "").splitlines(), remove_ranges)
+
+
 def remove_redundant_new_wrapper_forms(original_source, final_source):
     original_forms = collect_form_definitions(original_source)
     final_forms = collect_form_definitions(final_source)
@@ -1212,7 +1320,8 @@ def validate_enhancement_structure(original_source, final_source, callable_metad
     issues.extend(validate_referenced_structure_components(original_source, final_source, final_declarations))
     issues.extend(validate_generated_select_targets(original_source, final_source, final_declarations))
     issues.extend(validate_called_generated_routines_have_implementation(original_source, final_source, final_forms))
-    issues.extend(validate_previously_populated_tables_not_cleared(original_source, final_source))
+    issues.extend(validate_previously_populated_tables_not_cleared(original_source, final_source, enhancement_specification))
+    issues.extend(validate_explicit_start_of_selection_perform_removals(final_source, enhancement_specification))
     issues.extend(validate_unrelated_existing_statement_changes(original_source, final_source, enhancement_specification))
     return issues
 
@@ -1432,7 +1541,7 @@ def validate_called_generated_routines_have_implementation(original_source, fina
     return issues
 
 
-def validate_previously_populated_tables_not_cleared(original_source, final_source):
+def validate_previously_populated_tables_not_cleared(original_source, final_source, enhancement_specification=None):
     populated_tables = tables_populated_by_select(original_source)
     issues = []
     for line_number, line in newly_introduced_lines(original_source, final_source):
@@ -1442,6 +1551,8 @@ def validate_previously_populated_tables_not_cleared(original_source, final_sour
             continue
         table = match.group(1).lower()
         if table not in populated_tables:
+            continue
+        if table_clear_explicitly_requested(enhancement_specification, table):
             continue
         issues.append(
             structural_issue(
@@ -1456,9 +1567,72 @@ def validate_previously_populated_tables_not_cleared(original_source, final_sour
     return issues
 
 
+def table_clear_explicitly_requested(enhancement_specification, table_name):
+    text = str(enhancement_specification or "")
+    table = re.escape(str(table_name or ""))
+    return bool(
+        re.search(
+            rf"\b(?:clear|refresh|free)\s+(?:internal\s+table\s+)?{table}(?:\[\])?\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def validate_explicit_start_of_selection_perform_removals(final_source, enhancement_specification=None):
+    required_removals = start_of_selection_perform_removals_requested(enhancement_specification)
+    if not required_removals:
+        return []
+    issues = []
+    for line_number, line in start_of_selection_lines(final_source):
+        code = strip_abap_comment(line).strip()
+        match = re.match(r"^PERFORM\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+        if not match:
+            continue
+        routine = match.group(1).lower()
+        if routine not in required_removals:
+            continue
+        issues.append(
+            structural_issue(
+                "ENHANCEMENT_REQUIRED_PERFORM_REMOVAL_MISSING",
+                line_number,
+                f"Generated enhancement kept PERFORM {routine} in START-OF-SELECTION after the specification required removing it.",
+                line,
+                "Remove the standalone START-OF-SELECTION PERFORM and call it only from the requested processing location.",
+                routine=routine,
+            )
+        )
+    return issues
+
+
+def start_of_selection_perform_removals_requested(enhancement_specification):
+    text = str(enhancement_specification or "")
+    if not re.search(r"\bSTART-OF-SELECTION\b", text, re.IGNORECASE):
+        return set()
+    removals = set()
+    for match in re.finditer(r"\bremove\b(?:(?!\n\s*\n).)*?\bPERFORM\s+([A-Za-z_]\w*)\b", text, re.IGNORECASE | re.DOTALL):
+        removals.add(match.group(1).lower())
+    return removals
+
+
+def start_of_selection_lines(source):
+    lines = str(source or "").splitlines()
+    in_block = False
+    for line_number, line in enumerate(lines, start=1):
+        code = strip_abap_comment(line).strip()
+        if re.match(r"^START-OF-SELECTION\s*\.", code, re.IGNORECASE):
+            in_block = True
+            continue
+        if in_block and re.match(r"^(?:END-OF-SELECTION|INITIALIZATION|AT\s+SELECTION-SCREEN|FORM)\b", code, re.IGNORECASE):
+            break
+        if in_block:
+            yield line_number, line
+
+
 def validate_unrelated_existing_statement_changes(original_source, final_source, enhancement_specification=None):
     issues = []
     spec_terms = enhancement_spec_terms(enhancement_specification)
+    required_perform_removals = start_of_selection_perform_removals_requested(enhancement_specification)
     matcher = SequenceMatcher(
         a=str(original_source or "").splitlines(),
         b=str(final_source or "").splitlines(),
@@ -1477,6 +1651,14 @@ def validate_unrelated_existing_statement_changes(original_source, final_source,
             continue
         if changed_block_is_enhancement_related(original_block, final_block, spec_terms):
             continue
+        if start_of_selection_perform_removal_is_requested(
+            original_source,
+            original_start,
+            original_block,
+            final_block,
+            required_perform_removals,
+        ):
+            continue
         issues.append(
             structural_issue(
                 "ENHANCEMENT_UNRELATED_EXISTING_CHANGE",
@@ -1487,6 +1669,32 @@ def validate_unrelated_existing_statement_changes(original_source, final_source,
             )
         )
     return issues
+
+
+def start_of_selection_perform_removal_is_requested(
+    original_source,
+    original_start,
+    original_block,
+    final_block,
+    required_perform_removals,
+):
+    if not required_perform_removals:
+        return False
+    if any(normalize_structural_line(line) for line in final_block):
+        return False
+    start_of_selection_line_numbers = {line_number for line_number, _line in start_of_selection_lines(original_source)}
+    removed_performs = []
+    for offset, line in enumerate(original_block):
+        normalized = normalize_structural_line(line)
+        if not normalized:
+            continue
+        if original_start + offset + 1 not in start_of_selection_line_numbers:
+            return False
+        match = re.match(r"^perform\s+([a-z_]\w*)\b", normalized, re.IGNORECASE)
+        if not match or match.group(1).lower() not in required_perform_removals:
+            return False
+        removed_performs.append(match.group(1).lower())
+    return bool(removed_performs)
 
 
 def changed_block_is_enhancement_related(original_block, final_block, spec_terms):

@@ -57,6 +57,7 @@ from services.orchestrator import (
     processing_plan_for_prompt,
     processing_plan_payload,
     processing_step_subtitle,
+    validate_generated_processing_completeness,
 )
 from services.progress import update_progress
 from services.sap_dependency_analysis import (
@@ -350,6 +351,13 @@ def run_create_abap(
             final_abap,
             declaration_requirements_for_prompt(llm_result.get("declaration_requirements")),
         )
+        final_abap = ensure_database_read_declarations(
+            final_abap,
+            prompt_text,
+            source_text=source_text,
+            declaration_requirements=declaration_requirements_for_prompt(llm_result.get("declaration_requirements")),
+            ddic_metadata=ddic_metadata,
+        )
         final_abap = group_declaration_statements_by_prefix(final_abap)
         final_abap = ensure_standard_report_header(final_abap)
         for stage in fixer_diagnostic_stages(fix_result):
@@ -376,6 +384,19 @@ def run_create_abap(
         add_section_duration(section_durations, "sap_metadata_requests", time.monotonic() - metadata_started_at)
         validation_started_at = time.monotonic()
         validation_issues = fix_result["final_issues"]
+        validation_issues = merge_validation_issues(
+            validation_issues,
+            validate_generated_processing_completeness(
+                final_abap,
+                source_text=source_text,
+                processing_plan=llm_result.get("processing_plan") if isinstance(llm_result, dict) else approved_processing_plan,
+                declaration_requirements=(
+                    llm_result.get("declaration_requirements")
+                    if isinstance(llm_result, dict)
+                    else prepared_declaration_requirements
+                ),
+            ),
+        )
         if specification_requests_alv(source_text):
             validation_issues = merge_validation_issues(
                 validation_issues,
@@ -414,6 +435,13 @@ def run_create_abap(
             code_review_repairer=code_review_repairer,
             callable_metadata=callable_metadata,
             post_generation_diagnostics=post_generation_diagnostics,
+        )
+        final_abap = ensure_database_read_declarations(
+            final_abap,
+            prompt_text,
+            source_text=source_text,
+            declaration_requirements=declaration_requirements_for_prompt(llm_result.get("declaration_requirements")),
+            ddic_metadata=ddic_metadata,
         )
         final_abap = group_declaration_statements_by_prefix(final_abap)
         final_abap = ensure_standard_report_header(final_abap)

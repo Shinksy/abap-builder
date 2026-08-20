@@ -147,10 +147,12 @@ def create_app(config_overrides=None):
     @app.post("/upload")
     def upload_file():
         uploaded_file = request.files.get("abap_file")
-        if not uploaded_file or not uploaded_file.filename:
+        pasted_specification = request.form.get("specification_text", "").strip()
+        has_uploaded_file = bool(uploaded_file and uploaded_file.filename)
+        if not has_uploaded_file and not pasted_specification:
             return render_template(
                 "home.html",
-                **home_template_context(active_tab="new", error="Select an ABAP file to upload."),
+                **home_template_context(active_tab="new", error="Upload a specification file or paste the specification text."),
             ), 400
 
         job_id = create_job(jobs_folder)
@@ -166,11 +168,15 @@ def create_app(config_overrides=None):
                 "model_settings": model_settings,
             },
         )
-        filename = secure_filename(uploaded_file.filename)
         job_upload_folder = upload_folder / job_id
         job_upload_folder.mkdir(parents=True, exist_ok=True)
-        input_path = job_upload_folder / filename
-        uploaded_file.save(input_path)
+        if has_uploaded_file:
+            filename = secure_filename(uploaded_file.filename)
+            input_path = job_upload_folder / filename
+            uploaded_file.save(input_path)
+        else:
+            input_path = job_upload_folder / "pasted_specification.txt"
+            input_path.write_text(pasted_specification, encoding="utf-8")
 
         if request.form.get("prepare_functional_specification") == "1":
             start_prepare_functional_spec_job(

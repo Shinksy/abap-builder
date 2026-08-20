@@ -31,6 +31,7 @@ from services.orchestrator import (
     normalize_declaration_requirements,
     normalize_processing_plan,
     normalize_processing_plan_with_diagnostics,
+    validate_generated_processing_completeness,
     validate_processing_plan,
 )
 from services.create_abap import append_generation_contract
@@ -1663,6 +1664,58 @@ class OrchestratorTest(unittest.TestCase):
         self.assertNotIn("DESCRIPTION TYPE ZHDR-DESCRIPTION", result)
         self.assertNotIn("TYPE STANDARD TABLE OF ZHDR", result)
 
+    def test_database_read_declarations_include_actual_select_projection_fields(self):
+        base_prompt = (
+            "SAP DDIC metadata catalogue:\n"
+            "- ZDOC: DOC_DATE [DATS(8); key], SITE [CHAR(4); key], CUSTOMER [CHAR(10); key], DOC_ID [CHAR(10); key], UNIT_CODE [UNIT(3); key], SALES_AMOUNT [CURR(13,2)], COST_AMOUNT [CURR(13,2)]\n"
+            "Shared generation contract:\n"
+            "Exact internal-table names: t_zdoc\n"
+            "Exact work-area names: st_zdoc\n"
+            "Exact FORM names: read_zdoc\n"
+            "- ZDOC: structure st_zdoc, table t_zdoc, work area st_zdoc"
+        )
+        source = "\n".join(
+            [
+                "REPORT ztest.",
+                "TYPES: BEGIN OF ty_zdoc,",
+                "         doc_date TYPE zdoc-doc_date,",
+                "         site TYPE zdoc-site,",
+                "         customer TYPE zdoc-customer,",
+                "         sales_amount TYPE zdoc-sales_amount,",
+                "         cost_amount TYPE zdoc-cost_amount,",
+                "       END OF ty_zdoc.",
+                "DATA t_zdoc TYPE STANDARD TABLE OF ty_zdoc.",
+                "DATA st_zdoc TYPE ty_zdoc.",
+                "FORM read_zdoc.",
+                "  SELECT site",
+                "         customer",
+                "         doc_id",
+                "         unit_code",
+                "         SUM( sales_amount ) AS sales_amount",
+                "         SUM( cost_amount ) AS cost_amount",
+                "    FROM zdoc",
+                "    INTO CORRESPONDING FIELDS OF TABLE t_zdoc",
+                "    GROUP BY site",
+                "             customer",
+                "             doc_id",
+                "             unit_code.",
+                "ENDFORM.",
+            ]
+        )
+
+        result = ensure_database_read_declarations(
+            source,
+            base_prompt,
+            source_text="Read ZDOC and aggregate at document level.",
+            declaration_requirements=json.dumps({"parameters": [], "select_options": [], "output_structure_fields": []}),
+        )
+
+        self.assertIn("         doc_id TYPE ZDOC-DOC_ID,", result)
+        self.assertIn("         unit_code TYPE ZDOC-UNIT_CODE,", result)
+        self.assertIn("         sales_amount TYPE ZDOC-SALES_AMOUNT,", result)
+        self.assertIn("         cost_amount TYPE ZDOC-COST_AMOUNT,", result)
+        self.assertLess(result.index("doc_id TYPE ZDOC-DOC_ID"), result.index("DATA t_zdoc TYPE STANDARD TABLE OF ty_zdoc."))
+
     def test_declaration_post_processing_uses_ddic_structure_when_all_fields_are_required(self):
         source_text = (
             "# Data Extraction\n"
@@ -2142,6 +2195,81 @@ class OrchestratorTest(unittest.TestCase):
         self.assertNotIn("Relevant naming contract:", prompt)
         self.assertNotIn("When p_alv is selected display MPE_ID.", prompt)
         self.assertNotIn("The report shall compile.", prompt)
+
+    def test_processing_prompt_requires_complete_calculation_and_aggregation_logic(self):
+        declaration_requirements = json.dumps(
+            {
+                "output_structure_fields": [
+                    {"name": "CUSTOMER", "type_or_like": "TYPE ZS505-KUNNR"},
+                    {"name": "SITE", "type_or_like": "TYPE ZS505-WERKS"},
+                    {"name": "DOCUMENT_COUNT", "type_or_like": "TYPE i"},
+                    {"name": "SALES_TOTAL", "type_or_like": "TYPE p DECIMALS 2"},
+                    {"name": "GROSS_MARGIN", "type_or_like": "TYPE p DECIMALS 2"},
+                    {"name": "MARGIN_PERCENT", "type_or_like": "TYPE p DECIMALS 2"},
+                ]
+            },
+            indent=2,
+        )
+        base_prompt = (
+            "SAP DDIC metadata catalogue:\n"
+            "- ZS505: KUNNR [CHAR], WERKS [CHAR], VBELN [CHAR], KZWI2 [CURR], WAVWR [CURR]\n"
+            "Shared generation contract:\n"
+            "Exact internal-table names: t_zs505, t_output\n"
+            "Exact work-area names: st_zs505, w_output\n"
+            "Exact FORM names: process_data\n"
+            "- ZS505: structure st_zs505, table t_zs505, work area st_zs505"
+        )
+
+        prompt = chunk_prompt_text(
+            base_prompt,
+            {"name": "processing_form", "instruction": "Generate processing."},
+            source_text="Aggregate by customer and site, count documents, total sales, calculate gross margin and margin percentage.",
+            declaration_requirements=declaration_requirements,
+            processing_plan=json.dumps(
+                {
+                    "processing_steps": [
+                        {
+                            "operation": "AGGREGATE",
+                            "source": "t_zs505",
+                            "target": "w_output-SALES_TOTAL",
+                            "function": "SUM",
+                            "group_by": ["st_zs505-KUNNR", "st_zs505-WERKS"],
+                            "sources": ["st_zs505-KZWI2"],
+                        },
+                        {
+                            "operation": "COUNT",
+                            "source": "t_zs505",
+                            "target": "w_output-DOCUMENT_COUNT",
+                            "group_by": ["st_zs505-KUNNR", "st_zs505-WERKS"],
+                            "distinct": "st_zs505-VBELN",
+                        },
+                        {
+                            "operation": "CALCULATE",
+                            "target": "w_output-GROSS_MARGIN",
+                            "expression": "w_output-SALES_TOTAL - w_output-COST_TOTAL",
+                            "sources": ["w_output-SALES_TOTAL", "w_output-COST_TOTAL"],
+                        },
+                        {
+                            "operation": "PERCENTAGE",
+                            "target": "w_output-MARGIN_PERCENT",
+                            "numerator": "w_output-GROSS_MARGIN",
+                            "denominator": "w_output-SALES_TOTAL",
+                            "group_by": ["st_zs505-KUNNR", "st_zs505-WERKS"],
+                        },
+                        {"operation": "APPEND", "source": "w_output", "target": "t_output"},
+                    ]
+                },
+                indent=2,
+            ),
+        )
+
+        self.assertIn("Implement every MOVE, CALCULATE, DERIVE, TRANSFORM, AGGREGATE, COUNT, AVERAGE, PERCENTAGE", prompt)
+        self.assertIn("Required processing output fields:", prompt)
+        self.assertIn("Required output population path: w_output-DOCUMENT_COUNT", prompt)
+        self.assertIn("Required output population path: w_output-GROSS_MARGIN", prompt)
+        self.assertIn("Required output population path: w_output-MARGIN_PERCENT", prompt)
+        self.assertIn("If group_by is present", prompt)
+        self.assertIn("Do not return placeholder, comment-only, or field-copy-only processing logic", prompt)
 
     def test_processing_prompt_filters_metadata_to_structured_plan_requirements(self):
         declaration_requirements = json.dumps(
@@ -3067,6 +3195,117 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("required output creation step CLEAR w_output is missing", errors)
         self.assertIn("required output append step APPEND w_output TO t_output is missing", errors)
 
+    def test_processing_plan_validation_requires_each_output_field_population_path(self):
+        declaration_requirements = json.dumps(
+            {
+                "output_structure_fields": [
+                    {"name": "CUSTOMER", "type_or_like": "TYPE ZS505-KUNNR"},
+                    {"name": "SITE", "type_or_like": "TYPE ZS505-WERKS"},
+                    {"name": "DOCUMENT_COUNT", "type_or_like": "TYPE i"},
+                    {"name": "SALES_TOTAL", "type_or_like": "TYPE p DECIMALS 2"},
+                    {"name": "MARGIN_PERCENT", "type_or_like": "TYPE p DECIMALS 2"},
+                ]
+            }
+        )
+        base_prompt = (
+            "SAP DDIC metadata catalogue:\n"
+            "- ZS505: KUNNR [CHAR], WERKS [CHAR], VBELN [CHAR], KZWI2 [CURR]\n"
+            "Shared generation contract:\n"
+            "Exact internal-table names: t_zs505\n"
+            "Exact work-area names: st_zs505\n"
+            "- ZS505: structure st_zs505, table t_zs505, work area st_zs505"
+        )
+
+        result = validate_processing_plan(
+            {
+                "processing_steps": [
+                    {
+                        "operation": "LOOP",
+                        "source": "t_zs505",
+                        "into": "st_zs505",
+                        "steps": [
+                            {"operation": "CLEAR", "target": "w_output"},
+                            {"operation": "MOVE", "source": "st_zs505-KUNNR", "target": "w_output-CUSTOMER"},
+                            {"operation": "MOVE", "source": "st_zs505-WERKS", "target": "w_output-SITE"},
+                            {"operation": "APPEND", "source": "w_output", "target": "t_output"},
+                        ],
+                    }
+                ]
+            },
+            base_prompt=base_prompt,
+            declaration_requirements=declaration_requirements,
+        )
+
+        errors = "\n".join(result["errors"])
+        self.assertFalse(result["valid"])
+        self.assertIn("required output field w_output-DOCUMENT_COUNT has no concrete processing step", errors)
+        self.assertIn("required output field w_output-SALES_TOTAL has no concrete processing step", errors)
+        self.assertIn("required output field w_output-MARGIN_PERCENT has no concrete processing step", errors)
+
+    def test_generated_processing_completeness_flags_copy_only_logic_for_aggregated_outputs(self):
+        declaration_requirements = json.dumps(
+            {
+                "output_structure_fields": [
+                    {"name": "CUSTOMER", "type_or_like": "TYPE ZS505-KUNNR"},
+                    {"name": "SITE", "type_or_like": "TYPE ZS505-WERKS"},
+                    {"name": "DOCUMENT_COUNT", "type_or_like": "TYPE i"},
+                    {"name": "SALES_TOTAL", "type_or_like": "TYPE p DECIMALS 2"},
+                    {"name": "MARGIN_PERCENT", "type_or_like": "TYPE p DECIMALS 2"},
+                ]
+            }
+        )
+        processing_plan = {
+            "processing_steps": [
+                {
+                    "operation": "AGGREGATE",
+                    "source": "t_zs505",
+                    "target": "w_output-SALES_TOTAL",
+                    "function": "SUM",
+                    "group_by": ["st_zs505-KUNNR", "st_zs505-WERKS"],
+                    "sources": ["st_zs505-KZWI2"],
+                },
+                {
+                    "operation": "COUNT",
+                    "source": "t_zs505",
+                    "target": "w_output-DOCUMENT_COUNT",
+                    "group_by": ["st_zs505-KUNNR", "st_zs505-WERKS"],
+                    "distinct": "st_zs505-VBELN",
+                },
+                {
+                    "operation": "PERCENTAGE",
+                    "target": "w_output-MARGIN_PERCENT",
+                    "numerator": "w_output-SALES_TOTAL",
+                    "denominator": "w_output-DOCUMENT_COUNT",
+                    "group_by": ["st_zs505-KUNNR", "st_zs505-WERKS"],
+                },
+            ]
+        }
+        source = (
+            "FORM process_data.\n"
+            "  LOOP AT t_zs505 INTO st_zs505.\n"
+            "    CLEAR w_output.\n"
+            "    w_output-customer = st_zs505-kunnr.\n"
+            "    w_output-site = st_zs505-werks.\n"
+            "    APPEND w_output TO t_output.\n"
+            "  ENDLOOP.\n"
+            "ENDFORM.\n"
+        )
+
+        issues = validate_generated_processing_completeness(
+            source,
+            source_text="Aggregate by customer and site, count documents, total sales and calculate margin percentage.",
+            processing_plan=processing_plan,
+            declaration_requirements=declaration_requirements,
+        )
+        rule_ids = [issue["rule_id"] for issue in issues]
+
+        self.assertIn("PROCESSING_OUTPUT_FIELD_NOT_POPULATED", rule_ids)
+        self.assertIn("PROCESSING_AGGREGATION_NOT_IMPLEMENTED", rule_ids)
+        self.assertIn("PROCESSING_CALCULATION_NOT_IMPLEMENTED", rule_ids)
+        self.assertIn("DOCUMENT_COUNT", [issue.get("field") for issue in issues])
+        self.assertIn("SALES_TOTAL", [issue.get("field") for issue in issues])
+        self.assertIn("MARGIN_PERCENT", [issue.get("field") for issue in issues])
+
     def test_processing_plan_validation_rejects_callable_input_from_output_record(self):
         declaration_requirements = json.dumps(
             {
@@ -3502,6 +3741,13 @@ class OrchestratorTest(unittest.TestCase):
             "read_step",
             "if_step",
             "move_step",
+            "calculate_step",
+            "derive_step",
+            "transform_step",
+            "aggregate_step",
+            "count_step",
+            "average_step",
+            "percentage_step",
             "clear_step",
             "append_step",
             "call_function_step",

@@ -123,6 +123,59 @@ class FixerTest(unittest.TestCase):
         self.assertEqual(result["fixed_source"], source)
         self.assertEqual(result["final_issues"], [])
 
+    def test_host_variable_escapes_are_removed_for_classical_open_sql(self):
+        source = "\n".join(
+            [
+                "FORM read_zs505.",
+                "  SELECT kunnr",
+                "    FROM zs505",
+                "    INTO TABLE @t_zs505",
+                "    WHERE sptag BETWEEN @p_from_date AND @p_to_date.",
+                "ENDFORM.",
+            ]
+        )
+
+        result = auto_fix_abap(source)
+
+        self.assertIn("    INTO TABLE t_zs505", result["fixed_source"])
+        self.assertIn("    WHERE sptag BETWEEN p_from_date AND p_to_date.", result["fixed_source"])
+        self.assertNotIn("@", result["fixed_source"])
+        self.assertIn("HOST_VARIABLE_ESCAPE", result["diagnostics"]["changed_rules"])
+        self.assertFalse([issue for issue in result["final_issues"] if issue["rule_id"] == "HOST_VARIABLE_ESCAPE"])
+
+    def test_select_field_list_commas_are_removed_for_classical_open_sql(self):
+        source = "\n".join(
+            [
+                "FORM read_zs505.",
+                "  SELECT werks,",
+                "         kunnr,",
+                "         vbeln,",
+                "         vrkme_01,",
+                "         SUM( kzwi2 ) AS kzwi2,",
+                "         SUM( wavwr ) AS wavwr",
+                "    FROM zs505",
+                "    INTO CORRESPONDING FIELDS OF TABLE t_zs505",
+                "    WHERE sptag BETWEEN p_from_date AND p_to_date",
+                "    GROUP BY werks,",
+                "             kunnr,",
+                "             vbeln,",
+                "             vrkme_01.",
+                "ENDFORM.",
+            ]
+        )
+
+        result = auto_fix_abap(source)
+
+        self.assertIn("  SELECT werks", result["fixed_source"])
+        self.assertIn("         kunnr", result["fixed_source"])
+        self.assertIn("         SUM( kzwi2 ) AS kzwi2", result["fixed_source"])
+        self.assertIn("    GROUP BY werks", result["fixed_source"])
+        self.assertIn("             kunnr", result["fixed_source"])
+        self.assertNotIn("werks,", result["fixed_source"])
+        self.assertNotIn("kunnr,", result["fixed_source"])
+        self.assertNotIn("kzwi2,", result["fixed_source"])
+        self.assertIn("SELECT_FIELD_LIST_COMMAS", result["diagnostics"]["changed_rules"])
+
     def test_endselect_after_select_into_table_is_removed(self):
         source = "\n".join(
             [

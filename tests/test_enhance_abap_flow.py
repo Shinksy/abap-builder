@@ -19,6 +19,7 @@ from services.enhance_abap import (
     repair_missing_select_target_structure_components,
     repair_orphan_enhancement_declarations,
     reconcile_enhancement_chunk_replacements,
+    remove_required_start_of_selection_performs,
     render_enhance_prompt,
     run_enhance_abap,
     split_existing_program_chunks,
@@ -611,6 +612,133 @@ class EnhanceAbapFlowTest(unittest.TestCase):
         self.assertIn(unaffected, result["text"])
         self.assertEqual(result["text"].lower().count("from kna1"), 1)
 
+    def test_package_select_conversion_keeps_read_data_as_owner(self):
+        source = "\n".join(
+            [
+                "REPORT zpkg.",
+                "TABLES: kna1.",
+                "TYPES: BEGIN OF ty_data,",
+                "         kunnr TYPE kunnr,",
+                "         zcust_guid TYPE zcust_guid,",
+                "       END OF ty_data.",
+                "DATA: t_data TYPE STANDARD TABLE OF ty_data.",
+                "DATA: st_data TYPE ty_data.",
+                "SELECT-OPTIONS s_kunnr FOR kna1-kunnr.",
+                "START-OF-SELECTION.",
+                "  PERFORM read_data.",
+                "  PERFORM process_data.",
+                "END-OF-SELECTION.",
+                "  PERFORM output_report.",
+                "FORM process_data.",
+                "  LOOP AT t_data INTO st_data.",
+                "  ENDLOOP.",
+                "ENDFORM.",
+                "FORM output_report.",
+                "  WRITE: / 'done'.",
+                "ENDFORM.",
+                "FORM read_data.",
+                "  SELECT kunnr",
+                "         INTO TABLE t_data",
+                "         FROM kna1",
+                "         WHERE kunnr IN s_kunnr",
+                "           AND zcust_guid EQ space.",
+                "ENDFORM.",
+            ]
+        )
+        spec = (
+            "Add select-option S_KTOKD based on KNA1-KTOKD. "
+            "Change the KNA1 read to use PACKAGE SIZE 1000. "
+            "Create T_DATA_TEMP with the same line type as T_DATA. "
+            "For each package returned from KNA1: clear T_DATA; loop through T_DATA_TEMP; append valid records. "
+            "After T_DATA has been populated for the current package, call PROCESS_DATA. "
+            "Remove the existing standalone PERFORM PROCESS_DATA from START-OF-SELECTION. "
+            "Reuse the existing READ_DATA and PROCESS_DATA logic."
+        )
+
+        def generator(_prompt_text, source_text):
+            if "START-OF-SELECTION." in source_text:
+                return {
+                    "text": "\n".join(
+                        [
+                            "REPORT zpkg.",
+                            "TABLES: kna1.",
+                            "TYPES: BEGIN OF ty_data,",
+                            "         kunnr TYPE kunnr,",
+                            "         ktokd TYPE ktokd,",
+                            "         zcust_guid TYPE zcust_guid,",
+                            "       END OF ty_data.",
+                            "DATA: t_data TYPE STANDARD TABLE OF ty_data,",
+                            "      t_data_temp TYPE STANDARD TABLE OF ty_data.",
+                            "DATA: st_data TYPE ty_data.",
+                            "SELECT-OPTIONS s_kunnr FOR kna1-kunnr.",
+                            "SELECT-OPTIONS s_ktokd FOR kna1-ktokd DEFAULT 'ZCST'.",
+                            "START-OF-SELECTION.",
+                            "  PERFORM read_data.",
+                            "  CLEAR t_data_temp.",
+                            "  SELECT kunnr ktokd zcust_guid",
+                            "    INTO TABLE t_data_temp PACKAGE SIZE 1000",
+                            "    FROM kna1",
+                            "    WHERE zcust_guid EQ space.",
+                            "    CLEAR t_data.",
+                            "    PERFORM process_data.",
+                            "  ENDSELECT.",
+                            "END-OF-SELECTION.",
+                            "  PERFORM output_report.",
+                        ]
+                    ),
+                    "model": "test-model",
+                    "usage": None,
+                }
+            if "FORM read_data." in source_text:
+                return {
+                    "text": "\n".join(
+                        [
+                            "FORM read_data.",
+                            "  SELECT kunnr",
+                            "         ktokd",
+                            "         zcust_guid",
+                            "         INTO TABLE t_data_temp",
+                            "         PACKAGE SIZE 1000",
+                            "         FROM kna1",
+                            "         WHERE zcust_guid EQ space.",
+                            "    CLEAR t_data.",
+                            "    LOOP AT t_data_temp INTO st_data.",
+                            "      IF st_data-kunnr IN s_kunnr",
+                            "         AND st_data-ktokd IN s_ktokd",
+                            "         AND st_data-zcust_guid EQ space.",
+                            "        APPEND st_data TO t_data.",
+                            "      ENDIF.",
+                            "    ENDLOOP.",
+                            "    PERFORM process_data.",
+                            "    CLEAR t_data_temp.",
+                            "  ENDSELECT.",
+                            "ENDFORM.",
+                        ]
+                    ),
+                    "model": "test-model",
+                    "usage": None,
+                }
+            return {"text": source_text, "model": "test-model", "usage": None}
+
+        chunks = split_existing_program_chunks(source)
+        affected = identify_affected_chunks(chunks, spec)
+        result = generate_targeted_enhancement(
+            original_source=source,
+            chunks=chunks,
+            affected_chunks=affected,
+            prompt_template="Prompt\n{{FUNCTIONAL_SPECIFICATION}}\n{{EXISTING_ABAP}}",
+            enhancement_specification=spec,
+            generator=generator,
+        )
+
+        self.assertEqual(result["text"].lower().count("from kna1"), 1)
+        self.assertIn("FORM read_data.", result["text"])
+        self.assertIn("PACKAGE SIZE 1000", result["text"])
+        self.assertNotIn("INTO TABLE t_data\n         ktokd", result["text"])
+        self.assertNotIn("PERFORM process_data.\nEND-OF-SELECTION", result["text"])
+        issues = validate_enhancement_structure(source, result["text"], enhancement_specification=spec)
+        self.assertFalse([issue for issue in issues if issue["rule_id"] == "ENHANCEMENT_CLEARS_PREPOPULATED_TABLE"])
+
     def test_structural_validation_flags_missing_new_definition(self):
         original = "\n".join(
             [
@@ -1141,6 +1269,86 @@ class EnhanceAbapFlowTest(unittest.TestCase):
         issues = validate_enhancement_structure(original, final, enhancement_specification="Reuse customer data.")
 
         self.assertTrue([issue for issue in issues if issue["rule_id"] == "ENHANCEMENT_CLEARS_PREPOPULATED_TABLE"])
+
+    def test_final_validation_allows_explicitly_requested_package_table_clear(self):
+        original = "\n".join(
+            [
+                "REPORT zstruct.",
+                "DATA t_data TYPE STANDARD TABLE OF kna1.",
+                "FORM read_customers.",
+                "  SELECT * FROM kna1 INTO TABLE t_data.",
+                "ENDFORM.",
+            ]
+        )
+        final = original.replace("ENDFORM.", "  CLEAR t_data.\nENDFORM.")
+
+        issues = validate_enhancement_structure(
+            original,
+            final,
+            enhancement_specification="For each package returned from KNA1: clear T_DATA; append valid records.",
+        )
+
+        self.assertFalse([issue for issue in issues if issue["rule_id"] == "ENHANCEMENT_CLEARS_PREPOPULATED_TABLE"])
+
+    def test_final_validation_flags_required_start_of_selection_perform_removal(self):
+        original = "\n".join(
+            [
+                "REPORT zstruct.",
+                "START-OF-SELECTION.",
+                "  PERFORM read_data.",
+                "  PERFORM process_data.",
+                "END-OF-SELECTION.",
+                "  PERFORM output_report.",
+            ]
+        )
+        final = original + "\nFORM read_data.\n  PERFORM process_data.\nENDFORM."
+
+        issues = validate_enhancement_structure(
+            original,
+            final,
+            enhancement_specification=(
+                "After T_DATA has been populated for the current package, call PROCESS_DATA. "
+                "Remove the existing standalone PERFORM PROCESS_DATA from START-OF-SELECTION."
+            ),
+        )
+
+        self.assertTrue(
+            [issue for issue in issues if issue["rule_id"] == "ENHANCEMENT_REQUIRED_PERFORM_REMOVAL_MISSING"]
+        )
+
+    def test_required_start_of_selection_perform_removal_is_cleaned_before_validation(self):
+        spec = (
+            "After T_DATA has been populated for the current package, call PROCESS_DATA. "
+            "Remove the existing standalone PERFORM PROCESS_DATA from START-OF-SELECTION."
+        )
+        source = "\n".join(
+            [
+                "REPORT zstruct.",
+                "START-OF-SELECTION.",
+                "  PERFORM read_data.",
+                "",
+                "  PERFORM process_data.",
+                "",
+                "END-OF-SELECTION.",
+                "  PERFORM output_report.",
+                "",
+                "FORM read_data.",
+                "  PERFORM process_data.",
+                "ENDFORM.",
+            ]
+        )
+
+        cleaned = remove_required_start_of_selection_performs(source, spec)
+
+        self.assertIn("FORM read_data.\n  PERFORM process_data.", cleaned)
+        self.assertNotIn("START-OF-SELECTION.\n  PERFORM read_data.\n\n  PERFORM process_data.", cleaned)
+        issues = validate_enhancement_structure(source, cleaned, enhancement_specification=spec)
+        self.assertFalse(
+            [issue for issue in issues if issue["rule_id"] == "ENHANCEMENT_REQUIRED_PERFORM_REMOVAL_MISSING"]
+        )
+        self.assertFalse(
+            [issue for issue in issues if issue["rule_id"] == "ENHANCEMENT_UNRELATED_EXISTING_CHANGE"]
+        )
 
     def test_final_validation_flags_unrelated_existing_statement_change(self):
         original = "\n".join(["REPORT zstruct.", "START-OF-SELECTION.", "  WRITE: / 'Heading'."])

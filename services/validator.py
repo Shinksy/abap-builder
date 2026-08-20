@@ -541,7 +541,7 @@ def validate_chained_declarations(lines):
         elif starts_declaration:
             chain_keyword = None
 
-        if stripped.endswith(",") and chain_keyword is None:
+        if stripped.endswith(",") and chain_keyword is None and declaration_line_allows_trailing_comma_check(stripped, declaration_keywords):
             issues.append(
                 issue(
                     "ABAP_BROKEN_CHAINED_DECLARATION",
@@ -555,6 +555,12 @@ def validate_chained_declarations(lines):
         if stripped.endswith("."):
             chain_keyword = None
     return issues
+
+
+def declaration_line_allows_trailing_comma_check(stripped, declaration_keywords):
+    if re.match(rf"^(?:{declaration_keywords})\b", stripped, re.IGNORECASE):
+        return True
+    return bool(re.match(r"^[A-Za-z_]\w*\s+TYPE\b", stripped, re.IGNORECASE))
 
 
 def parameter_items(lines):

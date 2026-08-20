@@ -21,6 +21,8 @@ Preservation rules:
 - Before adding new data access or a new routine, inspect the existing chunk for a suitable SELECT, READ TABLE, FORM, event block, LOOP, or processing block that can be safely extended.
 - If the required table or internal table is already being read in the existing code, extend that existing read or SELECT with the additional field or processing needed instead of creating a duplicate read.
 - Do not create a second SELECT, READ TABLE, or lookup for the same data source unless the requested enhancement genuinely requires a different key, cardinality, timing, or target.
+- When converting an existing SELECT to use PACKAGE SIZE, replace the complete original SELECT statement with one syntactically valid package SELECT; do not leave the old INTO/WHERE clauses in place and append a second partial SELECT body after them.
+- If processing is moved into a package loop, remove the old standalone PERFORM call from the original event block and keep any required totals in a separate accumulator so existing output still reports the full run, not only the last package.
 - Do not create a new FORM when the requested enhancement can be made safely inside an existing relevant routine.
 - Only create new logic when no appropriate existing statement, routine, or processing block can be extended.
 - Ensure every new variable, type, field symbol, selection parameter, routine, method, function module, and callable reference introduced by the enhancement has a matching existing or newly added definition.

@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from time import perf_counter
 
-from services.abap_source import split_code_and_comment, statement_ends
+from services.abap_source import split_code_and_comment, split_string_segments, statement_ends
 from services.callable_signature_provider import normalize_provider_signatures
 from services.ddic_metadata_context import field_detail, normalized_fields, normalized_tables
 from services.final_assembler import (
@@ -625,6 +625,13 @@ def processing_plan_response_format():
                         {"$ref": "#/$defs/read_step"},
                         {"$ref": "#/$defs/if_step"},
                         {"$ref": "#/$defs/move_step"},
+                        {"$ref": "#/$defs/calculate_step"},
+                        {"$ref": "#/$defs/derive_step"},
+                        {"$ref": "#/$defs/transform_step"},
+                        {"$ref": "#/$defs/aggregate_step"},
+                        {"$ref": "#/$defs/count_step"},
+                        {"$ref": "#/$defs/average_step"},
+                        {"$ref": "#/$defs/percentage_step"},
                         {"$ref": "#/$defs/clear_step"},
                         {"$ref": "#/$defs/append_step"},
                         {"$ref": "#/$defs/call_function_step"},
@@ -676,6 +683,88 @@ def processing_plan_response_format():
                         "operation": {"type": "string", "enum": ["MOVE"]},
                         "source": {"$ref": "#/$defs/reference"},
                         "target": {"$ref": "#/$defs/reference"},
+                    },
+                },
+                "calculate_step": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["operation", "target", "expression", "sources"],
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["CALCULATE"]},
+                        "target": {"$ref": "#/$defs/reference"},
+                        "expression": {"type": "string"},
+                        "sources": {"type": "array", "items": {"$ref": "#/$defs/reference"}},
+                    },
+                },
+                "derive_step": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["operation", "target", "expression", "sources"],
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["DERIVE"]},
+                        "target": {"$ref": "#/$defs/reference"},
+                        "expression": {"type": "string"},
+                        "sources": {"type": "array", "items": {"$ref": "#/$defs/reference"}},
+                    },
+                },
+                "transform_step": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["operation", "source", "target", "transformation"],
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["TRANSFORM"]},
+                        "source": {"$ref": "#/$defs/reference"},
+                        "target": {"$ref": "#/$defs/reference"},
+                        "transformation": {"type": "string"},
+                    },
+                },
+                "aggregate_step": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["operation", "source", "target", "function", "group_by", "sources"],
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["AGGREGATE"]},
+                        "source": {"$ref": "#/$defs/reference"},
+                        "target": {"$ref": "#/$defs/reference"},
+                        "function": {"type": "string", "enum": ["SUM", "MIN", "MAX", "COUNT", "COUNT_DISTINCT"]},
+                        "group_by": {"type": "array", "items": {"$ref": "#/$defs/reference"}},
+                        "sources": {"type": "array", "items": {"$ref": "#/$defs/reference"}},
+                    },
+                },
+                "count_step": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["operation", "source", "target", "group_by", "distinct"],
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["COUNT"]},
+                        "source": {"$ref": "#/$defs/reference"},
+                        "target": {"$ref": "#/$defs/reference"},
+                        "group_by": {"type": "array", "items": {"$ref": "#/$defs/reference"}},
+                        "distinct": {"type": ["string", "null"]},
+                    },
+                },
+                "average_step": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["operation", "numerator", "denominator", "target", "group_by"],
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["AVERAGE"]},
+                        "numerator": {"$ref": "#/$defs/reference"},
+                        "denominator": {"$ref": "#/$defs/reference"},
+                        "target": {"$ref": "#/$defs/reference"},
+                        "group_by": {"type": "array", "items": {"$ref": "#/$defs/reference"}},
+                    },
+                },
+                "percentage_step": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["operation", "numerator", "denominator", "target", "group_by"],
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["PERCENTAGE"]},
+                        "numerator": {"$ref": "#/$defs/reference"},
+                        "denominator": {"$ref": "#/$defs/reference"},
+                        "target": {"$ref": "#/$defs/reference"},
+                        "group_by": {"type": "array", "items": {"$ref": "#/$defs/reference"}},
                     },
                 },
                 "clear_step": {
@@ -922,14 +1011,20 @@ SUPPORTED_PROCESSING_PLAN_OPERATIONS = {
     "CALL_FUNCTION",
     "CALL_METHOD",
     "CALL_STATIC_METHOD",
+    "AGGREGATE",
+    "AVERAGE",
+    "CALCULATE",
     "CLEAR",
     "CONCATENATE",
     "DELETE",
+    "DERIVE",
     "IF",
     "LOOP",
     "MOVE",
+    "PERCENTAGE",
     "READ",
     "SORT",
+    "TRANSFORM",
 }
 
 
@@ -1055,6 +1150,95 @@ def normalize_processing_step(item, index, context, path=None):
             item,
             step,
             "normalized MOVE source and target references",
+            "normalize_processing_step",
+        )
+        return step
+    if operation in {"CALCULATE", "DERIVE"}:
+        target = normalize_plan_reference(item.get("target"), context, role="target")
+        expression = str(item.get("expression") or item.get("formula") or item.get("calculation") or "").strip()
+        sources = normalize_plan_reference_list(item.get("sources") or item.get("source_fields"), context)
+        if not target or not expression:
+            record_processing_step_rejection(context.get("diagnostics"), path, item, f"{operation} step is missing target or expression", "normalize_processing_step")
+            return None
+        step.update({"target": target, "expression": expression, "sources": sources})
+        record_processing_step_modification(
+            context.get("diagnostics"),
+            path,
+            item,
+            step,
+            f"normalized {operation} target, expression, and source references",
+            "normalize_processing_step",
+        )
+        return step
+    if operation == "TRANSFORM":
+        source = normalize_plan_reference(item.get("source"), context, role="source")
+        target = normalize_plan_reference(item.get("target"), context, role="target")
+        transformation = str(item.get("transformation") or item.get("expression") or "").strip()
+        if not source or not target or not transformation:
+            record_processing_step_rejection(context.get("diagnostics"), path, item, "TRANSFORM step is missing source, target, or transformation", "normalize_processing_step")
+            return None
+        step.update({"source": source, "target": target, "transformation": transformation})
+        record_processing_step_modification(
+            context.get("diagnostics"),
+            path,
+            item,
+            step,
+            "normalized TRANSFORM source, target, and transformation",
+            "normalize_processing_step",
+        )
+        return step
+    if operation == "AGGREGATE":
+        source = normalize_plan_identifier(item.get("source"))
+        target = normalize_plan_reference(item.get("target"), context, role="target")
+        function = str(item.get("function") or item.get("aggregate") or "SUM").strip().upper()
+        group_by = normalize_plan_reference_list(item.get("group_by") or item.get("grouping_keys"), context)
+        sources = normalize_plan_reference_list(item.get("sources") or item.get("source_fields"), context)
+        if not source or not target or not function:
+            record_processing_step_rejection(context.get("diagnostics"), path, item, "AGGREGATE step is missing source, target, or function", "normalize_processing_step")
+            return None
+        step.update({"source": source, "target": target, "function": function, "group_by": group_by, "sources": sources})
+        record_processing_step_modification(
+            context.get("diagnostics"),
+            path,
+            item,
+            step,
+            "normalized AGGREGATE source, target, function, grouping, and source references",
+            "normalize_processing_step",
+        )
+        return step
+    if operation == "COUNT":
+        source = normalize_plan_identifier(item.get("source"))
+        target = normalize_plan_reference(item.get("target"), context, role="target")
+        group_by = normalize_plan_reference_list(item.get("group_by") or item.get("grouping_keys"), context)
+        distinct = normalize_plan_reference(item.get("distinct") or item.get("distinct_by"), context, role="source") if item.get("distinct") or item.get("distinct_by") else None
+        if not source or not target:
+            record_processing_step_rejection(context.get("diagnostics"), path, item, "COUNT step is missing source or target", "normalize_processing_step")
+            return None
+        step.update({"source": source, "target": target, "group_by": group_by, "distinct": distinct})
+        record_processing_step_modification(
+            context.get("diagnostics"),
+            path,
+            item,
+            step,
+            "normalized COUNT source, target, grouping, and distinct reference",
+            "normalize_processing_step",
+        )
+        return step
+    if operation in {"AVERAGE", "PERCENTAGE"}:
+        numerator = normalize_plan_reference(item.get("numerator"), context, role="source")
+        denominator = normalize_plan_reference(item.get("denominator"), context, role="source")
+        target = normalize_plan_reference(item.get("target"), context, role="target")
+        group_by = normalize_plan_reference_list(item.get("group_by") or item.get("grouping_keys"), context)
+        if not numerator or not denominator or not target:
+            record_processing_step_rejection(context.get("diagnostics"), path, item, f"{operation} step is missing numerator, denominator, or target", "normalize_processing_step")
+            return None
+        step.update({"numerator": numerator, "denominator": denominator, "target": target, "group_by": group_by})
+        record_processing_step_modification(
+            context.get("diagnostics"),
+            path,
+            item,
+            step,
+            f"normalized {operation} numerator, denominator, target, and grouping",
             "normalize_processing_step",
         )
         return step
@@ -1554,6 +1738,18 @@ def normalize_plan_reference(value, context, role=None):
     return identifier or text
 
 
+def normalize_plan_reference_list(value, context):
+    if value is None:
+        return []
+    raw_values = value if isinstance(value, list) else [value]
+    normalized = []
+    for item in raw_values:
+        reference = normalize_plan_reference(item, context, role="source")
+        if reference and reference not in normalized:
+            normalized.append(reference)
+    return normalized
+
+
 def output_field_names_from_requirements(declaration_requirements=None):
     requirements = parse_declaration_requirements_text(declaration_requirements)
     fields = requirements.get("output_structure_fields") if isinstance(requirements, dict) else []
@@ -1706,6 +1902,37 @@ def validate_processing_steps(steps, context, errors, path=None):
             validate_plan_reference(step.get("source"), context, errors, step_path + ["source"], role="source")
             validate_plan_reference(step.get("target"), context, errors, step_path + ["target"], role="target")
             validate_move_does_not_use_ddic_work_area_as_temporary_storage(step, context, errors, step_path)
+        elif operation in {"CALCULATE", "DERIVE"}:
+            validate_plan_reference(step.get("target"), context, errors, step_path + ["target"], role="target")
+            for source_index, source in enumerate(step.get("sources") or []):
+                validate_plan_reference(source, context, errors, step_path + ["sources", source_index], role="source")
+            if not str(step.get("expression") or "").strip():
+                errors.append(f"{format_processing_plan_path(step_path + ['expression'])} {operation} has no executable expression")
+        elif operation == "TRANSFORM":
+            validate_plan_reference(step.get("source"), context, errors, step_path + ["source"], role="source")
+            validate_plan_reference(step.get("target"), context, errors, step_path + ["target"], role="target")
+            if not str(step.get("transformation") or "").strip():
+                errors.append(f"{format_processing_plan_path(step_path + ['transformation'])} TRANSFORM has no transformation")
+        elif operation == "AGGREGATE":
+            validate_plan_reference(step.get("source"), context, errors, step_path + ["source"], role="table")
+            validate_plan_reference(step.get("target"), context, errors, step_path + ["target"], role="target")
+            for group_index, group in enumerate(step.get("group_by") or []):
+                validate_plan_reference(group, context, errors, step_path + ["group_by", group_index], role="source")
+            for source_index, source in enumerate(step.get("sources") or []):
+                validate_plan_reference(source, context, errors, step_path + ["sources", source_index], role="source")
+        elif operation == "COUNT":
+            validate_plan_reference(step.get("source"), context, errors, step_path + ["source"], role="table")
+            validate_plan_reference(step.get("target"), context, errors, step_path + ["target"], role="target")
+            for group_index, group in enumerate(step.get("group_by") or []):
+                validate_plan_reference(group, context, errors, step_path + ["group_by", group_index], role="source")
+            if step.get("distinct"):
+                validate_plan_reference(step.get("distinct"), context, errors, step_path + ["distinct"], role="source")
+        elif operation in {"AVERAGE", "PERCENTAGE"}:
+            validate_plan_reference(step.get("numerator"), context, errors, step_path + ["numerator"], role="source")
+            validate_plan_reference(step.get("denominator"), context, errors, step_path + ["denominator"], role="source")
+            validate_plan_reference(step.get("target"), context, errors, step_path + ["target"], role="target")
+            for group_index, group in enumerate(step.get("group_by") or []):
+                validate_plan_reference(group, context, errors, step_path + ["group_by", group_index], role="source")
         elif operation in {"CALL_FUNCTION", "CALL_METHOD", "CALL_STATIC_METHOD"}:
             validate_callable_step(step, context, errors, step_path)
         elif operation == "IF":
@@ -2011,6 +2238,9 @@ def validate_required_output_steps(steps, context, errors):
     uses_output = any(processing_step_references_output(step, output_names) for step in all_steps)
     if not uses_output:
         return
+    missing_fields = sorted((context.get("output_fields") or set()) - processing_plan_populated_output_fields(all_steps, output_names))
+    for field in missing_fields:
+        errors.append(f"required output field {output_names['work_area']}-{field} has no concrete processing step")
     has_clear = any(str(step.get("operation") or "").upper() == "CLEAR" and normalize_plan_reference(step.get("target"), {}) == output_names["work_area"] for step in all_steps)
     has_append = any(
         str(step.get("operation") or "").upper() == "APPEND"
@@ -2031,6 +2261,42 @@ def processing_step_references_output(step, output_names):
     table = output_names.get("table")
     text = processing_plan_text_blob(step).lower()
     return bool(needle and re.search(rf"\b{re.escape(needle.lower())}\b", text)) or bool(table and re.search(rf"\b{re.escape(table.lower())}\b", text))
+
+
+def processing_plan_populated_output_fields(steps, output_names):
+    fields = set()
+    output_work_area = output_names.get("work_area")
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        for value in processing_step_output_targets(step):
+            field = output_field_name_from_reference(value, output_work_area)
+            if field:
+                fields.add(field)
+    return fields
+
+
+def processing_step_output_targets(step):
+    targets = []
+    for key in ("target", "receiving_parameter", "returning_parameter"):
+        if step.get(key):
+            targets.append(step.get(key))
+    for mapping_key in ("output_parameters",):
+        mappings = step.get(mapping_key) or {}
+        if isinstance(mappings, dict):
+            targets.extend(mappings.values())
+        elif isinstance(mappings, list):
+            for item in mappings:
+                if isinstance(item, dict):
+                    targets.append(item.get("value") or item.get("target"))
+    return targets
+
+
+def output_field_name_from_reference(value, output_work_area):
+    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_]{0,29})[-.]([A-Za-z][A-Za-z0-9_]{0,29})", str(value or "").strip())
+    if match and normalize_plan_identifier(match.group(1)) == normalize_plan_identifier(output_work_area):
+        return match.group(2).upper()
+    return ""
 
 
 def processing_plan_reference_type(value, context):
@@ -3892,6 +4158,7 @@ def required_global_variable_declarations(declaration_requirements=None):
 def ensure_database_read_declarations(source, base_prompt=None, source_text=None, declaration_requirements=None, ddic_metadata=None):
     declarations = deterministic_database_read_declarations(
         base_prompt,
+        generated_source=source,
         source_text=source_text,
         declaration_requirements=declaration_requirements,
         ddic_metadata=ddic_metadata,
@@ -3902,14 +4169,15 @@ def ensure_database_read_declarations(source, base_prompt=None, source_text=None
     return insert_declaration_statements(cleaned, database_read_declaration_lines(declarations))
 
 
-def deterministic_database_read_declarations(base_prompt=None, source_text=None, declaration_requirements=None, ddic_metadata=None):
+def deterministic_database_read_declarations(base_prompt=None, generated_source=None, source_text=None, declaration_requirements=None, ddic_metadata=None):
     context = database_read_selected_field_context(base_prompt, source_text, declaration_requirements, ddic_metadata=ddic_metadata)
     selected_fields = context.get("selected_fields_in_spec_order") or []
-    if not selected_fields:
-        return []
     metadata = context.get("full_sap_metadata_returned") or {}
     object_contracts = context.get("object_contracts") or {}
     fields_by_object = requested_fields_by_ddic_object(selected_fields)
+    merge_select_projection_fields(fields_by_object, generated_source, object_contracts, metadata)
+    if not fields_by_object:
+        return []
     declarations = []
     ordered_object_names = [name for name in object_contracts if name in fields_by_object]
     ordered_object_names.extend(name for name in fields_by_object if name not in ordered_object_names)
@@ -3935,6 +4203,143 @@ def deterministic_database_read_declarations(base_prompt=None, source_text=None,
             }
         )
     return declarations
+
+
+def merge_select_projection_fields(fields_by_object, generated_source, object_contracts, metadata):
+    if not generated_source or not object_contracts:
+        return
+    for selected in select_projection_fields_by_object(generated_source, object_contracts, metadata):
+        object_name = selected["object_name"]
+        target = fields_by_object.setdefault(object_name, [])
+        for field in selected["fields"]:
+            append_unique(target, field)
+
+
+def select_projection_fields_by_object(source, object_contracts, metadata):
+    results = []
+    table_contracts = {
+        normalize_abap_identifier((contract or {}).get("table")).lower(): object_name
+        for object_name, contract in (object_contracts or {}).items()
+        if normalize_abap_identifier((contract or {}).get("table"))
+    }
+    object_names = {str(name or "").upper() for name in object_contracts or {}}
+    for statement in select_statement_blocks(source):
+        statement_text = " ".join(split_code_and_comment(line)[0].strip() for line in statement)
+        target_table = select_target_table_name(statement_text)
+        object_name = table_contracts.get(str(target_table or "").lower()) or select_from_object_name(statement_text, object_names)
+        if not object_name:
+            continue
+        available = set(metadata_field_names(metadata.get(object_name)))
+        fields = select_projection_field_names(statement, available)
+        if fields:
+            results.append({"object_name": object_name, "fields": fields})
+    return results
+
+
+def select_statement_blocks(source):
+    blocks = []
+    current = []
+    in_select = False
+    for line in str(source or "").splitlines():
+        code = split_code_and_comment(line)[0].strip()
+        if not in_select and re.match(r"^SELECT\b", code, re.IGNORECASE):
+            current = [line]
+            in_select = True
+            if statement_ends(code):
+                blocks.append(current)
+                current = []
+                in_select = False
+            continue
+        if in_select:
+            current.append(line)
+            if statement_ends(code):
+                blocks.append(current)
+                current = []
+                in_select = False
+    return blocks
+
+
+def select_target_table_name(statement_text):
+    match = re.search(
+        r"\b(?:INTO|APPENDING)\s+(?:CORRESPONDING\s+FIELDS\s+OF\s+)?TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+        str(statement_text or ""),
+        re.IGNORECASE,
+    )
+    return normalize_abap_identifier(match.group(1)) if match else ""
+
+
+def select_from_object_name(statement_text, object_names):
+    match = re.search(r"\bFROM\s+([A-Za-z][A-Za-z0-9_/]{1,29})\b", str(statement_text or ""), re.IGNORECASE)
+    if not match:
+        return ""
+    object_name = match.group(1).upper()
+    return object_name if object_name in object_names else ""
+
+
+def select_projection_field_names(statement_lines, available_fields):
+    names = []
+    for line in select_projection_lines(statement_lines):
+        code = split_code_and_comment(line)[0]
+        for part in split_select_projection_line(code):
+            field = select_projection_component_name(part, available_fields)
+            if field:
+                append_unique(names, field)
+    return names
+
+
+def select_projection_lines(statement_lines):
+    result = []
+    before_from = False
+    for line in statement_lines or []:
+        code = split_code_and_comment(line)[0]
+        if not before_from:
+            match = re.search(r"\bSELECT\b(.*)$", code, re.IGNORECASE)
+            if not match:
+                continue
+            code = match.group(1)
+            before_from = True
+        from_match = re.search(r"\bFROM\b", code, re.IGNORECASE)
+        if from_match:
+            before = code[: from_match.start()]
+            if before.strip():
+                result.append(before)
+            break
+        result.append(code)
+    return result
+
+
+def split_select_projection_line(code):
+    parts = []
+    for segment, is_string in split_string_segments(code):
+        if is_string:
+            continue
+        parts.extend(part.strip() for part in segment.split(",") if part.strip())
+    if len(parts) <= 1:
+        return [str(code or "").strip()] if str(code or "").strip() else []
+    return parts
+
+
+def select_projection_component_name(part, available_fields):
+    text = re.sub(r"\s+", " ", str(part or "").strip().rstrip("."))
+    if not text:
+        return ""
+    alias = re.search(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", text, re.IGNORECASE)
+    if alias:
+        return verified_select_projection_field(alias.group(1), available_fields)
+    qualified = re.search(r"\b[A-Za-z][A-Za-z0-9_]*~([A-Za-z_][A-Za-z0-9_]*)\b", text)
+    if qualified:
+        return verified_select_projection_field(qualified.group(1), available_fields)
+    simple = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)", text)
+    if simple:
+        return verified_select_projection_field(simple.group(1), available_fields)
+    return ""
+
+
+def verified_select_projection_field(field_name, available_fields):
+    name = str(field_name or "").strip().upper()
+    if not name:
+        return ""
+    return name if not available_fields or name in available_fields else ""
 
 
 def metadata_field_names(field_texts):
@@ -5329,9 +5734,25 @@ def processing_plan_output_contract_lines(declaration_requirements=None, identif
     identifiers = identifiers or set()
     if output_names["table"].lower() not in identifiers and output_names["work_area"].lower() not in identifiers:
         return []
-    return [
+    lines = [
         f"Exact output names: type {output_names['type']} (TYPES definition), internal table {output_names['table']} (STANDARD TABLE OF {output_names['type']}), work area {output_names['work_area']} (TYPE {output_names['type']})"
     ]
+    fields = sorted(output_field_names_from_requirements(declaration_requirements))
+    if fields:
+        lines.append("Required processing output fields: " + ", ".join(fields))
+        lines.append(
+            f"- Before APPEND, each required output field must have executable logic that populates {output_names['work_area']}-<field>."
+        )
+        for field in fields:
+            lines.append(f"- Required output population path: {output_names['work_area']}-{field}")
+    lines.extend(
+        [
+            "- Implement calculations, derived fields, transformations, counts, averages, percentages, and aggregations from the structured processing plan as ABAP statements.",
+            "- If group_by is present in the structured processing plan, build one output row per grouping key instead of appending one row per source record.",
+            "- Do not return placeholder, comment-only, or field-copy-only processing logic when calculated, derived, transformed, or aggregated output fields are required.",
+        ]
+    )
+    return lines
 
 
 def ddic_object_contract_line_name(line):
@@ -6098,6 +6519,164 @@ def truthy_plan_flag(value):
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "required", "separate", "explicit"}
+
+
+def validate_generated_processing_completeness(source, source_text=None, processing_plan=None, declaration_requirements=None):
+    output_names = output_names_for_contract(declaration_requirements)
+    output_fields = output_field_names_from_requirements(declaration_requirements)
+    if not output_names or not output_fields:
+        return []
+    issues = []
+    output_work_area = output_names["work_area"]
+    output_table = output_names["table"]
+    populated = generated_output_field_populations(source, output_work_area)
+    if output_table_used(source, output_table) or output_work_area_used(source, output_work_area):
+        for field in sorted(output_fields - populated):
+            issues.append(
+                processing_completeness_issue(
+                    "PROCESSING_OUTPUT_FIELD_NOT_POPULATED",
+                    processing_form_line_number(source),
+                    f"Required output field {output_work_area}-{field} is not populated by executable processing logic.",
+                    processing_form_source_line(source),
+                    f"Populate {output_work_area}-{field} before appending {output_work_area} to {output_table}.",
+                    field=field,
+                    output_work_area=output_work_area,
+                    output_table=output_table,
+                )
+            )
+    plan = processing_plan_payload(processing_plan)
+    if processing_plan_requests_grouped_or_aggregate_logic(plan, source_text) and not generated_processing_has_grouping_or_aggregation(source):
+        issues.append(
+            processing_completeness_issue(
+                "PROCESSING_AGGREGATION_NOT_IMPLEMENTED",
+                processing_form_line_number(source),
+                "The processing plan/specification requires grouping or aggregation, but the generated processing logic has no executable grouping or aggregation.",
+                processing_form_source_line(source),
+                "Aggregate by the required grouping keys before appending output rows.",
+            )
+        )
+    for target in processing_plan_calculation_targets(plan):
+        if not generated_output_target_has_calculation(source, target):
+            issues.append(
+                processing_completeness_issue(
+                    "PROCESSING_CALCULATION_NOT_IMPLEMENTED",
+                    processing_form_line_number(source),
+                    f"Processing plan calculation target {target} is not implemented as executable calculation logic.",
+                    processing_form_source_line(source),
+                    f"Implement the calculation for {target} using classical ABAP arithmetic before output append.",
+                    target=target,
+                )
+            )
+    return dedupe_processing_completeness_issues(issues)
+
+
+def generated_output_field_populations(source, output_work_area):
+    fields = set()
+    for line in str(source or "").splitlines():
+        code = split_code_and_comment(line)[0]
+        for match in re.finditer(rf"\b{re.escape(output_work_area)}-([A-Za-z][A-Za-z0-9_]{{0,29}})\s*=", code, re.IGNORECASE):
+            fields.add(match.group(1).upper())
+        for match in re.finditer(rf"\b(?:MOVE|WRITE)\b.+?\bTO\s+{re.escape(output_work_area)}-([A-Za-z][A-Za-z0-9_]{{0,29}})\b", code, re.IGNORECASE):
+            fields.add(match.group(1).upper())
+        for match in re.finditer(rf"\b(?:ADD|SUBTRACT|MULTIPLY|DIVIDE)\b.+?\b(?:TO|FROM|BY|INTO)\s+{re.escape(output_work_area)}-([A-Za-z][A-Za-z0-9_]{{0,29}})\b", code, re.IGNORECASE):
+            fields.add(match.group(1).upper())
+        for match in re.finditer(rf"\bCONCATENATE\b.+?\bINTO\s+{re.escape(output_work_area)}-([A-Za-z][A-Za-z0-9_]{{0,29}})\b", code, re.IGNORECASE):
+            fields.add(match.group(1).upper())
+        for match in re.finditer(rf"=\s*{re.escape(output_work_area)}-([A-Za-z][A-Za-z0-9_]{{0,29}})\b", code, re.IGNORECASE):
+            fields.add(match.group(1).upper())
+    return fields
+
+
+def output_table_used(source, output_table):
+    return bool(re.search(rf"\b{re.escape(output_table)}\b", str(source or ""), re.IGNORECASE))
+
+
+def output_work_area_used(source, output_work_area):
+    return bool(re.search(rf"\b{re.escape(output_work_area)}\b", str(source or ""), re.IGNORECASE))
+
+
+def processing_plan_requests_grouped_or_aggregate_logic(plan, source_text=None):
+    aggregate_operations = {"AGGREGATE", "COUNT", "AVERAGE", "PERCENTAGE"}
+    for step in processing_plan_all_steps(plan):
+        if str(step.get("operation") or "").upper() in aggregate_operations:
+            return True
+        if step.get("group_by"):
+            return True
+    return bool(re.search(r"\b(group(?:ed|ing)?|per\s+(?:customer|month|site|key|document|material|vendor)|aggregate|total|sum|count|average|percentage|percent|rate)\b", str(source_text or ""), re.IGNORECASE))
+
+
+def generated_processing_has_grouping_or_aggregation(source):
+    text = str(source or "")
+    return bool(
+        re.search(
+            r"\b(GROUP\s+BY|COLLECT|AT\s+(?:NEW|END\s+OF|LAST)|SUM\s*\(|COUNT\s*\(|AVG\s*\(|SORT\b.+\bBY\b|DELETE\s+ADJACENT\s+DUPLICATES)\b",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def processing_plan_calculation_targets(plan):
+    targets = []
+    for step in processing_plan_all_steps(plan):
+        if str(step.get("operation") or "").upper() in {"CALCULATE", "AVERAGE", "PERCENTAGE"}:
+            target = str(step.get("target") or "").strip()
+            if target and target not in targets:
+                targets.append(target)
+    return targets
+
+
+def generated_output_target_has_calculation(source, target):
+    target_pattern = re.escape(str(target or ""))
+    if not target_pattern:
+        return True
+    for line in str(source or "").splitlines():
+        code = split_code_and_comment(line)[0]
+        if not re.search(target_pattern, code, re.IGNORECASE):
+            continue
+        if re.search(r"[-+*/]|\b(?:ADD|SUBTRACT|MULTIPLY|DIVIDE|COMPUTE)\b", code, re.IGNORECASE):
+            return True
+    return False
+
+
+def processing_form_line_number(source):
+    for number, line in enumerate(str(source or "").splitlines(), start=1):
+        if re.match(r"\s*FORM\s+process", line, re.IGNORECASE):
+            return number
+    return 1
+
+
+def processing_form_source_line(source):
+    lines = str(source or "").splitlines()
+    line_number = processing_form_line_number(source)
+    if 1 <= line_number <= len(lines):
+        return lines[line_number - 1]
+    return ""
+
+
+def processing_completeness_issue(rule_id, line_number, message, source_line, suggested_fix, **extra):
+    item = {
+        "rule_id": rule_id,
+        "severity": "error",
+        "line_number": line_number,
+        "message": message,
+        "source_line": source_line,
+        "suggested_fix": suggested_fix,
+    }
+    item.update(extra)
+    return item
+
+
+def dedupe_processing_completeness_issues(issues):
+    seen = set()
+    result = []
+    for item in issues or []:
+        key = (item.get("rule_id"), item.get("field"), item.get("target"), item.get("message"))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def comma_values(line):

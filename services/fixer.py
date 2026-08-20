@@ -53,6 +53,8 @@ def auto_fix_abap(source, callable_signatures=None, callable_mappings=None, prog
         fix_safe_inline_declarations,
         callable_signatures=callable_signatures,
     )
+    fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "HOST_VARIABLE_ESCAPE", fix_host_variable_escapes)
+    fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "SELECT_FIELD_LIST_COMMAS", fix_select_field_list_commas)
     fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "SELECT_CLAUSE_ORDER", fix_select_clause_order)
     fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "INVALID_ENDSELECT_AFTER_INTO_TABLE", fix_endselect_after_select_into_table)
     fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "TABLE_DECLARATION_NORMALIZATION", fix_table_declarations)
@@ -206,6 +208,111 @@ def fix_safe_inline_declarations(source, callable_signatures=None):
         fixed = apply_insertions(fixed, insertions)
 
     return "\n".join(fixed), fixes
+
+
+def fix_host_variable_escapes(source):
+    fixed_lines = []
+    fixes = []
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        rewritten = remove_host_variable_escapes_from_code(line)
+        fixed_lines.append(rewritten)
+        if rewritten != line:
+            fixes.append(
+                {
+                    "rule_id": "HOST_VARIABLE_ESCAPE",
+                    "description": f"Removed modern Open SQL host-variable escape on line {line_number}.",
+                }
+            )
+    return "\n".join(fixed_lines), fixes
+
+
+def remove_host_variable_escapes_from_code(line):
+    code, comment = split_code_and_comment(line)
+    rewritten = []
+    for segment, is_string in split_string_segments(code):
+        if is_string:
+            rewritten.append(segment)
+        else:
+            rewritten.append(re.sub(r"@(?!DATA\s*\()([A-Za-z_]\w*)", r"\1", segment, flags=re.IGNORECASE))
+    return "".join(rewritten) + comment
+
+
+def fix_select_field_list_commas(source):
+    lines = source.splitlines()
+    fixed_units = []
+    fixes = []
+
+    for statement in source_statement_ranges(lines):
+        statement_lines = statement["lines"]
+        first_code = first_code_line(statement_lines)
+        if not re.match(r"^SELECT\b", first_code, re.IGNORECASE):
+            fixed_units.append(statement_lines)
+            continue
+        rewritten = remove_select_field_list_commas(statement_lines)
+        fixed_units.append(rewritten)
+        if rewritten != statement_lines:
+            fixes.append(
+                {
+                    "rule_id": "SELECT_FIELD_LIST_COMMAS",
+                    "description": f"Removed comma-separated Open SQL field lists from SELECT statement starting on line {statement['start'] + 1}.",
+                }
+            )
+
+    if not fixes:
+        return source, []
+    return "\n".join(line for unit in fixed_units for line in unit), fixes
+
+
+def remove_select_field_list_commas(statement_lines):
+    fixed = []
+    before_from = True
+    in_group_by = False
+    for line in statement_lines:
+        code, comment = split_code_and_comment(line)
+        rewritten_code = code
+        if before_from:
+            rewritten_code, found_from = remove_commas_before_keyword(rewritten_code, "FROM")
+            before_from = not found_from
+        if not before_from:
+            rewritten_code, in_group_by = remove_group_by_commas(rewritten_code, in_group_by)
+        fixed.append(rewritten_code + comment)
+    return fixed
+
+
+def remove_commas_before_keyword(code, keyword):
+    match = re.search(rf"\b{re.escape(keyword)}\b", code, re.IGNORECASE)
+    if not match:
+        return remove_commas_outside_strings(code), False
+    before = remove_commas_outside_strings(code[: match.start()])
+    return before + code[match.start() :], True
+
+
+def remove_group_by_commas(code, in_group_by):
+    group_match = re.search(r"\bGROUP\s+BY\b", code, re.IGNORECASE)
+    if group_match:
+        prefix = code[: group_match.end()]
+        suffix = code[group_match.end() :]
+        cleaned_suffix, still_grouping = remove_commas_until_next_sql_clause(suffix)
+        return prefix + cleaned_suffix, still_grouping
+    if in_group_by:
+        cleaned, still_grouping = remove_commas_until_next_sql_clause(code)
+        return cleaned, still_grouping
+    return code, False
+
+
+def remove_commas_until_next_sql_clause(code):
+    match = re.search(r"\b(HAVING|ORDER\s+BY|INTO|APPENDING|WHERE|FOR\s+ALL\s+ENTRIES\s+IN|UP\s+TO|PACKAGE\s+SIZE)\b", code, re.IGNORECASE)
+    if match:
+        before = remove_commas_outside_strings(code[: match.start()])
+        return before + code[match.start() :], False
+    return remove_commas_outside_strings(code), not code.rstrip().endswith(".")
+
+
+def remove_commas_outside_strings(code):
+    parts = []
+    for segment, is_string in split_string_segments(code):
+        parts.append(segment if is_string else segment.replace(",", ""))
+    return "".join(parts)
 
 
 def declaration_key(name):

@@ -5,6 +5,11 @@ Rules:
 - Use the structured processing plan as the authoritative source of processing logic.
 - Use only the exact processing FORM names, internal table names, work-area names, output objects, and callable identities supplied below.
 - Read from already populated internal tables and work areas.
+- Implement every MOVE, CALCULATE, DERIVE, TRANSFORM, AGGREGATE, COUNT, AVERAGE, PERCENTAGE, READ, IF, SORT, DELETE, CONCATENATE, and callable step in the structured processing plan as executable classical ABAP.
+- Populate every required output field through a concrete assignment, calculation, aggregation, count, average, percentage, lookup, transformation, or derivation path.
+- If the plan or specification requires one output row per grouping key, aggregate by those keys before appending output. Do not append one output row per source record.
+- Prefer Open SQL aggregation only when the structured plan explicitly identifies an OPEN_SQL_AGGREGATE or database-level aggregation path; otherwise aggregate from already populated internal tables in classical ABAP.
+- Do not generate placeholder, TODO, comment-only, or field-copy-only processing routines when calculations, grouping, aggregation, counts, averages, percentages, transformations, or derived fields are required.
 - Use callable signatures and parameters only when they are supplied in the filtered callable metadata.
 - Do not invent callable parameters.
 - Generate CALL FUNCTION for CALL_FUNCTION steps.
@@ -14,6 +19,8 @@ Rules:
 - Treat receiving_parameter and returning_parameter as returned-value targets for method calls.
 - Do not generate SAP database reads.
 - Do not generate presentation, file, event-block, or declaration logic.
+- Before returning the FORM source, check that each required output field listed in the filtered processing chunk contract is assigned or calculated before APPEND.
+- Before returning the FORM source, check that each processing requirement in the structured plan appears as executable ABAP.
 - Return only ABAP source for these routines.
 
 Structured processing plan:

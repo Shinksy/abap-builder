@@ -6,12 +6,27 @@ Do not generate ABAP.
 
 The processing contract defines the only valid internal tables, work areas, fields, callables, output fields, and selection parameters. Use only names from that contract.
 
+Before returning the plan:
+
+- Identify every required output field.
+- Determine how each output field is populated: direct mapping, calculation, aggregation, count, average, percentage, transformation, lookup, or derivation.
+- Identify grouping keys and any intermediate totals, counters, flags, or lookup variables required.
+- Include all source fields required by calculations, grouping, transformations, lookups, and derived fields.
+- Represent every processing requirement from the specification as executable processing steps.
+
 Represent the business logic using these operations:
 
 - LOOP
 - READ
 - IF
 - MOVE
+- CALCULATE
+- DERIVE
+- TRANSFORM
+- AGGREGATE
+- COUNT
+- AVERAGE
+- PERCENTAGE
 - CLEAR
 - APPEND
 - CALL_FUNCTION
@@ -27,6 +42,13 @@ Operation schema:
 - READ: source, into, conditions
 - IF: conditions, then, else
 - MOVE: source, target
+- CALCULATE: expression, target, sources
+- DERIVE: expression, target, sources
+- TRANSFORM: source, target, transformation
+- AGGREGATE: source, target, function, group_by, sources
+- COUNT: source, target, group_by, distinct
+- AVERAGE: numerator, denominator, target, group_by
+- PERCENTAGE: numerator, denominator, target, group_by
 - CLEAR: target
 - APPEND: source, target
 - CALL_FUNCTION: name, input_parameters, output_parameters
@@ -46,6 +68,14 @@ Rules
   - "Call static method", "class method", "=>" -> CALL_STATIC_METHOD
   - "Call instance method", "object method", "->" -> CALL_METHOD
   - "Add output record" → APPEND
+- Translate calculation and summary words into executable processing operations:
+  - "Calculate", "compute", formulas, margins, differences, ratios -> CALCULATE
+  - "Derive", "determine", "classify", "bucket" -> DERIVE
+  - "Transform", "format", "convert", "substring", "concatenate" -> TRANSFORM or CONCATENATE
+  - "Total", "sum", "aggregate" -> AGGREGATE
+  - "Count", "number of", "distinct documents" -> COUNT
+  - "Average", "mean" -> AVERAGE
+  - "Percent", "percentage", "rate" -> PERCENTAGE
 - Do not invent business logic that is not implied by the specification.
 - Nest all steps that occur within a LOOP inside its steps array.
 - READ conditions must be structured lookup-key objects with left, operator and right.
@@ -56,6 +86,10 @@ Rules
 - Fields used only in SQL WHERE conditions are filter fields and must not be added to processing structures or output structures unless explicitly required elsewhere in the specification.
 - IF branches must contain then and else arrays. Use empty arrays when a branch has no explicit steps.
 - Output fields must be referenced as w_output-<field>.
+- Every required output field must have a concrete MOVE, CALCULATE, DERIVE, TRANSFORM, AGGREGATE, COUNT, AVERAGE, PERCENTAGE, or callable output step targeting w_output-<field>.
+- For one-output-row-per-group requirements, include group_by on the aggregation/count/average/percentage steps and do not model the output as one APPEND per source record.
+- For calculations, include a classical ABAP-compatible expression using only available source fields, constants, declared variables, or prior aggregate results.
+- For percentages and averages, include the numerator and denominator and any required zero-denominator handling implied by the specification.
 - When an output record is created:
   - CLEAR w_output before populating it.
   - APPEND w_output TO t_output after it is populated.
@@ -67,4 +101,5 @@ Rules
 - Use returning_parameter when the specification describes a returned value without naming ABAP RECEIVING syntax.
 - receiving_parameter and returning_parameter are target variables or fields that receive the returned value; do not put them inside input_parameters or output_parameters.
 - Do not use placeholder conditions.
-- Return an empty processing_steps array only if the specification contains no business-processing logic.
+- Do not use placeholder processing steps.
+- Return an empty processing_steps array only if the specification contains no business-processing logic and no required output fields are derived by processing.

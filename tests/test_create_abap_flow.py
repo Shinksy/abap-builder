@@ -1149,6 +1149,33 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
+    def test_upload_accepts_pasted_specification_text(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            with patch("app.start_create_abap_job") as start_job:
+                response = app.test_client().post(
+                    "/upload",
+                    data={"specification_text": "Create a pasted specification report."},
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            input_path = uploads_folder / job_id / "pasted_specification.txt"
+            self.assertEqual(input_path.read_text(encoding="utf-8"), "Create a pasted specification report.")
+            self.assertEqual(start_job.call_args.kwargs["input_path"], input_path)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def test_upload_saves_llm_final_assembly_mode(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
         temp_path.mkdir()

@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -86,7 +87,8 @@ def update_progress(jobs_folder, job_id, status, message, stage=None):
     if is_activity_message(message):
         activity_messages.append(message)
 
-    progress_path.write_text(
+    _write_progress_file(
+        progress_path,
         json.dumps(
             _build_progress(
                 status=status,
@@ -99,7 +101,6 @@ def update_progress(jobs_folder, job_id, status, message, stage=None):
             ),
             indent=2,
         ),
-        encoding="utf-8",
     )
 
 
@@ -129,6 +130,18 @@ def _read_progress(progress_path):
         return json.loads(progress_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def _write_progress_file(progress_path, payload):
+    last_error = None
+    for attempt in range(4):
+        try:
+            progress_path.write_text(payload, encoding="utf-8")
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.05 * (attempt + 1))
+    raise last_error
 
 
 def _build_progress(status, stage, message, started_at, updated_at, completed_at, activity_messages=None):

@@ -192,6 +192,22 @@ class ValidatorTest(unittest.TestCase):
 
         self.assert_issue(validate_abap(source), "ABAP_BROKEN_CHAINED_DECLARATION", 1)
 
+    def test_select_field_list_commas_are_not_broken_chained_declarations(self):
+        source = "\n".join(
+            [
+                "SELECT kunnr,",
+                "       werks,",
+                "       sptag",
+                "  FROM zs505",
+                "  INTO TABLE t_zs505",
+                "  WHERE sptag BETWEEN p_from_date AND p_to_date.",
+            ]
+        )
+
+        issues = validate_abap(source)
+
+        self.assertFalse([issue for issue in issues if issue["rule_id"] == "ABAP_BROKEN_CHAINED_DECLARATION"])
+
     def test_invalid_radio_button_syntax(self):
         issues = validate_abap("PARAMETERS p_alv AS RADIOBUTTON TYPE c.")
 
