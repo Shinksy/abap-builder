@@ -1806,6 +1806,73 @@ class OrchestratorTest(unittest.TestCase):
         ]
         positions = [result.index(marker) for marker in ordered_markers]
         self.assertEqual(positions, sorted(positions))
+        self.assertIn("*Types\n\nTYPES: BEGIN OF ty_pa0000,", result)
+        self.assertIn("*Internal Tables\n\nDATA t_pa0000 TYPE STANDARD TABLE OF ty_pa0000.", result)
+        self.assertIn("*Structures\n\nDATA st_pa0000 TYPE ty_pa0000.", result)
+        self.assertIn("DATA w_output TYPE ty_output.", result)
+
+    def test_declaration_prefix_grouping_formats_latest_job_sections(self):
+        result = group_declaration_statements_by_prefix(
+            "\n".join(
+                [
+                    "REPORT zbrp_sop_r0006.",
+                    "TYPES: BEGIN OF ty_output,",
+                    "         kunnr         TYPE zbrp_sop0001-kunnr,",
+                    "       END OF ty_output.",
+                    "TYPES: BEGIN OF ty_zbrp_sop0001,",
+                    "         kunnr TYPE zbrp_sop0001-kunnr,",
+                    "       END OF ty_zbrp_sop0001.",
+                    "DATA t_output TYPE STANDARD TABLE OF ty_output.",
+                    "DATA t_zbrp_sop0001 TYPE STANDARD TABLE OF ty_zbrp_sop0001.",
+                    "DATA st_zbrp_sop0001 TYPE ty_zbrp_sop0001.",
+                    "DATA w_output TYPE ty_output.",
+                    "DATA w_filename TYPE string.",
+                    "DATA w_csv_line TYPE string.",
+                    "TABLES zbrp_sop0001.",
+                ]
+            )
+        )
+
+        expected = "\n".join(
+            [
+                "*Types",
+                "",
+                "TYPES: BEGIN OF ty_output,",
+                "         kunnr         TYPE zbrp_sop0001-kunnr,",
+                "       END OF ty_output.",
+                "",
+                "TYPES: BEGIN OF ty_zbrp_sop0001,",
+                "         kunnr TYPE zbrp_sop0001-kunnr,",
+                "       END OF ty_zbrp_sop0001.",
+                "",
+                "*Internal Tables",
+                "",
+                "DATA t_output TYPE STANDARD TABLE OF ty_output.",
+                "DATA t_zbrp_sop0001 TYPE STANDARD TABLE OF ty_zbrp_sop0001.",
+                "",
+                "*Structures",
+                "",
+                "DATA st_zbrp_sop0001 TYPE ty_zbrp_sop0001.",
+                "DATA w_output TYPE ty_output.",
+                "",
+                "*Variables",
+                "",
+                "DATA w_filename TYPE string.",
+                "DATA w_csv_line TYPE string.",
+            ]
+        )
+        self.assertIn(expected, result)
+        self.assertLess(result.index("*Variables"), result.index("TABLES zbrp_sop0001."))
+        self.assertEqual(result.count("*Types"), 1)
+        self.assertEqual(result.count("*Internal Tables"), 1)
+        self.assertEqual(result.count("*Structures"), 1)
+        self.assertEqual(result.count("*Variables"), 1)
+
+        second_pass = group_declaration_statements_by_prefix(result)
+        self.assertEqual(second_pass.count("*Types"), 1)
+        self.assertEqual(second_pass.count("*Internal Tables"), 1)
+        self.assertEqual(second_pass.count("*Structures"), 1)
+        self.assertEqual(second_pass.count("*Variables"), 1)
 
     def test_database_read_declaration_replacement_preserves_output_type_in_chained_types(self):
         base_prompt = (

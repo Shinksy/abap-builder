@@ -4423,44 +4423,105 @@ def ensure_standard_report_header(source):
 
 
 def group_declaration_statements_by_prefix(source):
+    source = "\n".join(
+        line for line in str(source or "").splitlines() if not declaration_section_heading_line(line)
+    )
     units = abap_statement_units(source)
-    grouped = {"ty_": [], "t_": [], "st_": [], "w_": []}
+    grouped = {"types": [], "internal_tables": [], "structures": [], "variables": []}
     kept = []
     insert_at = None
     for unit in units:
-        prefix = declaration_statement_group_prefix(unit)
-        if prefix:
+        section = declaration_statement_group_section(unit)
+        if section:
+            leading_lines, declaration_unit = split_leading_non_code_lines(unit)
+            leading_lines = [line for line in leading_lines if not declaration_section_heading_line(line)]
+            if leading_lines:
+                kept.append(leading_lines)
             if insert_at is None:
                 insert_at = len(kept)
-            grouped[prefix].append(unit)
+            grouped[section].append(declaration_unit)
+            continue
+        if declaration_section_heading_unit(unit):
             continue
         kept.append(unit)
     if insert_at is None:
         return source
-    ordered_groups = []
-    for prefix in ("ty_", "t_", "st_", "w_"):
-        ordered_groups.extend(grouped[prefix])
-    assembled_units = kept[:insert_at] + ordered_groups + kept[insert_at:]
-    return "\n".join(line for unit in assembled_units for line in unit)
+    before_lines = [line for unit in kept[:insert_at] for line in unit]
+    after_lines = [line for unit in kept[insert_at:] for line in unit]
+    declaration_lines = formatted_declaration_section_lines(grouped)
+    return "\n".join(before_lines + declaration_lines + after_lines)
 
 
-def declaration_statement_group_prefix(unit):
+def formatted_declaration_section_lines(grouped):
+    sections = [
+        ("*Types", grouped["types"], True),
+        ("*Internal Tables", grouped["internal_tables"], False),
+        ("*Structures", grouped["structures"], False),
+        ("*Variables", grouped["variables"], False),
+    ]
+    lines = []
+    for title, units, separate_units in sections:
+        if not units:
+            continue
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append(title)
+        for index, unit in enumerate(units):
+            if separate_units or index == 0:
+                lines.append("")
+            lines.extend(unit)
+        lines.append("")
+    return lines
+
+
+def split_leading_non_code_lines(unit):
+    lines = list(unit or [])
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        code = split_code_and_comment(lines[index])[0].strip()
+        if code and not stripped.startswith("*"):
+            break
+        index += 1
+    return lines[:index], lines[index:]
+
+
+def declaration_section_heading_unit(unit):
+    lines = [line for line in unit or [] if line.strip()]
+    return bool(lines) and all(declaration_section_heading_line(line) for line in lines)
+
+
+def declaration_section_heading_line(line):
+    return line.strip().lower() in {"*types", "*internal tables", "*structures", "*variables"}
+
+
+def declaration_statement_group_section(unit):
     first_code = first_statement_code_line(unit)
     type_match = re.match(r"^TYPES\s*:?\s+BEGIN\s+OF\s+([A-Z][A-Z0-9_]{0,29})\b", first_code, re.IGNORECASE)
     if not type_match:
         type_match = re.match(r"^TYPES\s*:?\s+([A-Z][A-Z0-9_]{0,29})\b", first_code, re.IGNORECASE)
     if type_match and type_match.group(1).lower().startswith("ty_"):
-        return "ty_"
+        return "types"
     if not re.match(r"^DATA\b", first_code, re.IGNORECASE):
         return None
     names = identifiers_declared_by_statement(unit)
     if not names:
         return None
     name = names[0]
-    for prefix in ("t_", "st_", "w_"):
-        if name.startswith(prefix):
-            return prefix
+    if name.startswith("t_"):
+        return "internal_tables"
+    if name.startswith("st_"):
+        return "structures"
+    if name.startswith("w_") and data_statement_references_local_type(unit):
+        return "structures"
+    if name.startswith("w_"):
+        return "variables"
     return None
+
+
+def data_statement_references_local_type(unit):
+    statement_text = " ".join(split_code_and_comment(line)[0] for line in unit)
+    return bool(re.search(r"\bTYPE\s+TY_[A-Z0-9_]+\b", statement_text, re.IGNORECASE))
 
 
 def remove_database_read_declaration_units(source, declarations):
