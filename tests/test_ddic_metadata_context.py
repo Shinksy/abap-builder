@@ -109,6 +109,35 @@ class DdicMetadataContextTest(unittest.TestCase):
         self.assertIn(("ddic_table", "PA0002", "table_read_heading"), dependency_keys)
         self.assertEqual(extract_relevant_ddic_names(text), ["PA0000", "PA0002"])
 
+    def test_database_reads_numbered_entries_extract_requested_tables(self):
+        text = "\n".join(
+            [
+                "## Database Reads",
+                "1. Read ZBRP_ART0003 (Subs)",
+                "   - Read Fields: PICKWERKS, SUB_FROM, SUB_TO, SUPPLY_TYPE, TRADING_TYPE, DATAB, DATBI",
+                "2. Read ZBRP_SOP0018 (Prod Level Caps)",
+                "   - Read Fields: WERKS, ZOLD_CODE, ORDER_CAP",
+                "3. Read ZBRP_SOP0019 (Cust Caps)",
+                "   - Read Fields: KUNNR, ZOLD_CODE, ZINCREMENT",
+                "4. Read ZBRP_SOP0020 (Cust Uplifts)",
+                "   - Read Fields: KUNNR, ZINCREMENT",
+                "## Processing Rules",
+                "1. Read the output records.",
+            ]
+        )
+
+        dependencies = extract_typed_ddic_dependencies(text)
+        dependency_keys = {(item["kind"], item["name"], item["source"]) for item in dependencies}
+
+        self.assertIn(("ddic_table", "ZBRP_ART0003", "table_read_entry"), dependency_keys)
+        self.assertIn(("ddic_table", "ZBRP_SOP0018", "table_read_entry"), dependency_keys)
+        self.assertIn(("ddic_table", "ZBRP_SOP0019", "table_read_entry"), dependency_keys)
+        self.assertIn(("ddic_table", "ZBRP_SOP0020", "table_read_entry"), dependency_keys)
+        self.assertEqual(
+            extract_relevant_ddic_names(text),
+            ["ZBRP_ART0003", "ZBRP_SOP0018", "ZBRP_SOP0019", "ZBRP_SOP0020"],
+        )
+
     def test_prose_table_references_extract_requested_tables(self):
         text = "\n".join(
             [

@@ -276,6 +276,44 @@ class SapDependencyIdentificationTest(unittest.TestCase):
         self.assertEqual(analysis["ddic_objects"], [ddic_object("PA0000"), ddic_object("PA0002")])
         self.assertFalse([item for item in analysis["rejected_analysis_entries"] if item["name"] == "PA0002"])
 
+    def test_numbered_database_read_entries_keep_llm_ddic_objects(self):
+        specification = "\n".join(
+            [
+                "## Database Reads",
+                "1. Read ZBRP_ART0003 (Subs)",
+                "   - Read Fields: PICKWERKS, SUB_FROM, SUB_TO, SUPPLY_TYPE, TRADING_TYPE, DATAB, DATBI",
+                "2. Read ZBRP_SOP0018 (Prod Level Caps)",
+                "   - Read Fields: WERKS, ZOLD_CODE, ORDER_CAP",
+                "3. Read ZBRP_SOP0019 (Cust Caps)",
+                "   - Read Fields: KUNNR, ZOLD_CODE, ZINCREMENT",
+                "4. Read ZBRP_SOP0020 (Cust Uplifts)",
+                "   - Read Fields: KUNNR, ZINCREMENT",
+            ]
+        )
+
+        analysis = normalize_dependency_analysis(
+            analysis_json(
+                ddic_objects=[
+                    ddic_object("ZBRP_ART0003"),
+                    ddic_object("ZBRP_SOP0018"),
+                    ddic_object("ZBRP_SOP0019"),
+                    ddic_object("ZBRP_SOP0020"),
+                ]
+            ),
+            specification,
+        )
+
+        self.assertEqual(
+            analysis["ddic_objects"],
+            [
+                ddic_object("ZBRP_ART0003"),
+                ddic_object("ZBRP_SOP0018"),
+                ddic_object("ZBRP_SOP0019"),
+                ddic_object("ZBRP_SOP0020"),
+            ],
+        )
+        self.assertEqual(analysis["rejected_analysis_entries"], [])
+
     def test_missing_required_dependency_shape_falls_back(self):
         def analyzer(_prompt, _source):
             return {"text": json_dumps({"ddic_objects": []})}

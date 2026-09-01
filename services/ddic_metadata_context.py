@@ -445,6 +445,20 @@ def extract_typed_table_read_section_headings(text):
                         heading_position + object_match.start(1),
                         "table_read_heading",
                     )
+        elif in_table_read_section:
+            read_match = re.match(
+                rf"^\s*(?:\d+[.)]\s*)?(?:[-*]\s*)?Read\s+({OBJECT_PATTERN})\b",
+                line,
+                re.IGNORECASE,
+            )
+            if read_match and is_strong_literal_object(read_match.group(1)):
+                add_typed_object_dependency(
+                    dependencies,
+                    "ddic_table",
+                    read_match.group(1),
+                    offset + read_match.start(1),
+                    "table_read_entry",
+                )
         offset += len(line)
     return dependencies
 
