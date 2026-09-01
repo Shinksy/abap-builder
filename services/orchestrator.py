@@ -70,6 +70,17 @@ ABAP_CHUNKS = [
 ]
 FORM_GENERATING_CHUNKS = {"database_read_forms", "processing_form", "output_forms"}
 GLOBAL_STYLE_PREFIXES = ("t_", "st_", "w_", "gt_", "gs_", "gv_", "it_", "lt_", "ls_", "lv_", "wa_", "ct_")
+ABAP_HYPHEN_KEYWORDS = {
+    "LIST-PROCESSING",
+    "START-OF-SELECTION",
+    "END-OF-SELECTION",
+    "TOP-OF-PAGE",
+    "END-OF-PAGE",
+    "SELECT-OPTIONS",
+    "FIELD-SYMBOLS",
+    "USER-COMMAND",
+    "LINE-SELECTION",
+}
 
 
 class ChunkedGenerationError(Exception):
@@ -2748,6 +2759,8 @@ def scan_processing_rule_field_references(line, alias_index, field_index, depend
     for match in re.finditer(r"\b([A-Za-z][A-Za-z0-9_/]{1,29})[-.]([A-Za-z][A-Za-z0-9_]{1,29})\b", line):
         left = match.group(1)
         field_name = match.group(2).upper()
+        if is_abap_hyphen_keyword_reference(line, match, left, field_name):
+            continue
         alias = alias_index.get(left.lower())
         if is_abap_system_field_reference(left, field_name):
             add_processing_rule_system_field(dependencies, left, field_name, line)
@@ -3027,11 +3040,23 @@ def processing_rule_ddic_field_refs(line):
     result = []
     for match in re.finditer(r"\b([A-Za-z][A-Za-z0-9_/]{1,29})[-.]([A-Za-z][A-Za-z0-9_]{1,29})\b", str(line or "")):
         left = match.group(1)
+        field_name = match.group(2).upper()
+        if is_abap_hyphen_keyword_reference(line, match, left, field_name):
+            continue
         if is_processing_rule_local_reference_prefix(left) or left.lower() == "sy":
             continue
         if is_strong_processing_rule_ddic_object(left):
-            append_unique(result, f"{left.upper()}-{match.group(2).upper()}")
+            append_unique(result, f"{left.upper()}-{field_name}")
     return result
+
+
+def is_abap_hyphen_keyword_reference(line, match, left, field_name):
+    prefix = f"{str(left or '').upper()}-{str(field_name or '').upper()}"
+    if any(keyword == prefix or keyword.startswith(prefix + "-") for keyword in ABAP_HYPHEN_KEYWORDS):
+        return True
+    text = str(line or "")
+    tail = text[match.start() :].upper()
+    return any(tail.startswith(keyword) for keyword in ABAP_HYPHEN_KEYWORDS)
 
 
 def is_strong_processing_rule_ddic_object(value):
@@ -3437,6 +3462,8 @@ def processing_variable_declaration(variable):
 def declaration_requirements_for_prompt(diagnostics):
     requirements = (diagnostics or {}).get("requirements")
     if requirements is not None:
+        if isinstance(requirements, dict):
+            requirements = normalize_selection_screen_requirement_names(requirements)
         return json.dumps(requirements, indent=2, sort_keys=True)
     raw_response = str((diagnostics or {}).get("raw_response") or "").strip()
     return raw_response or "None"
@@ -3455,6 +3482,7 @@ def normalize_declaration_requirements_with_diagnostics(requirements, ddic_catal
         return {"requirements": requirements, "output_field_source_mappings": []}
     normalized = dict(requirements)
     normalized["parameters"] = normalize_parameter_requirements(requirements.get("parameters"))
+    normalized["select_options"] = normalize_select_option_requirements(requirements.get("select_options"))
     fields_result = normalize_output_structure_fields_with_diagnostics(
         requirements.get("output_structure_fields"),
         ddic_catalogue=ddic_catalogue,
@@ -3472,14 +3500,23 @@ def normalize_declaration_requirements_with_diagnostics(requirements, ddic_catal
     }
 
 
+def normalize_selection_screen_requirement_names(requirements):
+    normalized = dict(requirements or {})
+    normalized["parameters"] = normalize_parameter_requirements(normalized.get("parameters"))
+    normalized["select_options"] = normalize_select_option_requirements(normalized.get("select_options"))
+    return normalized
+
+
 def normalize_parameter_requirements(parameters):
     result = []
     group_map = {}
     used_groups = set()
+    used_names = set()
     for item in parameters or []:
         if not isinstance(item, dict):
             continue
         parameter = dict(item)
+        parameter["name"] = selection_screen_identifier(parameter.get("name"), "p", used_names)
         raw_group = str(parameter.get("radiobutton_group") or "").strip()
         if raw_group:
             parameter["radiobutton_group"] = normalized_radiobutton_group(raw_group, group_map, used_groups)
@@ -3487,6 +3524,63 @@ def normalize_parameter_requirements(parameters):
             parameter["radiobutton_group"] = ""
         result.append(parameter)
     return result
+
+
+def normalize_select_option_requirements(select_options):
+    result = []
+    used_names = set()
+    for item in select_options or []:
+        if not isinstance(item, dict):
+            continue
+        option = dict(item)
+        option["name"] = selection_screen_identifier(option.get("name"), "s", used_names)
+        result.append(option)
+    return result
+
+
+def selection_screen_identifier(value, prefix, used_names=None):
+    used_names = used_names if used_names is not None else set()
+    cleaned = str(value or "").strip().lower()
+    if re.fullmatch(r"[a-z][a-z0-9_]{0,7}", cleaned):
+        candidate = cleaned
+    else:
+        candidate = compact_selection_screen_identifier(cleaned, prefix)
+    candidate = unique_selection_screen_identifier(candidate, prefix, used_names)
+    used_names.add(candidate)
+    return candidate
+
+
+def compact_selection_screen_identifier(value, prefix):
+    body = value
+    body = re.sub(rf"^{re.escape(prefix)}[_-]?", "", body)
+    tokens = re.findall(r"[a-z0-9]+", body)
+    if not tokens:
+        return f"{prefix}_val"
+    generic_tail_names = {"date", "file", "flag", "mode", "name", "path", "type"}
+    if len(tokens) > 1 and tokens[-1] in generic_tail_names:
+        base = tokens[-1][:6]
+    elif len(tokens) > 1:
+        base = "".join(token[:3] for token in tokens)[:6]
+    else:
+        base = tokens[0][:6]
+    if not base or not base[0].isalpha():
+        base = "val" + base
+    return f"{prefix}_{base[:6]}"[:8]
+
+
+def unique_selection_screen_identifier(candidate, prefix, used_names):
+    candidate = candidate[:8]
+    if candidate and candidate not in used_names:
+        return candidate
+    stem = re.sub(rf"^{re.escape(prefix)}_", "", candidate or "") or "val"
+    index = 1
+    while True:
+        suffix = str(index)
+        base_length = max(1, 6 - len(suffix))
+        unique = f"{prefix}_{stem[:base_length]}{suffix}"[:8]
+        if unique not in used_names:
+            return unique
+        index += 1
 
 
 def normalized_radiobutton_group(group, group_map, used_groups):

@@ -16,6 +16,7 @@ from services.orchestrator import (
     build_processing_contract,
     chunk_ddic_diagnostics,
     chunk_prompt_text,
+    declaration_requirements_for_prompt,
     extract_declaration_requirements,
     extract_processing_plan,
     extract_processing_rules_section,
@@ -85,6 +86,42 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("include only fields required to locate a row in the already-populated internal table", prompt_text)
         self.assertIn("Do not put SQL WHERE filters, selection parameters, select-options, constants", prompt_text)
         self.assertNotIn('"source": "t_<table>"', prompt_text)
+
+    def test_declaration_requirements_shorten_selection_screen_names_to_eight_chars(self):
+        requirements = {
+            "parameters": [
+                {"name": "File Path", "type_or_like": "TYPE string"},
+                {"name": "Extract Data", "type_or_like": "TYPE c LENGTH 1"},
+            ],
+            "select_options": [
+                {"name": "Document Number", "for_field": "EDIDC-DOCNUM"},
+            ],
+        }
+
+        normalized = normalize_declaration_requirements(requirements)
+
+        self.assertEqual(["p_path", "p_extdat"], [item["name"] for item in normalized["parameters"]])
+        self.assertEqual(["s_docnum"], [item["name"] for item in normalized["select_options"]])
+        self.assertTrue(all(len(item["name"]) <= 8 for item in normalized["parameters"]))
+        self.assertTrue(all(len(item["name"]) <= 8 for item in normalized["select_options"]))
+
+    def test_prepared_declaration_requirements_prompt_shorten_selection_screen_names(self):
+        prompt_text = declaration_requirements_for_prompt(
+            {
+                "requirements": {
+                    "parameters": [
+                        {"name": "file_path", "type_or_like": "TYPE string"},
+                        {"name": "extract_data", "type_or_like": "TYPE c LENGTH 1"},
+                    ],
+                    "select_options": [],
+                }
+            }
+        )
+
+        self.assertIn('"name": "p_path"', prompt_text)
+        self.assertIn('"name": "p_extdat"', prompt_text)
+        self.assertNotIn("file_path", prompt_text)
+        self.assertNotIn("extract_data", prompt_text)
 
     def test_processing_plan_is_extracted_and_passed_to_processing_chunk(self):
         captured = []
@@ -4616,6 +4653,16 @@ class OrchestratorTest(unittest.TestCase):
         self.assertNotIn("SY", discovered["ddic_fields"])
         self.assertIn("ZHDR", discovered["ddic_objects"])
         self.assertEqual(["DATE"], discovered["ddic_fields"]["ZHDR"])
+
+    def test_processing_rule_discovery_ignores_abap_hyphen_event_keywords(self):
+        discovered = discover_processing_rule_dependencies(
+            "1. At `START-OF-SELECTION`, call FORM `WRITE_BRP_SUBS`.",
+            ddic_catalogue={"tables": {}},
+            object_contracts={},
+        )
+
+        self.assertNotIn("START", discovered["ddic_objects"])
+        self.assertNotIn("START", discovered["ddic_fields"])
 
     def test_processing_contract_allows_system_fields_without_sy_metadata(self):
         calls = []

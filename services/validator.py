@@ -68,6 +68,7 @@ def validate_abap(source, callable_signatures=None, identifier_provenance=None, 
     issues += validate_list_processing_leave_report(lines)
     issues += validate_executable_placeholders(lines)
     issues += validate_selection_screen(lines)
+    issues += validate_selection_screen_identifier_lengths(lines)
     issues += validate_parameter_declarations(lines)
     issues += validate_chained_declarations(lines)
     issues += validate_ddic_identifier_provenance(lines, identifier_provenance)
@@ -482,6 +483,30 @@ def validate_selection_screen(lines):
     return issues
 
 
+def validate_selection_screen_identifier_lengths(lines):
+    issues = []
+    for keyword, max_length in (("PARAMETERS", 8), ("SELECT-OPTIONS", 8)):
+        for line_number, item_text, source_line in selection_screen_items(lines, keyword):
+            match = re.match(r"^([A-Za-z_]\w*)\b", split_code_and_comment(item_text)[0].strip())
+            if not match:
+                continue
+            name = match.group(1)
+            if len(name) <= max_length:
+                continue
+            issues.append(
+                issue(
+                    "ABAP_SELECTION_SCREEN_NAME_TOO_LONG",
+                    line_number,
+                    f"{keyword} identifier {name} exceeds the ABAP selection-screen limit of {max_length} characters.",
+                    source_line,
+                    f"Use a {max_length}-character-or-shorter selection-screen name, such as {name[:max_length]}.",
+                    identifier=name,
+                    max_length=max_length,
+                )
+            )
+    return issues
+
+
 def validate_parameter_declarations(lines):
     issues = []
     for line_number, item_text, source_line in parameter_items(lines):
@@ -564,12 +589,16 @@ def declaration_line_allows_trailing_comma_check(stripped, declaration_keywords)
 
 
 def parameter_items(lines):
+    return selection_screen_items(lines, "PARAMETERS")
+
+
+def selection_screen_items(lines, keyword):
     items = []
-    for declaration in collect_logical_declarations(lines, "PARAMETERS"):
+    for declaration in collect_logical_declarations(lines, keyword):
         for offset, line in enumerate(declaration["lines"]):
             code = split_code_and_comment(line)[0]
             if offset == 0:
-                code = re.sub(r"^\s*PARAMETERS\s*:?\s*", "", code, flags=re.IGNORECASE)
+                code = re.sub(rf"^\s*{re.escape(keyword)}\s*:?\s*", "", code, flags=re.IGNORECASE)
             text = re.sub(r"\s*[,\.]\s*$", "", code).strip()
             if text:
                 items.append((declaration["start"] + offset + 1, text, line))

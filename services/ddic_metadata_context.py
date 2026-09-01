@@ -374,6 +374,8 @@ def strip_comments_and_strings(text, mode=SPECIFICATION_MODE):
         if mode == ABAP_SOURCE_MODE and line.startswith("*"):
             continue
         code = line.split('"', 1)[0]
+        if mode == SPECIFICATION_MODE:
+            code = code.replace("`", "")
         lines.append(re.sub(r"'[^']*'", "''", code))
     return "\n".join(lines)
 

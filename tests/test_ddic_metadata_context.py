@@ -138,6 +138,24 @@ class DdicMetadataContextTest(unittest.TestCase):
             ["ZBRP_ART0003", "ZBRP_SOP0018", "ZBRP_SOP0019", "ZBRP_SOP0020"],
         )
 
+    def test_backticked_database_read_entries_extract_requested_tables(self):
+        text = "\n".join(
+            [
+                "## Database Reads",
+                "1. Read table `ZBRP_ART0003` for Substitutions.",
+                "   - Read Fields: `PICKWERKS`, `SUB_FROM`, `SUB_TO`",
+                "2. Read table `ZBRP_SOP0018` for Product Level Caps.",
+                "   - Read Fields: `WERKS`, `ZOLD_CODE`, `ORDER_CAP`",
+            ]
+        )
+
+        dependencies = extract_typed_ddic_dependencies(text)
+        dependency_keys = {(item["kind"], item["name"], item["source"]) for item in dependencies}
+
+        self.assertIn(("ddic_table", "ZBRP_ART0003", "metadata_label"), dependency_keys)
+        self.assertIn(("ddic_table", "ZBRP_SOP0018", "metadata_label"), dependency_keys)
+        self.assertEqual(extract_relevant_ddic_names(text), ["ZBRP_ART0003", "ZBRP_SOP0018"])
+
     def test_prose_table_references_extract_requested_tables(self):
         text = "\n".join(
             [

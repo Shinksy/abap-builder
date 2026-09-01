@@ -166,6 +166,24 @@ class ValidatorTest(unittest.TestCase):
 
         self.assert_issue(issues, "INVALID_CHECKBOX_SYNTAX", 2)
 
+    def test_selection_screen_names_longer_than_eight_are_reported(self):
+        source = "\n".join(
+            [
+                "PARAMETERS: file_path TYPE string,",
+                "            extract_data TYPE c LENGTH 1.",
+                "SELECT-OPTIONS document_number FOR edidc-docnum.",
+            ]
+        )
+
+        issues = validate_abap(source)
+
+        long_name_issues = [
+            issue
+            for issue in issues
+            if issue["rule_id"] == "ABAP_SELECTION_SCREEN_NAME_TOO_LONG"
+        ]
+        self.assertEqual(["file_path", "extract_data", "document_number"], [issue["identifier"] for issue in long_name_issues])
+
     def test_radio_button_out_token_is_invalid_parameter_declaration(self):
         source = "\n".join(
             [
