@@ -37,7 +37,10 @@ def job_summary(jobs_folder, upload_folder, job_id):
         or {}
     )
     started_at = progress.get("started_at") or folder_timestamp(job_folder)
-    generated_exists = (job_folder / "generated.abap").exists()
+    generated_exists = (
+        ((job_folder / "generated.abap").exists() or (job_folder / "sap_syntax_repaired.abap").exists())
+        and not bool(progress.get("is_active"))
+    )
     mode = metrics.get("job_mode") or inferred_job_mode(job_folder, uploads_path / job_id)
 
     return {

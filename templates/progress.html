@@ -33,9 +33,9 @@
           {% endfor %}
         </ol>
         <p class="job-id">Job ID: {{ job_id }}</p>
-        <div id="result-links" class="{% if progress.status != "Complete" %}hidden{% endif %}">
+        <div id="result-links" class="{% if not progress.has_result %}hidden{% endif %}">
           <p><a class="button-link" href="{{ url_for('result', job_id=job_id) }}">View result</a></p>
-          <p><a href="{{ url_for('download', job_id=job_id) }}">Download generated.abap</a></p>
+          <p><a href="{{ url_for('download', job_id=job_id) }}">Download final ABAP</a></p>
         </div>
         <div id="review-links" class="{% if progress.status != "Awaiting Review" %}hidden{% endif %}">
           <p><a id="review-link" class="button-link" href="{{ review_url }}">{{ review_label }}</a></p>
@@ -76,7 +76,7 @@
           item.textContent = message;
           return item;
         }));
-        resultLinks.classList.toggle("hidden", progress.status !== "Complete");
+        resultLinks.classList.toggle("hidden", !progress.has_result);
         reviewLinks.classList.toggle("hidden", progress.status !== "Awaiting Review");
         if (progress.review_url) {
           reviewLink.href = progress.review_url;

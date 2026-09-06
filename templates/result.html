@@ -157,6 +157,10 @@
             </dl>
           </details>
         </div>
+        <div class="result-actions">
+          <button id="export-mode-toggle" type="button" aria-expanded="false" aria-controls="export-panels">Export Mode</button>
+        </div>
+        <div id="export-panels" class="export-panels hidden">
         <details class="validation-panel">
           <summary>Validation</summary>
           <p>Processing time: {{ processing_time(section_durations.get("validation")) }}</p>
@@ -204,10 +208,52 @@
           <p>Processing time: {{ processing_time(sap_syntax_duration) }}</p>
           {% if syntax.get("requested") %}
             <p>Status: {{ syntax.get("status", "unknown")|replace("_", " ") }}</p>
+            <p>Attempts: {{ syntax.get("syntax_check_attempts") or syntax.get("attempts", [])|length }}{% if syntax.get("max_syntax_check_attempts") %} of {{ syntax.get("max_syntax_check_attempts") }}{% endif %}</p>
             {% if syntax.get("technical_message") %}
               <p>{{ syntax.get("technical_message") }}</p>
             {% endif %}
-            {% if syntax.get("errors") %}
+            {% if syntax.get("status") == "passed" %}
+              <p>No SAP syntax errors found.</p>
+            {% endif %}
+          {% else %}
+            <p>Not requested.</p>
+          {% endif %}
+        </details>
+        {% if sap_syntax_check and sap_syntax_check.get("requested") %}
+        <details class="validation-panel">
+          <summary>SAP Syntax Errors</summary>
+          {% set syntax = sap_syntax_check or {} %}
+          {% set attempts = syntax.get("attempts", []) %}
+          {% if attempts %}
+            {% for attempt in attempts %}
+              <section class="syntax-attempt">
+                <h2>Attempt {{ attempt.get("number", loop.index) }}</h2>
+                <p>Status: {{ attempt.get("status", "unknown")|replace("_", " ") }}</p>
+                {% if attempt.get("technical_message") %}
+                  <p>{{ attempt.get("technical_message") }}</p>
+                {% endif %}
+                {% if attempt.get("errors") %}
+                  <div class="validation-list">
+                    {% for issue in attempt.get("errors", []) %}
+                      <article class="validation-issue">
+                        <div class="issue-meta">
+                          <span>{{ issue.get("severity", "E") }}</span>
+                          <span>Line {{ issue.get("line") or "Unknown" }}</span>
+                          {% if issue.get("word") %}<span>{{ issue.get("word") }}</span>{% endif %}
+                        </div>
+                        <p>{{ issue.get("message") or "SAP returned an empty syntax error message." }}</p>
+                        {% if issue.get("source_line") %}
+                          <pre class="source-line"><code>{{ issue.get("source_line") }}</code></pre>
+                        {% endif %}
+                      </article>
+                    {% endfor %}
+                  </div>
+                {% else %}
+                  <p>No SAP syntax errors found for this attempt.</p>
+                {% endif %}
+              </section>
+            {% endfor %}
+          {% elif syntax.get("errors") %}
               <div class="validation-list">
                 {% for issue in syntax.get("errors", []) %}
                   <article class="validation-issue">
@@ -216,20 +262,18 @@
                       <span>Line {{ issue.get("line") or "Unknown" }}</span>
                       {% if issue.get("word") %}<span>{{ issue.get("word") }}</span>{% endif %}
                     </div>
-                    <p>{{ issue.get("message") }}</p>
+                    <p>{{ issue.get("message") or "SAP returned an empty syntax error message." }}</p>
                     {% if issue.get("source_line") %}
                       <pre class="source-line"><code>{{ issue.get("source_line") }}</code></pre>
                     {% endif %}
                   </article>
                 {% endfor %}
               </div>
-            {% elif syntax.get("status") == "passed" %}
+          {% elif syntax.get("status") == "passed" %}
               <p>No SAP syntax errors found.</p>
-            {% endif %}
-          {% else %}
-            <p>Not requested.</p>
           {% endif %}
         </details>
+        {% endif %}
         <details class="validation-panel">
           <summary>SAP Metadata Requests</summary>
           {% set requests = sap_metadata_requests or {} %}
@@ -439,6 +483,7 @@
             <p>No ABAP generation chunk diagnostics recorded.</p>
           {% endif %}
         </details>
+        </div>
         <details class="code-panel">
           <summary>{% if is_enhancement %}Enhanced ABAP{% else %}Generated ABAP{% endif %}</summary>
           {% set generated_abap_duration = section_durations.get("generated_abap") %}
@@ -451,7 +496,7 @@
             <span id="copy-message" class="copy-message" aria-live="polite"></span>
           </div>
           <pre class="generated-abap-block"><code id="generated-abap">{{ generated_abap }}</code></pre>
-          <p><a href="{{ url_for('download', job_id=job_id) }}">Download generated.abap</a></p>
+          <p><a href="{{ url_for('download', job_id=job_id) }}">Download final ABAP</a></p>
         </details>
       </section>
     </main>
@@ -488,6 +533,17 @@
           } catch (error) {
             copyMessage.textContent = "Copy failed.";
           }
+        });
+      }
+
+      const exportToggle = document.getElementById("export-mode-toggle");
+      const exportPanels = document.getElementById("export-panels");
+
+      if (exportToggle && exportPanels) {
+        exportToggle.addEventListener("click", () => {
+          const isExpanded = exportToggle.getAttribute("aria-expanded") === "true";
+          exportToggle.setAttribute("aria-expanded", String(!isExpanded));
+          exportPanels.classList.toggle("hidden", isExpanded);
         });
       }
     </script>

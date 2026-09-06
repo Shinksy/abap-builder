@@ -252,6 +252,7 @@ def create_app(config_overrides=None):
     @app.get("/progress/<job_id>")
     def progress(job_id):
         job_progress = get_progress(jobs_folder, job_id)
+        job_progress["has_result"] = has_abap_result(jobs_folder, job_id)
         return render_template(
             "progress.html",
             job_id=job_id,
@@ -263,6 +264,7 @@ def create_app(config_overrides=None):
     @app.get("/progress/<job_id>/status")
     def progress_status(job_id):
         progress_payload = get_progress(jobs_folder, job_id)
+        progress_payload["has_result"] = has_abap_result(jobs_folder, job_id)
         if progress_payload.get("status") == "Awaiting Review":
             progress_payload["review_url"] = review_url_for_job(jobs_folder, job_id)
             progress_payload["review_label"] = review_label_for_job(jobs_folder, job_id)
@@ -478,7 +480,9 @@ def create_app(config_overrides=None):
 
     @app.get("/result/<job_id>")
     def result(job_id):
-        generated_path = jobs_folder / job_id / "generated.abap"
+        if not is_abap_result_ready(jobs_folder, job_id):
+            return redirect(url_for("progress", job_id=job_id))
+        generated_path = final_abap_path_for_job(jobs_folder, job_id)
         if not generated_path.exists():
             abort(404)
         generated_abap = generated_path.read_text(encoding="utf-8")
@@ -510,12 +514,33 @@ def create_app(config_overrides=None):
 
     @app.get("/download/<job_id>")
     def download(job_id):
-        generated_path = jobs_folder / job_id / "generated.abap"
+        if not is_abap_result_ready(jobs_folder, job_id):
+            return redirect(url_for("progress", job_id=job_id))
+        generated_path = final_abap_path_for_job(jobs_folder, job_id)
         if not generated_path.exists():
             abort(404)
-        return send_file(generated_path, as_attachment=True, download_name="generated.abap")
+        return send_file(generated_path, as_attachment=True, download_name=generated_path.name)
 
     return app
+
+
+def final_abap_path_for_job(jobs_folder, job_id):
+    job_folder = Path(jobs_folder) / job_id
+    repaired_path = job_folder / "sap_syntax_repaired.abap"
+    if repaired_path.exists():
+        return repaired_path
+    return job_folder / "generated.abap"
+
+
+def has_abap_result(jobs_folder, job_id):
+    return is_abap_result_ready(jobs_folder, job_id)
+
+
+def is_abap_result_ready(jobs_folder, job_id):
+    if not final_abap_path_for_job(jobs_folder, job_id).exists():
+        return False
+    progress = get_progress(jobs_folder, job_id)
+    return not bool(progress.get("is_active"))
 
 
 def review_url_for_job(jobs_folder, job_id):

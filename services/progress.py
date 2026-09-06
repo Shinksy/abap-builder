@@ -19,7 +19,9 @@ PROGRESS_STAGES = [
     ("Running deterministic validation", 65),
     ("Applying safe deterministic fixes", 75),
     ("Re-running deterministic validation", 85),
-    ("Saving results", 95),
+    ("Running SAP syntax check", 90),
+    ("Repairing SAP syntax errors", 93),
+    ("Saving results", 97),
     ("Complete", 100),
 ]
 STAGE_ALIASES = {

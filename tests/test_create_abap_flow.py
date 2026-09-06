@@ -33,7 +33,9 @@ from services.create_abap import (
     load_processing_plan_proposal,
     load_database_read_patterns,
     load_report_skeleton,
+    load_sap_syntax_check,
     merge_processing_rule_ddic_dependencies,
+    maybe_run_sap_syntax_check,
     merge_specification_callable_dependencies,
     normalize_metrics_for_display,
     processing_plan_review_payload,
@@ -1588,6 +1590,8 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertEqual(payload["current_stage"], "awaiting_processing_plan_review")
             self.assertEqual(payload["current_stage_title"], "AwaitingProcessingPlanReview")
             self.assertEqual(1, stage_titles.count("Extracting processing plan"))
+            self.assertIn("Running SAP syntax check", stage_titles)
+            self.assertIn("Repairing SAP syntax errors", stage_titles)
             self.assertNotIn("extracting_processing_plan", stage_titles)
             self.assertNotIn("awaiting_processing_plan_review", html)
             self.assertIn("AwaitingProcessingPlanReview", html)
@@ -2334,6 +2338,73 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
+    def test_sap_syntax_check_records_each_api_attempt(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_syntax_attempts_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            job_id = create_job(jobs_folder)
+            job_folder = jobs_folder / job_id
+            (job_folder / "options.json").write_text(
+                json.dumps({"run_sap_syntax_check": True, "sap_syntax_check_attempts": 3}),
+                encoding="utf-8",
+            )
+            syntax_checker = RecordingSyntaxChecker(
+                [
+                    syntax_failure("First SAP error.", "REPORT zphase2."),
+                    syntax_failure("Second SAP error.", "REPORT zphase2_fixed1."),
+                    {
+                        "requested": True,
+                        "status": "passed",
+                        "passed": True,
+                        "errors": [],
+                        "raw_response": "<sap>third</sap>",
+                        "technical_message": "",
+                    },
+                ]
+            )
+            repairer = SequenceCodeReviewRepairer(["REPORT zphase2_fixed1.", "REPORT zphase2_fixed2."])
+            progress_stages = []
+
+            def record_progress(jobs_folder_arg, job_id_arg, status, message, stage=None):
+                progress_stages.append((stage, message))
+                update_progress(jobs_folder_arg, job_id_arg, status, message, stage=stage)
+
+            with patch("services.create_abap.update_progress", side_effect=record_progress):
+                final_abap = maybe_run_sap_syntax_check(
+                    job_folder,
+                    jobs_folder,
+                    job_id,
+                    "REPORT zphase2.",
+                    syntax_checker,
+                    code_review_repairer=repairer,
+                )
+
+            self.assertEqual(final_abap, "REPORT zphase2_fixed2.")
+            self.assertEqual(
+                progress_stages,
+                [
+                    ("Running SAP syntax check", "Running SAP syntax check attempt 1 of 3..."),
+                    ("Repairing SAP syntax errors", "Repairing SAP syntax errors after attempt 1..."),
+                    ("Running SAP syntax check", "Running SAP syntax check attempt 2 of 3..."),
+                    ("Repairing SAP syntax errors", "Repairing SAP syntax errors after attempt 2..."),
+                    ("Running SAP syntax check", "Running SAP syntax check attempt 3 of 3..."),
+                ],
+            )
+            self.assertEqual(syntax_checker.sources, ["REPORT zphase2.", "REPORT zphase2_fixed1.", "REPORT zphase2_fixed2."])
+            saved = json.loads((job_folder / "sap_syntax_check.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["syntax_check_attempts"], 3)
+            self.assertEqual(len(saved["attempts"]), 3)
+            self.assertEqual(saved["attempts"][0]["errors"][0]["message"], "First SAP error.")
+            self.assertEqual(saved["attempts"][1]["errors"][0]["message"], "Second SAP error.")
+            self.assertEqual(saved["attempts"][2]["status"], "passed")
+            self.assertEqual(saved["repairs"][0]["syntax_result"]["errors"][0]["message"], "Second SAP error.")
+            self.assertEqual(saved["repairs"][1]["syntax_result"]["status"], "passed")
+            loaded = load_sap_syntax_check(jobs_folder, job_id)
+            self.assertEqual(len(loaded["attempts"]), 3)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def test_sap_syntax_errors_remaining_after_one_repair_stop_report_return(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
         temp_path.mkdir()
@@ -2388,6 +2459,65 @@ class CreateAbapFlowTest(unittest.TestCase):
                 self.assertIn("Complete raw response returned by repair LLM:\nREPORT zphase2_fixed.", diagnostic)
                 self.assertNotIn("Second SAP syntax API called:", diagnostic)
                 self.assertNotIn('"message": "Second SAP error."', diagnostic)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_empty_sap_syntax_error_payload_is_treated_as_no_error(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_empty_sap_syntax_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            job_id = create_job(jobs_folder)
+            job_folder = jobs_folder / job_id
+            (job_folder / "options.json").write_text(
+                json.dumps({"run_sap_syntax_check": True, "sap_syntax_check_attempts": 3}),
+                encoding="utf-8",
+            )
+            blank_failed_result = {
+                "requested": True,
+                "status": "failed",
+                "passed": False,
+                "errors": [
+                    {
+                        "line": 0,
+                        "column": None,
+                        "severity": "E",
+                        "message": "",
+                        "word": "",
+                        "source_line": "",
+                    }
+                ],
+                "raw_response": "<sap><LINE>0</LINE><MESSAGE/><WORD/></sap>",
+                "technical_message": "",
+            }
+            syntax_checker = RecordingSyntaxChecker(
+                [
+                    syntax_failure('FORM "READ_BAPIRET2" does not exist', "  PERFORM read_bapiret2."),
+                    blank_failed_result,
+                ]
+            )
+            repairer = RecordingCodeReviewRepairer("REPORT zphase2_fixed.")
+
+            final_abap = maybe_run_sap_syntax_check(
+                job_folder,
+                jobs_folder,
+                job_id,
+                "REPORT zphase2.",
+                syntax_checker,
+                code_review_repairer=repairer,
+            )
+
+            self.assertEqual(final_abap, "REPORT zphase2_fixed.")
+            self.assertEqual(syntax_checker.sources, ["REPORT zphase2.", "REPORT zphase2_fixed."])
+            self.assertEqual(len(repairer.prompts), 1)
+            saved = json.loads((job_folder / "sap_syntax_check.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "passed")
+            self.assertTrue(saved["passed"])
+            self.assertEqual(saved["errors"], [])
+            self.assertEqual(saved["syntax_check_attempts"], 2)
+            self.assertEqual(saved["attempts"][0]["status"], "failed")
+            self.assertEqual(saved["attempts"][1]["status"], "passed")
+            self.assertEqual(saved["attempts"][1]["errors"], [])
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -2520,6 +2650,148 @@ class CreateAbapFlowTest(unittest.TestCase):
                 self.assertEqual(saved_progress["status"], "Error")
                 self.assertEqual(saved_progress["current_stage"], "Error")
                 self.assertFalse(saved_progress["is_active"])
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_failed_job_with_saved_abap_still_exposes_result(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_failed_result_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            uploads_folder = temp_path / "uploads"
+            jobs_folder = temp_path / "jobs"
+            job_id = "failed_with_abap"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                job_id,
+                status="Error",
+                stage="Error",
+                started_at="2026-09-06T16:00:15+00:00",
+                completed_at="2026-09-06T16:10:02+00:00",
+                upload_name="request.txt",
+                generated=True,
+                metrics={"job_mode": "create_abap", "duration_seconds": 587.0},
+            )
+            job_folder = jobs_folder / job_id
+            (job_folder / "sap_syntax_repaired.abap").write_text("REPORT zrepaired.", encoding="utf-8")
+            (job_folder / "sap_syntax_check.json").write_text(
+                json.dumps(
+                    {
+                        "requested": True,
+                        "status": "failed",
+                        "passed": False,
+                        "errors": [
+                            {
+                                "line": 0,
+                                "column": None,
+                                "severity": "E",
+                                "message": "",
+                                "word": "",
+                                "source_line": "",
+                            }
+                        ],
+                        "initial_result": syntax_failure("First SAP error.", "REPORT ztest."),
+                        "final_result": {
+                            "requested": True,
+                            "status": "failed",
+                            "passed": False,
+                            "errors": [
+                                {
+                                    "line": 0,
+                                    "column": None,
+                                    "severity": "E",
+                                    "message": "",
+                                    "word": "",
+                                    "source_line": "",
+                                }
+                            ],
+                            "raw_response": "<sap>final</sap>",
+                            "technical_message": "",
+                        },
+                        "syntax_check_attempts": 3,
+                        "max_syntax_check_attempts": 3,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            app = create_app(
+                {
+                    "TESTING": True,
+                    "UPLOAD_FOLDER": str(uploads_folder),
+                    "JOBS_FOLDER": str(jobs_folder),
+                    "SAP_SYNTAX_CHECKER": RaisingSyntaxChecker(),
+                }
+            )
+            client = app.test_client()
+
+            progress = client.get(f"/progress/{job_id}")
+            self.assertEqual(progress.status_code, 200)
+            self.assertIn(f'href="/result/{job_id}"'.encode(), progress.data)
+
+            progress_status = client.get(f"/progress/{job_id}/status").get_json()
+            self.assertTrue(progress_status["has_result"])
+
+            result = client.get(f"/result/{job_id}")
+            self.assertEqual(result.status_code, 200)
+            self.assertIn(b'<code id="generated-abap">REPORT zrepaired.</code>', result.data)
+            self.assertIn(b"SAP Syntax Errors", result.data)
+            self.assertIn(b"Attempts: 3 of 3", result.data)
+            self.assertIn(b"Attempt 1", result.data)
+            self.assertIn(b"Attempt 2", result.data)
+            self.assertIn(b"Attempt 3", result.data)
+            self.assertIn(b"First SAP error.", result.data)
+            self.assertIn(b"This syntax-check attempt was not recorded by the saved job artifact.", result.data)
+            self.assertIn(b"SAP returned an empty syntax error message.", result.data)
+            self.assertNotIn(b'<details class="validation-panel" open', result.data)
+
+            download = client.get(f"/download/{job_id}")
+            self.assertEqual(download.status_code, 200)
+            self.assertEqual(download.data, b"REPORT zrepaired.")
+            download.close()
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_running_job_with_saved_abap_does_not_expose_result_yet(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_running_result_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            uploads_folder = temp_path / "uploads"
+            jobs_folder = temp_path / "jobs"
+            job_id = "running_with_abap"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                job_id,
+                status="Running",
+                stage="Saving results",
+                started_at="2026-09-06T16:00:15+00:00",
+                completed_at=None,
+                upload_name="request.txt",
+                generated=True,
+                metrics={"job_mode": "create_abap", "duration_seconds": 120.0},
+            )
+
+            app = create_app(
+                {
+                    "TESTING": True,
+                    "UPLOAD_FOLDER": str(uploads_folder),
+                    "JOBS_FOLDER": str(jobs_folder),
+                }
+            )
+            client = app.test_client()
+
+            progress = client.get(f"/progress/{job_id}")
+            self.assertEqual(progress.status_code, 200)
+            self.assertIn(b'id="result-links" class="hidden"', progress.data)
+
+            progress_status = client.get(f"/progress/{job_id}/status").get_json()
+            self.assertFalse(progress_status["has_result"])
+
+            result = client.get(f"/result/{job_id}", follow_redirects=False)
+            self.assertEqual(result.status_code, 302)
+            self.assertTrue(result.headers["Location"].endswith(f"/progress/{job_id}"))
+            result.close()
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -3857,6 +4129,7 @@ class CreateAbapFlowTest(unittest.TestCase):
             job_folder = jobs_folder / job_id
             job_folder.mkdir(parents=True, exist_ok=True)
             (job_folder / "generated.abap").write_text("REPORT ztest.", encoding="utf-8")
+            update_progress(jobs_folder, job_id, "Complete", "ABAP generation complete.", stage="Complete")
             (job_folder / "dependency_analysis.json").write_text(
                 json.dumps(
                     {
@@ -3982,6 +4255,8 @@ class CreateAbapFlowTest(unittest.TestCase):
             result = client.get(f"/result/{job_id}")
 
             self.assertEqual(result.status_code, 200)
+            self.assertIn(b'<button id="export-mode-toggle" type="button" aria-expanded="false" aria-controls="export-panels">Export Mode</button>', result.data)
+            self.assertIn(b'<div id="export-panels" class="export-panels hidden">', result.data)
             self.assertIn(b"Developer Diagnostics", result.data)
             self.assertIn(b"declarations", result.data)
             self.assertIn(b"Report declarations", result.data)
@@ -4028,6 +4303,7 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertIn(b"ST_OUTPUT", result.data)
             self.assertIn(b"UNKNOWN_THING", result.data)
             self.assertIn(b"EDID4", result.data)
+            self.assertNotIn(b'<details class="validation-panel" open', result.data)
             metadata_panel = result_section(result.data, "SAP Metadata Requests")
             self.assertIn("Processing time: 0.44s", metadata_panel)
             self.assertIn("DDIC tables and structures", metadata_panel)
@@ -4421,7 +4697,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 self.assertIn(b"100% complete", progress.data)
                 self.assertIn(b"Elapsed time:", progress.data)
                 self.assertIn(b"pollProgress", progress.data)
-                self.assertIn(b"Download generated.abap", progress.data)
+                self.assertIn(b"Download final ABAP", progress.data)
                 saved_progress = get_progress(jobs_folder, job_id)
                 self.assertEqual(saved_progress["status"], "Complete")
                 self.assertEqual(saved_progress["current_stage"], "Complete")
@@ -4642,6 +4918,11 @@ class RecordingSyntaxChecker:
         if len(self.sources) <= len(self.results):
             return self.results[len(self.sources) - 1]
         return self.results[-1]
+
+
+class RaisingSyntaxChecker:
+    def check(self, _source_code):
+        raise AssertionError("Result rendering must not invoke the SAP syntax checker.")
 
 
 class RecordingCodeReviewRepairer:

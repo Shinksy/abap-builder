@@ -1908,14 +1908,15 @@ def maybe_run_sap_syntax_check(
         jobs_folder,
         job_id,
         "Running",
-        "Running SAP syntax check...",
-        stage="Saving results",
+        "Running SAP syntax check attempt 1 of "
+        f"{int(options.get('sap_syntax_check_attempts', 2))}...",
+        stage="Running SAP syntax check",
     )
     checker = sap_syntax_checker
     max_syntax_check_attempts = int(options.get("sap_syntax_check_attempts", 2))
     diagnostic["sap_syntax_api_called"] = bool(checker)
     diagnostic["final_abap_source_sent_to_final_sap_syntax_check"] = source_code if checker else ""
-    first_result = checker.check(source_code) if checker else {
+    first_result = normalize_empty_sap_syntax_diagnostic_result(checker.check(source_code)) if checker else {
         "requested": True,
         "status": "unavailable",
         "passed": False,
@@ -1925,11 +1926,13 @@ def maybe_run_sap_syntax_check(
     }
     diagnostic["syntax_api_response_status"] = first_result.get("status", "")
     diagnostic["normalized_syntax_errors"] = first_result.get("errors", [])
+    syntax_check_attempts = [sap_syntax_check_attempt_payload(1, first_result)]
     result = {
         **first_result,
         "initial_result": first_result,
         "repair_attempted": False,
         "repair": None,
+        "attempts": syntax_check_attempts,
         "final_result": first_result,
     }
     if not syntax_errors(first_result):
@@ -1955,8 +1958,8 @@ def maybe_run_sap_syntax_check(
             jobs_folder,
             job_id,
             "Running",
-            "Repairing SAP syntax errors...",
-            stage="Saving results",
+            f"Repairing SAP syntax errors after attempt {syntax_check_count}...",
+            stage="Repairing SAP syntax errors",
         )
         repair_prompt = build_sap_syntax_repair_prompt(current_result.get("errors", []))
         repair_target = syntax_repair_target_for_errors(current_source, current_result.get("errors", []))
@@ -2004,9 +2007,18 @@ def maybe_run_sap_syntax_check(
             and diagnostic["exact_abap_sent_to_second_sap_syntax_api"] == repaired_abap
         )
         diagnostic["final_abap_source_sent_to_final_sap_syntax_check"] = repaired_abap if checker else ""
-        current_result = checker.check(repaired_abap) if checker else current_result
+        update_progress(
+            jobs_folder,
+            job_id,
+            "Running",
+            "Running SAP syntax check attempt "
+            f"{syntax_check_count + 1} of {max_syntax_check_attempts}...",
+            stage="Running SAP syntax check",
+        )
+        current_result = normalize_empty_sap_syntax_diagnostic_result(checker.check(repaired_abap)) if checker else current_result
         syntax_check_count += 1
         diagnostic["second_syntax_check_result"] = current_result
+        syntax_check_attempts.append(sap_syntax_check_attempt_payload(syntax_check_count, current_result))
         current_source = repaired_abap
         repairs.append(
             {
@@ -2015,6 +2027,7 @@ def maybe_run_sap_syntax_check(
                 "model": repair_model_name,
                 "usage": repair_usage,
                 "repaired_abap": repaired_abap,
+                "syntax_result": current_result,
                 "deterministic_fix_summary": {
                     "original_issue_count": repair_fix_result["original_issue_count"],
                     "final_issue_count": repair_fix_result["final_issue_count"],
@@ -2031,6 +2044,7 @@ def maybe_run_sap_syntax_check(
         "repair_attempted": bool(repairs),
         "repair": repair,
         "repairs": repairs,
+        "attempts": syntax_check_attempts,
         "syntax_check_attempts": syntax_check_count,
         "max_syntax_check_attempts": max_syntax_check_attempts,
         "final_result": final_result,
@@ -2047,6 +2061,8 @@ def maybe_run_sap_syntax_check(
 def require_sap_syntax_success(result):
     if result and result.get("status") == "passed" and result.get("passed") is True:
         return
+    if result and result.get("status") == "failed" and not syntax_errors(result):
+        return
     raise RuntimeError(sap_syntax_failure_message(result))
 
 
@@ -2060,6 +2076,18 @@ def sap_syntax_failure_message(result):
     if technical_message:
         return f"Final SAP syntax check did not succeed ({status}): {technical_message}"
     return f"Final SAP syntax check did not succeed ({status})."
+
+
+def sap_syntax_check_attempt_payload(number, result):
+    result = normalize_empty_sap_syntax_diagnostic_result(result or {})
+    return {
+        "number": number,
+        "status": result.get("status", "unknown"),
+        "passed": bool(result.get("passed")),
+        "errors": result.get("errors") or [],
+        "technical_message": result.get("technical_message") or "",
+        "raw_response": result.get("raw_response") or "",
+    }
 
 
 def syntax_repair_target_for_errors(source_code, errors):
@@ -2127,7 +2155,42 @@ def ensure_source_ends_like_line(source_code, lines, end_index):
 
 
 def syntax_errors(result):
-    return result and result.get("status") == "failed" and bool(result.get("errors"))
+    return bool(result and result.get("status") == "failed" and actionable_sap_syntax_errors(result))
+
+
+def actionable_sap_syntax_errors(result):
+    return [
+        error for error in (result or {}).get("errors") or []
+        if not is_empty_sap_syntax_error(error)
+    ]
+
+
+def is_empty_sap_syntax_error(error):
+    if not isinstance(error, dict):
+        return False
+    line = error.get("line")
+    has_empty_line = line in (None, "", 0, "0")
+    return (
+        has_empty_line
+        and not str(error.get("message") or "").strip()
+        and not str(error.get("word") or "").strip()
+        and not str(error.get("source_line") or "").strip()
+    )
+
+
+def normalize_empty_sap_syntax_diagnostic_result(result):
+    if not isinstance(result, dict):
+        return result
+    if result.get("status") != "failed":
+        return result
+    errors = result.get("errors") or []
+    if errors and not actionable_sap_syntax_errors(result):
+        normalized = dict(result)
+        normalized["status"] = "passed"
+        normalized["passed"] = True
+        normalized["errors"] = []
+        return normalized
+    return result
 
 
 def syntax_repair_skip_reason(result):
@@ -2230,16 +2293,89 @@ def save_sap_syntax_check(job_folder, result):
 def load_sap_syntax_check(jobs_folder, job_id, options=None):
     syntax_path = Path(jobs_folder) / job_id / "sap_syntax_check.json"
     if syntax_path.exists():
-        return json.loads(syntax_path.read_text(encoding="utf-8"))
+        payload = json.loads(syntax_path.read_text(encoding="utf-8"))
+        return normalize_sap_syntax_check_for_display(payload)
     requested = bool((options or {}).get("run_sap_syntax_check"))
-    return {
+    return normalize_sap_syntax_check_for_display({
         "requested": requested,
         "status": "not_requested" if not requested else "pending",
         "passed": False,
         "errors": [],
         "raw_response": "",
         "technical_message": "",
+    })
+
+
+def normalize_sap_syntax_check_for_display(payload):
+    payload = dict(payload or {})
+    attempts = payload.get("attempts")
+    if not isinstance(attempts, list) or not attempts:
+        attempts = synthesized_sap_syntax_check_attempts(payload)
+    payload["attempts"] = [
+        sap_syntax_check_attempt_payload(index, attempt)
+        for index, attempt in enumerate(attempts, start=1)
+    ]
+    return payload
+
+
+def synthesized_sap_syntax_check_attempts(payload):
+    payload = payload or {}
+    attempts = []
+    expected_count = sap_syntax_expected_attempt_count(payload)
+    initial_result = payload.get("initial_result")
+    if isinstance(initial_result, dict):
+        attempts.append(initial_result)
+    elif payload.get("requested"):
+        attempts.append(payload)
+
+    repairs = payload.get("repairs") if isinstance(payload.get("repairs"), list) else []
+    for repair in repairs:
+        if isinstance(repair, dict) and isinstance(repair.get("syntax_result"), dict):
+            attempts.append(repair["syntax_result"])
+
+    final_result = payload.get("final_result")
+    if isinstance(final_result, dict):
+        if expected_count and len(attempts) < expected_count:
+            while len(attempts) < expected_count - 1:
+                attempts.append(sap_syntax_unrecorded_attempt_payload(len(attempts) + 1))
+            attempts.append(final_result)
+        elif not syntax_attempts_include_result(attempts, final_result):
+            attempts.append(final_result)
+
+    return attempts
+
+
+def sap_syntax_expected_attempt_count(payload):
+    try:
+        value = int((payload or {}).get("syntax_check_attempts") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(value, 0)
+
+
+def sap_syntax_unrecorded_attempt_payload(number):
+    return {
+        "number": number,
+        "status": "not_recorded",
+        "passed": False,
+        "errors": [],
+        "technical_message": "This syntax-check attempt was not recorded by the saved job artifact.",
+        "raw_response": "",
     }
+
+
+def syntax_attempts_include_result(attempts, result):
+    for attempt in attempts:
+        if (
+            isinstance(attempt, dict)
+            and attempt.get("status") == result.get("status")
+            and attempt.get("passed") == result.get("passed")
+            and attempt.get("errors") == result.get("errors")
+            and attempt.get("raw_response") == result.get("raw_response")
+            and attempt.get("technical_message") == result.get("technical_message")
+        ):
+            return True
+    return False
 
 
 def load_dependency_analysis(jobs_folder, job_id):

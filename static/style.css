@@ -310,6 +310,16 @@ button:disabled {
   margin: 20px 0;
 }
 
+.result-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 20px 0;
+}
+
+.export-panels {
+  margin: 20px 0;
+}
+
 .metric-card {
   padding: 14px;
   border: 1px solid #d9e2ec;
