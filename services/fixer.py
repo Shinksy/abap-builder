@@ -59,6 +59,7 @@ def auto_fix_abap(source, callable_signatures=None, callable_mappings=None, prog
     fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "INVALID_ENDSELECT_AFTER_INTO_TABLE", fix_endselect_after_select_into_table)
     fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "TABLE_DECLARATION_NORMALIZATION", fix_table_declarations)
     fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "INVALID_SELECT_OPTIONS_FOR_FIELD", fix_select_options_for_field)
+    fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "CHAINED_SELECT_OPTIONS_DELIMITERS", fix_chained_select_options_delimiters)
     fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "STRING_CONCATENATION", fix_simple_concatenation)
     fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "FORBIDDEN_NAMING_PREFIX", rename_forbidden_prefixes)
     fixed_source, changed_rules = apply_fixer_rule(fixed_source, fixes, changed_rules, "STRING_TEMPLATE", fix_message_templates)
@@ -245,7 +246,7 @@ def fix_select_field_list_commas(source):
     for statement in source_statement_ranges(lines):
         statement_lines = statement["lines"]
         first_code = first_code_line(statement_lines)
-        if not re.match(r"^SELECT\b", first_code, re.IGNORECASE):
+        if not re.match(r"^SELECT\s", first_code, re.IGNORECASE):
             fixed_units.append(statement_lines)
             continue
         rewritten = remove_select_field_list_commas(statement_lines)
@@ -720,6 +721,61 @@ def selection_screen_statement_line_indexes(lines):
     return protected
 
 
+def fix_chained_select_options_delimiters(source):
+    lines = source.splitlines()
+    fixed_units = []
+    fixes = []
+
+    for statement in source_statement_ranges(lines):
+        statement_lines = statement["lines"]
+        first_code = first_code_line(statement_lines)
+        if not re.match(r"^SELECT-OPTIONS\s*:", first_code, re.IGNORECASE):
+            fixed_units.append(statement_lines)
+            continue
+        rewritten = add_missing_chained_select_options_commas(statement_lines)
+        fixed_units.append(rewritten)
+        if rewritten != statement_lines:
+            fixes.append(
+                {
+                    "rule_id": "CHAINED_SELECT_OPTIONS_DELIMITERS",
+                    "description": f"Added missing delimiters to chained SELECT-OPTIONS statement starting on line {statement['start'] + 1}.",
+                }
+            )
+
+    if not fixes:
+        return source, []
+    return "\n".join(line for unit in fixed_units for line in unit), fixes
+
+
+def add_missing_chained_select_options_commas(statement_lines):
+    fixed = list(statement_lines)
+    item_indexes = [
+        index
+        for index, line in enumerate(statement_lines)
+        if is_select_options_item_line(line, first_line=index == 0)
+    ]
+    if len(item_indexes) < 2:
+        return fixed
+
+    for index in item_indexes[:-1]:
+        code, comment = split_code_and_comment(fixed[index])
+        stripped = code.rstrip()
+        if stripped.endswith((",", ".")):
+            continue
+        comment_separator = " " if comment and not comment.startswith(" ") else ""
+        fixed[index] = stripped + "," + comment_separator + comment
+    return fixed
+
+
+def is_select_options_item_line(line, first_line=False):
+    code = split_code_and_comment(line)[0].strip()
+    if not code:
+        return False
+    if first_line:
+        return bool(re.match(r"^SELECT-OPTIONS\s*:\s*[A-Za-z_]\w*\s+\bFOR\b", code, re.IGNORECASE))
+    return bool(re.match(r"^[A-Za-z_]\w*\s+\bFOR\b", code, re.IGNORECASE))
+
+
 def rewrite_code_segments(line, renames):
     code, comment = split_code_and_comment(line)
     rewritten = []
@@ -1120,7 +1176,7 @@ def fix_select_clause_order(source):
     for statement in source_statement_ranges(lines):
         statement_lines = statement["lines"]
         first_code = first_code_line(statement_lines)
-        if not re.match(r"^SELECT\b", first_code, re.IGNORECASE):
+        if not re.match(r"^SELECT\s", first_code, re.IGNORECASE):
             fixed_units.append(statement_lines)
             continue
         if any(split_code_and_comment(line)[1].strip() for line in statement_lines):
@@ -1152,7 +1208,7 @@ def fix_select_clause_order(source):
 
 def normalized_select_clause_order(statement_text):
     text = str(statement_text or "").strip()
-    if not re.match(r"^SELECT\b", text, re.IGNORECASE) or not text.endswith("."):
+    if not re.match(r"^SELECT\s", text, re.IGNORECASE) or not text.endswith("."):
         return None
     body = text[:-1].strip()
     if not re.search(r"\bFROM\b", body, re.IGNORECASE):
@@ -1268,7 +1324,7 @@ def fix_endselect_after_select_into_table(source):
 
 def is_select_into_table_statement(statement_text):
     return bool(
-        re.match(r"^\s*SELECT\b", statement_text, re.IGNORECASE)
+        re.match(r"^\s*SELECT\s", statement_text, re.IGNORECASE)
         and re.search(r"\bINTO\s+TABLE\b", statement_text, re.IGNORECASE)
     )
 

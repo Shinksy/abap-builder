@@ -32,6 +32,7 @@ from services.orchestrator import (
     normalize_declaration_requirements,
     normalize_processing_plan,
     normalize_processing_plan_with_diagnostics,
+    remove_database_read_declaration_units,
     validate_generated_processing_completeness,
     validate_processing_plan,
 )
@@ -1910,6 +1911,97 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(second_pass.count("*Internal Tables"), 1)
         self.assertEqual(second_pass.count("*Structures"), 1)
         self.assertEqual(second_pass.count("*Variables"), 1)
+
+    def test_declaration_prefix_grouping_preserves_chained_output_and_alv_globals(self):
+        result = group_declaration_statements_by_prefix(
+            "\n".join(
+                [
+                    "REPORT zmd_mpe_r0001.",
+                    "TYPES: BEGIN OF ty_edidc,",
+                    "         docnum TYPE edidc-docnum,",
+                    "       END OF ty_edidc.",
+                    "TYPES: BEGIN OF ty_bapiret2,",
+                    "         message TYPE bapiret2-message,",
+                    "       END OF ty_bapiret2.",
+                    "TYPES: BEGIN OF ty_output,",
+                    "         idoc_number TYPE edidc-docnum,",
+                    "       END OF ty_output.",
+                    "DATA: t_edidc TYPE STANDARD TABLE OF ty_edidc,",
+                    "      t_bapiret2 TYPE STANDARD TABLE OF ty_bapiret2,",
+                    "      st_edidc TYPE ty_edidc,",
+                    "      st_bapiret2 TYPE ty_bapiret2,",
+                    "      t_output TYPE STANDARD TABLE OF ty_output,",
+                    "      w_output TYPE ty_output,",
+                    "      t_fieldcat TYPE slis_t_fieldcat_alv,",
+                    "      w_fieldcat TYPE slis_fieldcat_alv,",
+                    "      w_filename TYPE string,",
+                    "      w_csv_line TYPE string,",
+                    "      lv_resolved_identifier TYPE zmd_mpe0001-identifier.",
+                    "START-OF-SELECTION.",
+                    "  PERFORM display_alv.",
+                ]
+            )
+        )
+
+        self.assertIn("DATA t_edidc TYPE STANDARD TABLE OF ty_edidc.", result)
+        self.assertIn("DATA t_bapiret2 TYPE STANDARD TABLE OF ty_bapiret2.", result)
+        self.assertIn("DATA t_output TYPE STANDARD TABLE OF ty_output.", result)
+        self.assertIn("DATA t_fieldcat TYPE slis_t_fieldcat_alv.", result)
+        self.assertIn("DATA w_output TYPE ty_output.", result)
+        self.assertIn("DATA w_fieldcat TYPE slis_fieldcat_alv.", result)
+        self.assertIn("DATA w_filename TYPE string.", result)
+        self.assertIn("DATA w_csv_line TYPE string.", result)
+        self.assertIn("DATA lv_resolved_identifier TYPE zmd_mpe0001-identifier.", result)
+        self.assertLess(result.index("DATA t_fieldcat TYPE slis_t_fieldcat_alv."), result.index("DATA w_output TYPE ty_output."))
+        self.assertLess(result.index("DATA w_output TYPE ty_output."), result.index("DATA w_filename TYPE string."))
+
+    def test_database_read_declaration_replacement_preserves_non_database_chained_data(self):
+        source = "\n".join(
+            [
+                "REPORT zmd_mpe_r0001.",
+                "TYPES: BEGIN OF ty_edidc,",
+                "         docnum TYPE edidc-docnum,",
+                "       END OF ty_edidc.",
+                "TYPES: BEGIN OF ty_bapiret2,",
+                "         message TYPE bapiret2-message,",
+                "       END OF ty_bapiret2.",
+                "TYPES: BEGIN OF ty_output,",
+                "         idoc_number TYPE edidc-docnum,",
+                "       END OF ty_output.",
+                "DATA: t_edidc TYPE STANDARD TABLE OF ty_edidc,",
+                "      t_bapiret2 TYPE STANDARD TABLE OF ty_bapiret2,",
+                "      st_edidc TYPE ty_edidc,",
+                "      st_bapiret2 TYPE ty_bapiret2,",
+                "      t_output TYPE STANDARD TABLE OF ty_output,",
+                "      w_output TYPE ty_output,",
+                "      t_fieldcat TYPE slis_t_fieldcat_alv,",
+                "      w_fieldcat TYPE slis_fieldcat_alv,",
+                "      w_filename TYPE string,",
+                "      w_csv_line TYPE string,",
+                "      lv_resolved_identifier TYPE zmd_mpe0001-identifier.",
+            ]
+        )
+
+        result = remove_database_read_declaration_units(
+            source,
+            [
+                {"type": "ty_edidc", "table": "t_edidc", "work_area": "st_edidc"},
+                {"type": "ty_bapiret2", "table": "t_bapiret2", "work_area": "st_bapiret2"},
+            ],
+        )
+
+        self.assertNotIn("TYPES: BEGIN OF ty_edidc", result)
+        self.assertNotIn("DATA t_edidc TYPE STANDARD TABLE OF ty_edidc.", result)
+        self.assertNotIn("DATA st_edidc TYPE ty_edidc.", result)
+        self.assertNotIn("DATA t_bapiret2 TYPE STANDARD TABLE OF ty_bapiret2.", result)
+        self.assertNotIn("DATA st_bapiret2 TYPE ty_bapiret2.", result)
+        self.assertIn("DATA t_output TYPE STANDARD TABLE OF ty_output.", result)
+        self.assertIn("DATA t_fieldcat TYPE slis_t_fieldcat_alv.", result)
+        self.assertIn("DATA w_output TYPE ty_output.", result)
+        self.assertIn("DATA w_fieldcat TYPE slis_fieldcat_alv.", result)
+        self.assertIn("DATA w_filename TYPE string.", result)
+        self.assertIn("DATA w_csv_line TYPE string.", result)
+        self.assertIn("DATA lv_resolved_identifier TYPE zmd_mpe0001-identifier.", result)
 
     def test_database_read_declaration_replacement_preserves_output_type_in_chained_types(self):
         base_prompt = (

@@ -294,6 +294,46 @@ class ValidatorTest(unittest.TestCase):
 
         self.assertFalse([issue for issue in validate_abap(source, alv_requested=True) if issue["rule_id"] == "ALV_REQUESTED_WITH_CLASSICAL_LIST_OUTPUT"])
 
+    def test_call_parameter_value_must_be_declared(self):
+        source = "\n".join(
+            [
+                "REPORT ztest.",
+                "DATA t_fieldcat TYPE slis_t_fieldcat_alv.",
+                "DATA t_output TYPE STANDARD TABLE OF ty_output.",
+                "CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'",
+                "  EXPORTING",
+                "    it_fieldcat = t_fieldcat",
+                "  TABLES",
+                "    t_outtab = t_outtab",
+                "  EXCEPTIONS",
+                "    program_error = 1",
+                "    OTHERS = 2.",
+            ]
+        )
+
+        issue = self.assert_issue(validate_abap(source), "UNDECLARED_CALL_PARAMETER_VALUE", 8)
+
+        self.assertEqual(issue["identifier"], "t_outtab")
+        self.assertEqual(issue["parameter_name"], "t_outtab")
+        self.assertIn("t_output", issue["candidate_identifiers"])
+
+    def test_call_parameter_declared_values_pass(self):
+        source = "\n".join(
+            [
+                "REPORT ztest.",
+                "DATA: t_fieldcat TYPE slis_t_fieldcat_alv,",
+                "      t_output TYPE STANDARD TABLE OF ty_output.",
+                "CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'",
+                "  EXPORTING",
+                "    it_fieldcat = t_fieldcat",
+                "    i_callback_program = sy-repid",
+                "  TABLES",
+                "    t_outtab = t_output.",
+            ]
+        )
+
+        self.assertFalse([issue for issue in validate_abap(source) if issue["rule_id"] == "UNDECLARED_CALL_PARAMETER_VALUE"])
+
     def test_blank_select_option_guard(self):
         source = "\n".join(
             [

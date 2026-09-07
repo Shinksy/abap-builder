@@ -506,6 +506,10 @@ summary {
   font-size: 18px;
 }
 
+.validation-panel.variable-contract-alert summary {
+  color: #8a1f11;
+}
+
 .validation-list {
   display: grid;
   gap: 12px;

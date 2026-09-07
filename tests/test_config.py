@@ -7,7 +7,9 @@ from unittest.mock import Mock, patch
 
 from app import create_app
 from config import ENV_FILE_PATH, env_bool, load_env_file
+import services.llm as llm_service
 from services.llm import (
+    call_anthropic,
     generate_abap,
     generate_code_review_repair,
     generate_dependency_analysis,
@@ -232,6 +234,111 @@ class ConfigTest(unittest.TestCase):
 
         models = [call.kwargs["model"] for call in client.responses.create.call_args_list]
         self.assertEqual(["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"], models)
+
+    def test_llm_wrappers_route_claude_settings_to_anthropic(self):
+        app = create_app({
+            "TESTING": True,
+            "ANTHROPIC_API_KEY": "test-key",
+            "ANTHROPIC_API_URL": "https://anthropic.example.test/v1/messages",
+        })
+        model_settings = {
+            "provider": "anthropic",
+            "models": {
+                "abap_generation": "claude-sonnet-5",
+            },
+        }
+
+        with app.app_context(), patch("services.llm.requests.post") as post:
+            post.return_value.json.return_value = {
+                "model": "claude-sonnet-5",
+                "content": [{"type": "text", "text": "REPORT ztest."}],
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+            }
+            token = set_current_model_settings(model_settings)
+            try:
+                result = generate_abap("Prompt", "Source")
+            finally:
+                reset_current_model_settings(token)
+
+        self.assertEqual("REPORT ztest.", result["text"])
+        self.assertEqual("claude-sonnet-5", result["model"])
+        self.assertEqual({"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}, result["usage"])
+        request = post.call_args.kwargs
+        self.assertEqual("https://anthropic.example.test/v1/messages", post.call_args.args[0])
+        self.assertEqual("claude-sonnet-5", request["json"]["model"])
+        self.assertEqual("Prompt", request["json"]["system"])
+        self.assertEqual([{"role": "user", "content": "Source"}], request["json"]["messages"])
+        self.assertEqual("test-key", request["headers"]["x-api-key"])
+
+    def test_llm_wrappers_use_sap_btp_claude_env_when_anthropic_key_is_missing(self):
+        app = create_app({
+            "TESTING": True,
+            "ANTHROPIC_API_KEY": None,
+            "SAP_BTP_TOKEN_URL": "https://btp.example.test/oauth/token",
+            "SAP_BTP_INFERENCE_URL": "https://btp.example.test/invoke",
+            "SAP_BTP_CLIENT_ID": "client-id",
+            "SAP_BTP_CLIENT_SECRET": "client-secret",
+            "SAP_BTP_AI_RESOURCE_GROUP": "test-resource-group",
+            "SAP_BTP_CLAUDE_MAX_TOKENS": 1500,
+        })
+        model_settings = {
+            "provider": "anthropic",
+            "models": {"abap_generation": "claude-sonnet-5"},
+        }
+        token_response = Mock()
+        token_response.raise_for_status.return_value = None
+        token_response.json.return_value = {"access_token": "token", "expires_in": 3600}
+        inference_response = Mock()
+        inference_response.raise_for_status.return_value = None
+        inference_response.json.return_value = {
+            "content": [{"type": "text", "text": "REPORT zbtp."}],
+            "usage": {"input_tokens": 12, "output_tokens": 8},
+        }
+
+        with app.app_context(), patch("services.llm.requests.post", side_effect=[token_response, inference_response]) as post:
+            llm_service._sap_btp_token = None
+            llm_service._sap_btp_token_expires_at = 0
+            token = set_current_model_settings(model_settings)
+            try:
+                result = generate_abap("Prompt", "Source")
+            finally:
+                reset_current_model_settings(token)
+
+        self.assertEqual("REPORT zbtp.", result["text"])
+        self.assertEqual("claude-sonnet-5", result["model"])
+        self.assertEqual({"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}, result["usage"])
+        self.assertEqual("https://btp.example.test/oauth/token", post.call_args_list[0].args[0])
+        self.assertEqual(("client-id", "client-secret"), post.call_args_list[0].kwargs["auth"])
+        inference_call = post.call_args_list[1]
+        self.assertEqual("https://btp.example.test/invoke", inference_call.args[0])
+        self.assertEqual("Bearer token", inference_call.kwargs["headers"]["Authorization"])
+        self.assertEqual("test-resource-group", inference_call.kwargs["headers"]["AI-Resource-Group"])
+        self.assertEqual(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1500,
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Prompt\n\nSource"}],
+                }],
+            },
+            inference_call.kwargs["json"],
+        )
+
+    def test_missing_anthropic_api_key_has_clear_error(self):
+        app = create_app({
+            "TESTING": True,
+            "ANTHROPIC_API_KEY": None,
+            "SAP_BTP_TOKEN_URL": None,
+            "SAP_BTP_INFERENCE_URL": None,
+            "SAP_BTP_CLIENT_ID": None,
+            "SAP_BTP_CLIENT_SECRET": None,
+            "SAP_BTP_AI_RESOURCE_GROUP": None,
+        })
+
+        with app.app_context():
+            with self.assertRaisesRegex(RuntimeError, "ANTHROPIC_API_KEY is missing"):
+                call_anthropic("Prompt", "Source")
 
 
 if __name__ == "__main__":

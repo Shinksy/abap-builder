@@ -4533,7 +4533,12 @@ def group_declaration_statements_by_prefix(source):
                 kept.append(leading_lines)
             if insert_at is None:
                 insert_at = len(kept)
-            grouped[section].append(declaration_unit)
+            for expanded_unit in expand_grouped_data_declaration_unit(declaration_unit):
+                expanded_section = declaration_statement_group_section(expanded_unit)
+                if expanded_section:
+                    grouped[expanded_section].append(expanded_unit)
+                elif re.match(r"^DATA\b", first_statement_code_line(expanded_unit), re.IGNORECASE):
+                    grouped["variables"].append(expanded_unit)
             continue
         if declaration_section_heading_unit(unit):
             continue
@@ -4566,6 +4571,22 @@ def formatted_declaration_section_lines(grouped):
             lines.extend(unit)
         lines.append("")
     return lines
+
+
+def expand_grouped_data_declaration_unit(unit):
+    first_code = first_statement_code_line(unit)
+    if not re.match(r"^DATA\s*:", first_code, re.IGNORECASE):
+        return [unit]
+    statement_text = " ".join(split_code_and_comment(line)[0].strip() for line in unit)
+    match = re.match(r"\s*DATA\s*:\s*(.*?)[.]\s*$", statement_text, re.IGNORECASE)
+    if not match:
+        return [unit]
+    expanded = []
+    for part in split_ddic_field_parts(match.group(1)):
+        declaration = part.strip().rstrip(",.")
+        if declaration:
+            expanded.append([f"DATA {declaration}."])
+    return expanded or [unit]
 
 
 def split_leading_non_code_lines(unit):
@@ -4643,9 +4664,35 @@ def database_read_declaration_unit_without_targets(unit, targets):
             preserved.extend(standalone_type_structure_lines(segment))
         if changed:
             return preserved
+    preserved_data = data_declaration_unit_without_targets(unit, targets)
+    if preserved_data is not None:
+        return preserved_data
     if database_read_declaration_unit_matches(unit, targets):
         return None
     return unit
+
+
+def data_declaration_unit_without_targets(unit, targets):
+    first_code = first_statement_code_line(unit)
+    if not re.match(r"^DATA\s*:", first_code, re.IGNORECASE):
+        return None
+    statement_text = " ".join(split_code_and_comment(line)[0].strip() for line in unit)
+    match = re.match(r"\s*DATA\s*:\s*(.*?)[.]\s*$", statement_text, re.IGNORECASE)
+    if not match:
+        return None
+    changed = False
+    preserved = []
+    for part in split_ddic_field_parts(match.group(1)):
+        declaration = part.strip().rstrip(",.")
+        name_match = re.match(r"\s*([A-Z][A-Z0-9_]{0,29})\b", declaration, re.IGNORECASE)
+        if name_match and name_match.group(1).lower() in targets["data"]:
+            changed = True
+            continue
+        if declaration:
+            preserved.append(f"DATA {declaration}.")
+    if not changed:
+        return None
+    return preserved
 
 
 def type_structure_segments(unit):

@@ -175,6 +175,12 @@
                     <span>{{ issue.rule_id }}</span>
                   </div>
                   <p>{{ issue.message }}</p>
+                  {% if issue.suggested_fix %}
+                    <p>{{ issue.suggested_fix }}</p>
+                  {% endif %}
+                  {% if issue.candidate_identifiers %}
+                    <p>Candidate declared names: {{ issue.candidate_identifiers|join(", ") }}</p>
+                  {% endif %}
                   <pre class="source-line"><code>{{ issue.source_line }}</code></pre>
                 </article>
               {% endfor %}
@@ -417,7 +423,12 @@
                   <dt>Raw LLM response</dt>
                   <dd><pre><code>{{ processing_plan_diagnostic.get("raw_response") or "None" }}</code></pre></dd>
                   <dt>Structured processing plan</dt>
-                  <dd><pre><code>{{ processing_plan_diagnostic.get("plan") or "None" }}</code></pre></dd>
+                  <dd>
+                    <details class="code-panel">
+                      <summary>Structured JSON</summary>
+                      <pre><code>{% if processing_plan_diagnostic.get("plan") %}{{ processing_plan_diagnostic.get("plan")|tojson(indent=2) }}{% else %}None{% endif %}</code></pre>
+                    </details>
+                  </dd>
                 </dl>
               </details>
               {% for chunk in abap_generation_chunks %}
@@ -462,7 +473,12 @@
                     {% if chunk.get("processing_plan") %}
                       {% set processing_plan = chunk.get("processing_plan", {}) %}
                       <dt>Structured processing plan</dt>
-                      <dd><pre><code>{{ processing_plan.get("plan") or processing_plan.get("raw_response") or "None" }}</code></pre></dd>
+                      <dd>
+                        <details class="code-panel">
+                          <summary>Structured JSON</summary>
+                          <pre><code>{% if processing_plan.get("plan") %}{{ processing_plan.get("plan")|tojson(indent=2) }}{% elif processing_plan.get("raw_response") %}{{ processing_plan.get("raw_response") }}{% else %}None{% endif %}</code></pre>
+                        </details>
+                      </dd>
                     {% endif %}
                     {% set ddic_filter = chunk.get("ddic_metadata_filter", {}) %}
                     <dt>Fields extracted from the functional specification</dt>

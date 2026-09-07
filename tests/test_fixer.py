@@ -1215,6 +1215,54 @@ class FixerTest(unittest.TestCase):
         self.assertEqual(result["diagnostics"]["source_after_fixer"], source)
         self.assertEqual(result["diagnostics"]["changed_rules"], [])
 
+    def test_missing_chained_select_options_delimiters_are_fixed(self):
+        source = "\n".join(
+            [
+                "SELECT-OPTIONS: s_id01   FOR zmd_mpe0001-identifier",
+                "                s_id06   FOR zmd_mpe0006-identifier",
+                "                s_credat FOR edidc-credat",
+                "                s_mestyp FOR edidc-mestyp",
+                "                s_status FOR edidc-status.",
+            ]
+        )
+
+        result = auto_fix_abap(source)
+
+        self.assertEqual(
+            result["fixed_source"],
+            "\n".join(
+                [
+                    "SELECT-OPTIONS: s_id01   FOR zmd_mpe0001-identifier,",
+                    "                s_id06   FOR zmd_mpe0006-identifier,",
+                    "                s_credat FOR edidc-credat,",
+                    "                s_mestyp FOR edidc-mestyp,",
+                    "                s_status FOR edidc-status.",
+                ]
+            ),
+        )
+        self.assertEqual(result["diagnostics"]["changed_rules"], ["CHAINED_SELECT_OPTIONS_DELIMITERS"])
+
+    def test_missing_chained_select_options_delimiters_preserve_comments(self):
+        source = "\n".join(
+            [
+                "SELECT-OPTIONS: s_doc FOR edidc-docnum \" document",
+                "                s_date FOR edidc-credat. \" date",
+            ]
+        )
+
+        result = auto_fix_abap(source)
+
+        self.assertEqual(
+            result["fixed_source"],
+            "\n".join(
+                [
+                    "SELECT-OPTIONS: s_doc FOR edidc-docnum, \" document",
+                    "                s_date FOR edidc-credat. \" date",
+                ]
+            ),
+        )
+        self.assertEqual(result["diagnostics"]["changed_rules"], ["CHAINED_SELECT_OPTIONS_DELIMITERS"])
+
     def test_invalid_select_options_for_field_is_fixed_generically(self):
         source = "\n".join(
             [

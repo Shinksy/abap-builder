@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Processing Plan Review - SAP AI Assistant Next</title>
+    <title>Program Contract Review - SAP AI Assistant Next</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
   </head>
   <body>
@@ -14,7 +14,7 @@
     <main class="page">
       <section class="panel wide">
         <div class="result-header">
-          <h1>Processing Plan Review</h1>
+          <h1>Program Contract Review</h1>
           <div class="button-row">
             <a class="button-link" href="{{ url_for('home') }}">New</a>
             <a class="button-link" href="{{ url_for('progress', job_id=job_id) }}">Progress</a>
@@ -57,6 +57,51 @@
           {% endif %}
         </details>
 
+        {% set variable_contract = proposal.variable_contract or {} %}
+        {% set has_undefined_variables = variable_contract.get("used_but_not_defined") %}
+        <details class="validation-panel{% if has_undefined_variables %} variable-contract-alert{% endif %}">
+          <summary>Variables To Define</summary>
+          {% if variable_contract.get("variables_to_define") %}
+            <div class="metrics-table-wrap">
+              <table class="metrics-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Kind</th>
+                    <th>Declaration</th>
+                    <th>Source</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for variable in variable_contract.get("variables_to_define") %}
+                    <tr>
+                      <td>{{ variable.name }}</td>
+                      <td>{{ variable.kind }}</td>
+                      <td>{{ variable.declaration or "Derived by generator" }}</td>
+                      <td>{{ variable.source }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <p>None</p>
+          {% endif %}
+        </details>
+
+        <details class="validation-panel{% if has_undefined_variables %} variable-contract-alert{% endif %}"{% if has_undefined_variables %} open{% endif %}>
+          <summary>Used But Not Defined</summary>
+          {% if variable_contract.get("used_but_not_defined") %}
+            <ul class="validation-list">
+              {% for variable in variable_contract.get("used_but_not_defined") %}
+                <li class="validation-issue">{{ variable.name }} from {{ variable.source }}</li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p>None</p>
+          {% endif %}
+        </details>
+
         <details class="code-panel">
           <summary>LLM Prompt</summary>
           <pre><code>{{ proposal.llm_request if proposal.llm_request else "Unavailable" }}</code></pre>
@@ -68,8 +113,10 @@
         </details>
 
         <form method="post">
-          <label for="structured_json">Structured JSON</label>
-          <textarea id="structured_json" name="structured_json" rows="22">{{ proposal.structured_json }}</textarea>
+          <details class="code-panel">
+            <summary>Structured JSON</summary>
+            <textarea id="structured_json" name="structured_json" rows="22">{{ proposal.structured_json }}</textarea>
+          </details>
           <div class="button-row">
             <button type="submit" name="action" value="approve">Approve</button>
             <button type="submit" name="action" value="approve_edit">Approve edited JSON</button>

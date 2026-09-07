@@ -13,7 +13,7 @@
     </nav>
     {% macro model_selector(prefix) -%}
       <fieldset class="model-settings">
-        <legend>OpenAI Models</legend>
+        <legend>LLM Models</legend>
         <div class="model-preset-grid">
           {% for preset in model_settings.presets %}
             <label class="radio-option model-preset-option">
@@ -31,7 +31,7 @@
           <label class="radio-option model-preset-option">
             <input class="advanced-radio" name="model_preset" form="new-program-form" type="radio" value="advanced">
             <span class="model-preset-copy">
-              <span class="model-preset-title">Advanced</span>
+              <span class="model-preset-title">Advanced OpenAI</span>
               <span class="model-preset-summary">Select each model role separately.</span>
             </span>
           </label>

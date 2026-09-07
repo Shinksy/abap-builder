@@ -23,6 +23,7 @@ from services.create_abap import (
     append_generation_contract,
     build_generation_contract,
     calculate_cost,
+    clean_response,
     cost_breakdown_from_job_artifacts,
     extract_specification_callable_identities,
     enrich_processing_rule_callable_metadata,
@@ -508,8 +509,12 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertIn(f'<a class="button-link" href="/progress/{job_id}">Progress</a>', html)
             self.assertIn('<details class="validation-panel">\n          <summary>Validation Errors</summary>', html)
             self.assertIn('<details class="validation-panel">\n          <summary>Validation Warnings</summary>', html)
+            self.assertIn('<details class="validation-panel">\n          <summary>Variables To Define</summary>', html)
+            self.assertIn("<summary>Used But Not Defined</summary>", html)
             self.assertIn('<details class="code-panel">\n          <summary>LLM Prompt</summary>', html)
             self.assertIn('<details class="code-panel">\n          <summary>Readable Summary</summary>', html)
+            self.assertIn('<details class="code-panel">\n            <summary>Structured JSON</summary>', html)
+            self.assertIn('<textarea id="structured_json" name="structured_json" rows="22">', html)
             self.assertIn("You can still approve the saved proposal", html)
             self.assertIn('<button type="submit" name="action" value="approve">Approve</button>', html)
             self.assertNotIn('value="approve" disabled', html)
@@ -519,8 +524,47 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertIn("[user]", html)
             self.assertIn("Uploaded spec text.", html)
             self.assertLess(html.index("<summary>LLM Prompt</summary>"), html.index("<summary>Readable Summary</summary>"))
+            self.assertLess(html.index("<summary>Readable Summary</summary>"), html.index("<summary>Structured JSON</summary>"))
+            self.assertNotIn("variable-contract-alert", html)
             self.assertNotIn('<details class="validation-panel" open', html)
             self.assertNotIn('<details class="code-panel" open', html)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_processing_plan_review_marks_variable_panels_red_when_undefined_variables_exist(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            app = create_app({"TESTING": True, "JOBS_FOLDER": str(jobs_folder)})
+            client = app.test_client()
+            job_id = create_job(jobs_folder)
+            job_folder = jobs_folder / job_id
+            job_folder.mkdir(parents=True, exist_ok=True)
+            (job_folder / PROCESSING_PLAN_PROPOSAL_ARTIFACT).write_text(
+                json.dumps(
+                    {
+                        "summary": "- MOVE: source=t_outtab",
+                        "plan": {"processing_steps": []},
+                        "structured_json": "{\"processing_steps\": []}",
+                        "validation_errors": [],
+                        "validation_warnings": [],
+                        "variable_contract": {
+                            "variables_to_define": [{"name": "t_output", "kind": "Global", "declaration": "DATA t_output TYPE STANDARD TABLE OF ty_output.", "source": "Generation contract"}],
+                            "used_but_not_defined": [{"name": "t_outtab", "source": "Processing plan"}],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            response = client.get(f"/processing-plan/{job_id}")
+            html = response.data.decode("utf-8")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<details class="validation-panel variable-contract-alert">\n          <summary>Variables To Define</summary>', html)
+            self.assertIn('<details class="validation-panel variable-contract-alert" open>\n          <summary>Used But Not Defined</summary>', html)
+            self.assertIn("t_outtab from Processing plan", html)
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -726,6 +770,39 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertEqual(["processing_plan.processing_steps.0 has a metadata issue"], payload["validation_errors"])
         self.assertIn("[system]\nExtract business-processing logic.", payload["llm_request"])
         self.assertIn("[user]\nUploaded spec text.", payload["llm_request"])
+
+    def test_processing_plan_review_payload_shows_variable_contract(self):
+        payload = processing_plan_review_payload(
+            {
+                "plan": {
+                    "processing_steps": [
+                        {
+                            "operation": "MOVE",
+                            "source": "t_outtab",
+                            "target": "w_output-DOCNUM",
+                        }
+                    ]
+                },
+                "validation_errors": [],
+                "normalization_diagnostics": {"rejected_steps": []},
+            },
+            prompt_text="Shared generation contract:\nExact internal-table names: t_edidc\nExact work-area names: st_edidc",
+            source_text="Display the results in ALV.",
+            declaration_requirements={
+                "requirements": {
+                    "output_structure_fields": [{"name": "DOCNUM", "type_or_like": "TYPE edidc-docnum"}]
+                }
+            },
+        )
+
+        variable_names = [item["name"] for item in payload["variable_contract"]["variables_to_define"]]
+        undefined_names = [item["name"] for item in payload["variable_contract"]["used_but_not_defined"]]
+
+        self.assertIn("t_output", variable_names)
+        self.assertIn("w_output", variable_names)
+        self.assertIn("t_fieldcat", variable_names)
+        self.assertEqual(sorted(variable_names, key=str.lower), variable_names)
+        self.assertIn("t_outtab", undefined_names)
 
     def test_processing_plan_review_payload_reports_empty_plan_caused_by_parse_failure(self):
         payload = processing_plan_review_payload(
@@ -1086,6 +1163,43 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertIn(b'max="10"', response.data)
         self.assertIn(b'value="2"', response.data)
 
+    def test_clean_response_removes_text_before_report_statement(self):
+        raw_response = (
+            "Here is the generated ABAP code:\n\n"
+            "```abap\n"
+            "REPORT ztest.\n"
+            "WRITE 'ok'.\n"
+            "```"
+        )
+
+        self.assertEqual("REPORT ztest.\nWRITE 'ok'.", clean_response(raw_response))
+
+    def test_clean_response_removes_inline_llm_preface_before_form(self):
+        raw_response = (
+            "REPORT ztest.\n"
+            "FORM output_data.\n"
+            "  PERFORM display_alv.\n"
+            "ENDFORM.\n"
+            "here is the corrected abap source:\n\n"
+            "FORM display_alv.\n"
+            "  REFRESH t_fieldcat.\n"
+            "ENDFORM."
+        )
+
+        cleaned = clean_response(raw_response)
+
+        self.assertNotIn("here is the corrected abap source", cleaned.lower())
+        self.assertIn("FORM display_alv.", cleaned)
+
+    def test_clean_response_keeps_abap_comments_and_strings_with_preface_text(self):
+        raw_response = (
+            "REPORT ztest.\n"
+            "* here is the corrected abap source:\n"
+            "DATA text TYPE string VALUE 'here is the corrected abap source:'."
+        )
+
+        self.assertEqual(raw_response, clean_response(raw_response))
+
     def test_home_includes_openai_model_presets_and_advanced_fields(self):
         app = create_app({"TESTING": True})
 
@@ -1097,6 +1211,7 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertIn(b'value="economy" checked', response.data)
         self.assertIn(b'value="balanced"', response.data)
         self.assertIn(b'value="best_quality"', response.data)
+        self.assertIn(b'value="claude"', response.data)
         self.assertIn(b'value="advanced"', response.data)
         self.assertIn(b'form="new-program-form"', response.data)
         self.assertIn(b'form="enhance-program-form"', response.data)
@@ -1107,6 +1222,8 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertIn(b'General: GPT-5.6 Terra', response.data)
         self.assertIn(b'Generation: GPT-5.6 Sol', response.data)
         self.assertIn(b'Review: GPT-5.6 Sol', response.data)
+        self.assertIn(b'Claude Sonnet 5', response.data)
+        self.assertIn(b'General: Claude Sonnet 5', response.data)
         self.assertIn(b'name="OPENAI_MODEL"', response.data)
         self.assertIn(b'name="OPENAI_ABAP_GENERATION_MODEL"', response.data)
         self.assertIn(b'name="OPENAI_DEPENDENCY_ANALYSIS_MODEL"', response.data)
@@ -1148,6 +1265,40 @@ class CreateAbapFlowTest(unittest.TestCase):
                 },
                 options["model_settings"]["models"],
             )
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_upload_saves_claude_model_settings(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            with patch("app.start_create_abap_job"):
+                response = app.test_client().post(
+                    "/upload",
+                    data={
+                        "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
+                        "model_preset": "claude",
+                    },
+                    content_type="multipart/form-data",
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            options = json.loads((jobs_folder / job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertEqual("anthropic", options["model_settings"]["provider"])
+            self.assertEqual("claude", options["model_settings"]["preset"])
+            self.assertEqual("Claude", options["model_settings"]["preset_label"])
+            self.assertEqual("claude-sonnet-5", options["model_settings"]["models"]["general"])
+            self.assertEqual("claude-sonnet-5", options["model_settings"]["models"]["abap_generation"])
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -4267,6 +4418,7 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertIn(b"2.50s", result.data)
             self.assertIn(b"processing_plan", result.data)
             self.assertIn(b"3.75s", result.data)
+            self.assertIn(b"<summary>Structured JSON</summary>", result.data)
             self.assertIn(b"Extract declaration requirements.", result.data)
             self.assertIn(b"Extract business-processing logic.", result.data)
             self.assertIn(b"Exact prompt sent to the LLM", result.data)

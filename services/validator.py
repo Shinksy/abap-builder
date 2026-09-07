@@ -2,6 +2,7 @@ import re
 
 from services.abap_source import (
     call_block,
+    collect_declared_names,
     collect_local_type_declarations,
     collect_logical_declarations,
     referenced_local_type,
@@ -62,6 +63,7 @@ LOCAL_QUALIFIED_PREFIXES = (
 def validate_abap(source, callable_signatures=None, identifier_provenance=None, alv_requested=False):
     lines = source.splitlines()
     issues = validate_line_rules(lines)
+    issues += validate_call_parameter_values_are_declared(lines)
     issues += validate_callable_signatures(lines, callable_signatures)
     issues += validate_indented_asterisk_comments(lines)
     issues += validate_leave_list_page(lines)
@@ -286,6 +288,99 @@ def validate_line_rules(lines):
     return issues
 
 
+def validate_call_parameter_values_are_declared(lines):
+    declared = collect_declared_identifiers(lines)
+    issues = []
+    for call in parse_callable_invocations(lines):
+        for actual in call.get("parameters") or []:
+            value = actual.get("value_identifier")
+            if not value:
+                continue
+            normalized = value.lower()
+            if normalized in declared or is_builtin_identifier(value):
+                continue
+            issues.append(
+                issue(
+                    "UNDECLARED_CALL_PARAMETER_VALUE",
+                    actual["line_number"],
+                    f"Call parameter {actual['name']} uses undeclared variable {value}.",
+                    actual["source_line"],
+                    "Use an existing declared variable/table or add the missing declaration before the call.",
+                    identifier=value,
+                    parameter_name=actual["name"],
+                    actual_section=actual["section"],
+                    callable_name=call["name"],
+                    candidate_identifiers=closest_declared_identifiers(value, declared),
+                )
+            )
+    return issues
+
+
+def collect_declared_identifiers(lines):
+    names = set(collect_declared_names("\n".join(lines)))
+    chain_keyword = None
+    declaration_keywords = r"DATA|TYPES|CONSTANTS|TABLES|PARAMETERS|SELECT-OPTIONS|FIELD-SYMBOLS"
+    for line in lines:
+        code = split_code_and_comment(line)[0].strip()
+        if not code:
+            continue
+        starts_chain = re.match(rf"^({declaration_keywords})\s*:\s*(.*)$", code, re.IGNORECASE)
+        starts_declaration = re.match(rf"^({declaration_keywords})\b\s*(.*)$", code, re.IGNORECASE)
+        if starts_chain:
+            chain_keyword = starts_chain.group(1).upper()
+            add_declared_identifier_from_declaration_fragment(names, starts_chain.group(2))
+        elif starts_declaration:
+            chain_keyword = None
+            add_declared_identifier_from_declaration_fragment(names, starts_declaration.group(2))
+        elif chain_keyword:
+            add_declared_identifier_from_declaration_fragment(names, code)
+        names.update(form_parameter_identifiers(code))
+        if code.endswith("."):
+            chain_keyword = None
+    return names
+
+
+def add_declared_identifier_from_declaration_fragment(names, fragment):
+    text = re.sub(r"[,\.]\s*$", "", str(fragment or "").strip())
+    match = re.match(r"<?([A-Za-z_]\w*)>?\b", text)
+    if match:
+        names.add(match.group(1).lower())
+
+
+def form_parameter_identifiers(code):
+    match = re.match(r"FORM\s+[A-Za-z_]\w*\s+(.*)\.\s*$", str(code or "").strip(), re.IGNORECASE)
+    if not match:
+        return set()
+    names = set()
+    current = None
+    for token in re.findall(r"[A-Za-z_]\w*|<[^>]+>", match.group(1)):
+        lower = token.lower()
+        if lower in {"using", "changing", "tables"}:
+            current = lower
+            continue
+        if current and lower not in {"value", "type", "like", "standard", "sorted", "hashed", "table", "of", "structure"}:
+            names.add(token.strip("<>").lower())
+    return names
+
+
+def is_builtin_identifier(value):
+    upper = str(value or "").upper()
+    if upper == "SY" or upper.startswith("SY-"):
+        return True
+    return upper in {"ABAP_TRUE", "ABAP_FALSE", "ABAP_UNDEFINED", "SPACE", "X", "C"}
+
+
+def closest_declared_identifiers(value, declared):
+    candidates = sorted(declared or [])
+    if not candidates:
+        return []
+    return [
+        candidate
+        for candidate in sorted(candidates, key=lambda item: levenshtein_distance(value.lower(), item))[:3]
+        if levenshtein_distance(value.lower(), candidate) <= max(3, len(value) // 2)
+    ]
+
+
 def parse_callable_invocations(lines):
     calls = []
     for index, line in enumerate(lines):
@@ -309,22 +404,33 @@ def parse_callable_invocations(lines):
             call["end_index"] = number - 1
             call["lines"].append((number, call_line))
             stripped = split_code_and_comment(call_line)[0].strip()
-            section_match = re.match(r"^(EXPORTING|IMPORTING|CHANGING|TABLES|RETURNING)\b", stripped, re.IGNORECASE)
+            section_match = re.match(r"^(EXPORTING|IMPORTING|CHANGING|TABLES|RETURNING|EXCEPTIONS)\b", stripped, re.IGNORECASE)
             if section_match:
                 current_section = section_match.group(1).upper()
                 continue
             parameter_match = re.match(r"^([A-Za-z_]\w*)\s*=", stripped)
-            if parameter_match and current_section:
+            if parameter_match and current_section in CALLABLE_DIRECTIONS:
                 call["parameters"].append(
                     {
                         "name": parameter_match.group(1),
                         "section": current_section,
                         "line_number": number,
                         "source_line": call_line,
+                        "value_identifier": call_parameter_value_identifier(stripped),
                     }
                 )
         calls.append(call)
     return calls
+
+
+def call_parameter_value_identifier(stripped):
+    match = re.match(r"^[A-Za-z_]\w*\s*=\s*(.+?)\s*[,\.]?\s*$", stripped)
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    value = re.sub(r"\[\]\s*$", "", value)
+    base_match = re.match(r"^<?([A-Za-z_]\w*)>?(?:[-.][A-Za-z_]\w*)?$", value)
+    return base_match.group(1) if base_match else ""
 
 
 def callable_issue(rule_id, actual, call, parameter, suggested_fix):

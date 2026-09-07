@@ -19,9 +19,16 @@ ALLOWED_OPENAI_MODELS = (
     "gpt-5.6-sol",
 )
 
+ALLOWED_CLAUDE_MODELS = (
+    "claude-haiku-4-5",
+    "claude-sonnet-5",
+    "claude-opus-5",
+)
+
 MODEL_PRESETS = {
     "economy": {
         "label": "Economy",
+        "provider": "openai",
         "models": {
             "general": "gpt-5.6-luna",
             "dependency_analysis": "gpt-5.6-luna",
@@ -31,6 +38,7 @@ MODEL_PRESETS = {
     },
     "balanced": {
         "label": "Balanced",
+        "provider": "openai",
         "models": {
             "general": "gpt-5.6-luna",
             "dependency_analysis": "gpt-5.6-luna",
@@ -40,11 +48,22 @@ MODEL_PRESETS = {
     },
     "best_quality": {
         "label": "Best Quality",
+        "provider": "openai",
         "models": {
             "general": "gpt-5.6-terra",
             "dependency_analysis": "gpt-5.6-terra",
             "abap_generation": "gpt-5.6-sol",
             "code_review": "gpt-5.6-sol",
+        },
+    },
+    "claude": {
+        "label": "Claude",
+        "provider": "anthropic",
+        "models": {
+            "general": "claude-sonnet-5",
+            "dependency_analysis": "claude-sonnet-5",
+            "abap_generation": "claude-sonnet-5",
+            "code_review": "claude-sonnet-5",
         },
     },
 }
@@ -79,7 +98,12 @@ def env_default_model_settings(config):
 
 def model_preset_payloads():
     return [
-        {"name": name, "label": preset["label"], "models": dict(preset["models"])}
+        {
+            "name": name,
+            "label": preset["label"],
+            "provider": preset.get("provider", "openai"),
+            "models": dict(preset["models"]),
+        }
         for name, preset in MODEL_PRESETS.items()
     ]
 
@@ -92,6 +116,9 @@ def model_settings_for_template(config):
             "gpt-5.6-luna": "GPT-5.6 Luna",
             "gpt-5.6-terra": "GPT-5.6 Terra",
             "gpt-5.6-sol": "GPT-5.6 Sol",
+            "claude-haiku-4-5": "Claude Haiku 4.5",
+            "claude-sonnet-5": "Claude Sonnet 5",
+            "claude-opus-5": "Claude Opus 5",
         },
         "presets": model_preset_payloads(),
         "default_preset": DEFAULT_MODEL_PRESET,
@@ -106,6 +133,12 @@ def model_settings_for_template(config):
     }
 
 
+def provider_for_preset(preset):
+    if preset in MODEL_PRESETS:
+        return MODEL_PRESETS[preset].get("provider", "openai")
+    return "openai"
+
+
 def normalize_model_settings(options=None, config=None):
     options = options or {}
     config = config or {}
@@ -114,6 +147,7 @@ def normalize_model_settings(options=None, config=None):
     if preset in MODEL_PRESETS:
         models = dict(MODEL_PRESETS[preset]["models"])
         label = MODEL_PRESETS[preset]["label"]
+        provider = provider_for_preset(preset)
     elif preset == "advanced":
         defaults = env_default_model_settings(config)
         models = {
@@ -124,12 +158,14 @@ def normalize_model_settings(options=None, config=None):
             for role in MODEL_ROLES
         }
         label = "Advanced"
+        provider = "openai"
     else:
         preset = DEFAULT_MODEL_PRESET
         models = dict(MODEL_PRESETS[preset]["models"])
         label = MODEL_PRESETS[preset]["label"]
+        provider = provider_for_preset(preset)
     return {
-        "provider": "openai",
+        "provider": provider,
         "preset": preset,
         "preset_label": label,
         "models": models,

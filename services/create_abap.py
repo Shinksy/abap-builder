@@ -55,8 +55,10 @@ from services.orchestrator import (
     extract_processing_plan,
     validate_processing_plan,
     normalize_processing_plan_with_diagnostics,
+    parse_declaration_requirements_text,
     processing_plan_for_prompt,
     processing_plan_payload,
+    required_form_global_variables,
     processing_step_subtitle,
     validate_generated_processing_completeness,
 )
@@ -542,7 +544,13 @@ def extract_processing_plan_for_review(
         processing_plan,
     )
     save_processing_plan_diagnostics(job_folder, processing_plan)
-    save_processing_plan_proposal(job_folder, processing_plan)
+    save_processing_plan_proposal(
+        job_folder,
+        processing_plan,
+        prompt_text=prompt_text,
+        source_text=source_text,
+        declaration_requirements=declaration_requirements,
+    )
     return declaration_requirements, processing_plan
 
 
@@ -588,8 +596,13 @@ def save_processing_plan_diagnostics(job_folder, diagnostics):
     )
 
 
-def save_processing_plan_proposal(job_folder, processing_plan):
-    payload = processing_plan_review_payload(processing_plan)
+def save_processing_plan_proposal(job_folder, processing_plan, prompt_text=None, source_text=None, declaration_requirements=None):
+    payload = processing_plan_review_payload(
+        processing_plan,
+        prompt_text=prompt_text,
+        source_text=source_text,
+        declaration_requirements=declaration_requirements,
+    )
     (Path(job_folder) / PROCESSING_PLAN_PROPOSAL_ARTIFACT).write_text(
         json.dumps(payload, indent=2),
         encoding="utf-8",
@@ -597,7 +610,7 @@ def save_processing_plan_proposal(job_folder, processing_plan):
     return payload
 
 
-def processing_plan_review_payload(processing_plan):
+def processing_plan_review_payload(processing_plan, prompt_text=None, source_text=None, declaration_requirements=None):
     review_candidate = processing_plan_review_candidate(processing_plan)
     plan = review_candidate.get("plan") or review_candidate.get("invalid_plan") or {"processing_steps": []}
     diagnostics = review_candidate.get("normalization_diagnostics") or {}
@@ -615,9 +628,113 @@ def processing_plan_review_payload(processing_plan):
         "validation_errors": validation_errors,
         "validation_warnings": warnings,
         "llm_request": processing_plan_llm_request_text(review_candidate),
+        "variable_contract": processing_plan_variable_contract(
+            plan,
+            prompt_text=prompt_text,
+            source_text=source_text,
+            declaration_requirements=declaration_requirements,
+        ),
         "diagnostics": processing_plan or {},
         "approved": False,
     }
+
+
+def processing_plan_variable_contract(plan, prompt_text=None, source_text=None, declaration_requirements=None):
+    declaration_text = declaration_requirements_for_prompt(declaration_requirements) if isinstance(declaration_requirements, dict) else str(declaration_requirements or "")
+    variables = []
+    for item in required_form_global_variables(
+        prompt_text,
+        source_text=source_text,
+        declaration_requirements=declaration_text,
+    ):
+        add_review_variable(
+            variables,
+            (item or {}).get("name"),
+            "Global",
+            (item or {}).get("declaration"),
+            "Generation contract",
+        )
+    requirements = parse_declaration_requirements_text(declaration_text)
+    if isinstance(requirements, dict):
+        output_names = {"type": "ty_output", "table": "t_output", "work_area": "w_output"} if requirements.get("output_structure_fields") else {}
+        if output_names:
+            add_review_variable(variables, output_names["type"], "Type", f"TYPES {output_names['type']}.", "Output structure contract")
+        for item in requirements.get("parameters") or []:
+            if isinstance(item, dict):
+                add_review_variable(variables, item.get("name"), "Selection parameter", "", "Declaration requirements")
+        for item in requirements.get("select_options") or []:
+            if isinstance(item, dict):
+                add_review_variable(variables, item.get("name"), "Select-option", "", "Declaration requirements")
+    defined = {item["name"].lower() for item in variables}
+    used = sorted(processing_plan_variable_references(plan))
+    undefined = [
+        {"name": name, "source": "Processing plan"}
+        for name in used
+        if name.lower() not in defined
+    ]
+    return {
+        "variables_to_define": sorted(variables, key=lambda item: item["name"].lower()),
+        "used_but_not_defined": undefined,
+    }
+
+
+def add_review_variable(variables, name, kind, declaration, source):
+    normalized = normalize_review_variable_name(name)
+    if not normalized:
+        return
+    for existing in variables:
+        if existing["name"].lower() == normalized.lower():
+            if declaration and not existing.get("declaration"):
+                existing["declaration"] = declaration
+            return
+    variables.append(
+        {
+            "name": normalized,
+            "kind": kind,
+            "declaration": str(declaration or ""),
+            "source": source,
+        }
+    )
+
+
+def processing_plan_variable_references(plan):
+    references = set()
+    collect_processing_plan_variable_references(plan, references)
+    return references
+
+
+def collect_processing_plan_variable_references(value, references, key=None):
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            collect_processing_plan_variable_references(item_value, references, key=item_key)
+    elif isinstance(value, list):
+        for item in value:
+            collect_processing_plan_variable_references(item, references, key=key)
+    elif key in {
+        "source",
+        "target",
+        "into",
+        "left",
+        "right",
+        "numerator",
+        "denominator",
+        "distinct",
+        "receiving_parameter",
+        "returning_parameter",
+    }:
+        name = normalize_review_variable_name(value)
+        if name and looks_like_generated_variable_name(name):
+            references.add(name)
+
+
+def normalize_review_variable_name(value):
+    text = str(value or "").strip()
+    match = re.match(r"^<?([A-Za-z_]\w*)>?(?:[-.][A-Za-z_]\w*)?$", text)
+    return match.group(1) if match else ""
+
+
+def looks_like_generated_variable_name(name):
+    return bool(re.match(r"^(?:t|w|p|s|g|l|st|fs)_[A-Za-z0-9_]+$", str(name or ""), re.IGNORECASE))
 
 
 def processing_plan_review_errors(review_candidate):
@@ -855,7 +972,8 @@ def load_processing_plan_proposal(jobs_folder, job_id):
     except json.JSONDecodeError:
         return {}
     payload = ensure_processing_plan_proposal_summary(payload)
-    return ensure_processing_plan_proposal_llm_request(payload, jobs_folder, job_id)
+    payload = ensure_processing_plan_proposal_llm_request(payload, jobs_folder, job_id)
+    return ensure_processing_plan_proposal_variable_contract(payload, jobs_folder, job_id)
 
 
 def ensure_processing_plan_proposal_summary(payload):
@@ -884,6 +1002,22 @@ def ensure_processing_plan_proposal_llm_request(payload, jobs_folder, job_id):
     payload = dict(payload)
     payload["llm_request"] = processing_plan_llm_request_text({"prompt": prompt, "source_text": source_text})
     return payload
+
+
+def ensure_processing_plan_proposal_variable_contract(payload, jobs_folder, job_id):
+    if not isinstance(payload, dict) or payload.get("variable_contract"):
+        return payload
+    context = load_processing_plan_context(jobs_folder, job_id)
+    input_path = Path(context.get("input_path") or "")
+    source_text = input_path.read_text(encoding="utf-8") if input_path.is_file() else ""
+    updated = dict(payload)
+    updated["variable_contract"] = processing_plan_variable_contract(
+        updated.get("plan"),
+        prompt_text=context.get("prompt_text"),
+        source_text=source_text,
+        declaration_requirements=context.get("declaration_requirements"),
+    )
+    return updated
 
 
 def load_approved_processing_plan(jobs_folder, job_id):
@@ -924,6 +1058,14 @@ def approve_processing_plan_for_job(jobs_folder, job_id, plan, allow_validation_
         "structured_json": json.dumps(normalized["plan"], indent=2, sort_keys=True),
         "validation_errors": validation["errors"],
         "validation_warnings": processing_plan_validation_warnings(normalized["diagnostics"]),
+        "variable_contract": processing_plan_variable_contract(
+            normalized["plan"],
+            prompt_text=prompt_text,
+            source_text=Path(context.get("input_path") or "").read_text(encoding="utf-8")
+            if Path(context.get("input_path") or "").is_file()
+            else "",
+            declaration_requirements=declaration_requirements,
+        ),
         "diagnostics": {"normalization_diagnostics": normalized["diagnostics"]},
         "approved": False,
     }
@@ -1470,6 +1612,12 @@ CALLABLE_PROSE_STOP_WORDS = {
     "FUNCTION",
 }
 
+LLM_ABAP_PREFACE_LINE_RE = re.compile(
+    r"^\s*here\s+is\s+(?:the\s+)?(?:complete\s+)?(?:corrected|generated|updated)\s+"
+    r"(?:abap\s+)?(?:source|code)\s*:?\s*$",
+    re.IGNORECASE,
+)
+
 
 def dedupe_rejections(rejections):
     seen = set()
@@ -1484,6 +1632,18 @@ def dedupe_rejections(rejections):
     return result
 
 
+def remove_llm_abap_preface_lines(text):
+    cleaned_lines = []
+    changed = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("*", '"')) and LLM_ABAP_PREFACE_LINE_RE.match(stripped):
+            changed = True
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines) if changed else text
+
+
 def clean_response(response_text):
     text = response_text.strip()
     if text.startswith("```"):
@@ -1493,6 +1653,13 @@ def clean_response(response_text):
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines).strip()
+    report_match = re.search(r"(?im)^\s*REPORT\b", text)
+    if report_match:
+        text = text[report_match.start():].strip()
+        lines = text.splitlines()
+        if lines and lines[-1].strip() == "```":
+            text = "\n".join(lines[:-1]).strip()
+    text = remove_llm_abap_preface_lines(text).strip()
     return text
 
 

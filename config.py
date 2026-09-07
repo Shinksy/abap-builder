@@ -69,6 +69,17 @@ class Config:
         str(BASE_DIR / "prompts" / "enhance_existing_abap.txt"),
     )
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+    ANTHROPIC_API_URL = os.environ.get("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages")
+    ANTHROPIC_API_VERSION = os.environ.get("ANTHROPIC_API_VERSION", "2023-06-01")
+    ANTHROPIC_MAX_TOKENS = env_int("ANTHROPIC_MAX_TOKENS", 4096)
+    SAP_BTP_TOKEN_URL = os.environ.get("SAP_BTP_TOKEN_URL")
+    SAP_BTP_INFERENCE_URL = os.environ.get("SAP_BTP_INFERENCE_URL")
+    SAP_BTP_CLIENT_ID = os.environ.get("SAP_BTP_CLIENT_ID")
+    SAP_BTP_CLIENT_SECRET = os.environ.get("SAP_BTP_CLIENT_SECRET")
+    SAP_BTP_AI_RESOURCE_GROUP = os.environ.get("SAP_BTP_AI_RESOURCE_GROUP")
+    SAP_BTP_CLAUDE_ANTHROPIC_VERSION = os.environ.get("SAP_BTP_CLAUDE_ANTHROPIC_VERSION", "bedrock-2023-05-31")
+    SAP_BTP_CLAUDE_MAX_TOKENS = env_int("SAP_BTP_CLAUDE_MAX_TOKENS", 1000)
     DEFAULT_OPENAI_MODELS = MODEL_PRESETS[DEFAULT_MODEL_PRESET]["models"]
     OPENAI_MODEL = allowed_model(os.environ.get("OPENAI_MODEL"), DEFAULT_OPENAI_MODELS["general"])
     OPENAI_ABAP_GENERATION_MODEL = allowed_model(
