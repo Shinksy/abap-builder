@@ -1467,7 +1467,189 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertIn("$0.123456", html)
             self.assertIn(f'href="/progress/{failed_job}"', html)
             self.assertIn(f'href="/result/{completed_job}"', html)
+            self.assertIn(f'action="/jobs/{failed_job}/rerun"', html)
+            self.assertIn(f'action="/jobs/{completed_job}/rerun"', html)
             self.assertIn("return confirm(", html)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_jobs_page_marks_rerun_parent_job(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            job_id = "rerun_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                job_id,
+                status="Complete",
+                stage="Complete",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at="2026-08-07T09:00:05+00:00",
+                upload_name="rerun_spec.txt",
+                generated=True,
+                metrics={"job_mode": "create_abap", "duration_seconds": 5.0},
+            )
+            (jobs_folder / job_id / "rerun.json").write_text(
+                json.dumps({"source_job_id": "original_job_123456"}),
+                encoding="utf-8",
+            )
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            response = app.test_client().get("/jobs")
+
+            self.assertEqual(response.status_code, 200)
+            html = response.data.decode("utf-8")
+            self.assertIn("Re-run of original", html)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_jobs_page_backfills_rerun_cost_from_partial_artifacts(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            job_id = "failed_rerun_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                job_id,
+                status="Error",
+                stage="Running SAP syntax check",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at="2026-08-07T09:00:05+00:00",
+                upload_name="rerun_spec.txt",
+                generated=True,
+                metrics=None,
+            )
+            job_folder = jobs_folder / job_id
+            (job_folder / "rerun.json").write_text(
+                json.dumps({"source_job_id": "original_job_123456"}),
+                encoding="utf-8",
+            )
+            (job_folder / "processing_plan_diagnostics.json").write_text(
+                json.dumps(
+                    {
+                        "model": "gpt-5.6-terra",
+                        "usage": {"input_tokens": 2000, "output_tokens": 400, "total_tokens": 2400},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            response = app.test_client().get("/jobs")
+
+            self.assertEqual(response.status_code, 200)
+            html = response.data.decode("utf-8")
+            self.assertIn("Re-run of original", html)
+            self.assertIn("$0.011000", html)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_jobs_rerun_creates_new_job_from_accepted_specification(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            source_job_id = "source_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                source_job_id,
+                status="Complete",
+                stage="Complete",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at="2026-08-07T09:00:05+00:00",
+                upload_name="original_spec.txt",
+                generated=True,
+                metrics={"job_mode": "create_abap", "duration_seconds": 5.0},
+                options={
+                    "run_sap_syntax_check": True,
+                    "sap_syntax_check_attempts": 3,
+                    "model_settings": {"preset": "economy", "preset_label": "Economy", "models": {}},
+                },
+            )
+            accepted_path = jobs_folder / source_job_id / ACCEPTED_FUNCTIONAL_SPEC_ARTIFACT
+            accepted_path.write_text("Accepted functional specification.", encoding="utf-8")
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+            client = app.test_client()
+
+            with patch("app.start_create_abap_job") as start_job:
+                response = client.post(f"/jobs/{source_job_id}/rerun", follow_redirects=False)
+
+            self.assertEqual(response.status_code, 302)
+            new_job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            self.assertNotEqual(new_job_id, source_job_id)
+            start_job.assert_called_once()
+            rerun_input_path = start_job.call_args.kwargs["input_path"]
+            self.assertEqual(Path(rerun_input_path).read_text(encoding="utf-8"), "Accepted functional specification.")
+            rerun_metadata = json.loads((jobs_folder / new_job_id / "rerun.json").read_text(encoding="utf-8"))
+            self.assertEqual(rerun_metadata["source_job_id"], source_job_id)
+            options = json.loads((jobs_folder / new_job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertTrue(options["run_sap_syntax_check"])
+            self.assertEqual(options["sap_syntax_check_attempts"], 3)
+            self.assertEqual(options["rerun_of"], source_job_id)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_jobs_rerun_creates_new_enhancement_job_from_saved_inputs(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            source_job_id = "enhance_source_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                source_job_id,
+                status="Complete",
+                stage="Complete",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at="2026-08-07T09:00:05+00:00",
+                upload_name="placeholder.txt",
+                generated=True,
+                metrics={"job_mode": "enhance_existing_abap", "duration_seconds": 5.0},
+            )
+            (jobs_folder / source_job_id / "original_existing.abap").write_text("REPORT zold.", encoding="utf-8")
+            (jobs_folder / source_job_id / "enhancement_specification.txt").write_text("Add a status field.", encoding="utf-8")
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            with patch("app.start_enhance_abap_job") as start_job:
+                response = app.test_client().post(f"/jobs/{source_job_id}/rerun", follow_redirects=False)
+
+            self.assertEqual(response.status_code, 302)
+            new_job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            start_job.assert_called_once()
+            self.assertEqual(Path(start_job.call_args.kwargs["source_path"]).read_text(encoding="utf-8"), "REPORT zold.")
+            self.assertEqual(
+                Path(start_job.call_args.kwargs["specification_path"]).read_text(encoding="utf-8"),
+                "Add a status field.",
+            )
+            rerun_metadata = json.loads((jobs_folder / new_job_id / "rerun.json").read_text(encoding="utf-8"))
+            self.assertEqual(rerun_metadata["source_job_id"], source_job_id)
+            self.assertEqual(rerun_metadata["mode"], "enhance_existing_abap")
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -3153,6 +3335,60 @@ class CreateAbapFlowTest(unittest.TestCase):
         )
         self.assertEqual([], dependency_analysis["unresolved"])
 
+    def test_standard_cats_bapi_prose_resolves_to_callable_identity(self):
+        source_text = "\n".join(
+            [
+                "Standard SAP CATS BAPI",
+                "Technical function name, interface parameters, and returned structures: Not specified in the source.",
+                "Use the existing standard SAP CATS BAPI metadata available to the ABAP Builder.",
+            ]
+        )
+        dependency_analysis = {
+            "ddic_objects": [],
+            "callables": [],
+            "unresolved": ["Standard SAP CATS BAPI for inserting absence records"],
+        }
+
+        merge_specification_callable_dependencies(dependency_analysis, source_text)
+
+        self.assertEqual(["BAPI_CATIMESHEETMGR_INSERT"], dependency_analysis["callables"])
+        self.assertEqual(["BAPI_CATIMESHEETMGR_INSERT"], dependency_analysis["specification_callables"])
+        self.assertEqual(["BAPI_CATIMESHEETMGR_INSERT"], dependency_analysis["specification_callables_added"])
+        self.assertEqual(["Standard SAP CATS BAPI for inserting absence records"], dependency_analysis["unresolved"])
+
+    def test_generation_refusal_marks_job_as_error(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            uploads_folder = temp_path / "uploads"
+            jobs_folder = temp_path / "jobs"
+            prompt_path = temp_path / "create_abap.txt"
+            input_path = uploads_folder / "job" / "request.txt"
+            input_path.parent.mkdir(parents=True)
+            input_path.write_text("Create a CATS report.", encoding="utf-8")
+            prompt_path.write_text("Generate ABAP.", encoding="utf-8")
+            job_id = create_job(jobs_folder)
+
+            with patch(
+                "services.create_abap.generate_abap_with_orchestrator",
+                return_value={
+                    "text": (
+                        "Cannot generate a compliant compilable report because required SAP metadata "
+                        "is not supplied in the authoritative metadata catalogue."
+                    ),
+                    "model": "test-model",
+                    "usage": None,
+                },
+            ):
+                run_create_abap(job_id, input_path, jobs_folder, prompt_path)
+
+            progress = get_progress(jobs_folder, job_id)
+            self.assertEqual("Error", progress["status"])
+            self.assertIn("ABAP generation returned refusal text instead of source code", progress["message"])
+            self.assertFalse((jobs_folder / job_id / "generated.abap").exists())
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def test_noop_provider_skips_callable_validation_without_failure(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
         temp_path.mkdir()
@@ -3631,6 +3867,28 @@ class CreateAbapFlowTest(unittest.TestCase):
         }
         self.assertIn(("ddic_field", "PA0000-PERNR", "PA0000", "PERNR"), dependency_keys)
         self.assertNotIn("ZMD_MPE0001", dependency_analysis["unresolved"])
+
+    def test_processing_rule_prose_actions_do_not_become_ddic_tables(self):
+        dependency_analysis = {
+            "ddic_objects": [{"name": "CATSDB", "structure": "st_catsdb", "table": "t_catsdb"}],
+            "callables": [],
+            "unresolved": [],
+        }
+        source_text = (
+            "# Processing Rules\n\n"
+            "Insert valid new records using the standard SAP CATS BAPI.\n"
+            "Do not insert another record when CATSDB already has the same PERNR and DATE.\n"
+            "In Update Mode, process only eligible records.\n"
+            "Set STATUS = VALIDATION ERROR when validation fails.\n"
+            "Read CATSDB to determine whether a record already exists.\n"
+        )
+
+        merge_processing_rule_ddic_dependencies(dependency_analysis, source_text)
+
+        names = [item["name"] for item in dependency_analysis["ddic_objects"]]
+        self.assertEqual(["CATSDB"], names)
+        self.assertEqual([], dependency_analysis["processing_rule_ddic_objects"])
+        self.assertEqual([], dependency_analysis["processing_rule_ddic_objects_added"])
 
     def test_generation_contract_derives_identifiers_from_dependencies_and_spec(self):
         contract = build_generation_contract(

@@ -43,6 +43,7 @@ from services.orchestrator import (
     aggregate_usage,
     declaration_requirements_with_processing_plan_variables,
     declaration_requirements_for_prompt,
+    ensure_callable_parameter_declarations,
     ensure_database_read_declarations,
     ensure_standard_report_header,
     ensure_required_tables_declarations,
@@ -322,6 +323,8 @@ def run_create_abap(
         response_text, model_name, usage = normalize_llm_result(llm_result)
         usage = usage_for_final_metrics(llm_result, usage, prior_usage=prior_usage)
         generated_abap = clean_response(response_text)
+        if is_generation_refusal(generated_abap):
+            raise RuntimeError(generation_refusal_error(generated_abap))
         generated_ddic = classify_post_generation_ddic_candidates(generated_abap)
         record_post_generation_ddic_diagnostics(dependency_analysis, generated_ddic)
         generated_callables = callable_identities_from_source(generated_abap, parse_callable_invocations)
@@ -361,6 +364,8 @@ def run_create_abap(
             declaration_requirements=declaration_requirements_for_prompt(llm_result.get("declaration_requirements")),
             ddic_metadata=ddic_metadata,
         )
+        final_abap = group_declaration_statements_by_prefix(final_abap)
+        final_abap = ensure_callable_parameter_declarations(final_abap, callable_metadata)
         final_abap = group_declaration_statements_by_prefix(final_abap)
         final_abap = ensure_standard_report_header(final_abap)
         for stage in fixer_diagnostic_stages(fix_result):
@@ -446,6 +451,8 @@ def run_create_abap(
             declaration_requirements=declaration_requirements_for_prompt(llm_result.get("declaration_requirements")),
             ddic_metadata=ddic_metadata,
         )
+        final_abap = group_declaration_statements_by_prefix(final_abap)
+        final_abap = ensure_callable_parameter_declarations(final_abap, callable_metadata)
         final_abap = group_declaration_statements_by_prefix(final_abap)
         final_abap = ensure_standard_report_header(final_abap)
         add_section_duration(section_durations, "sap_syntax_check", time.monotonic() - sap_syntax_started_at)
@@ -1554,6 +1561,8 @@ def merge_specification_callable_dependencies(dependency_analysis, source_text):
 def extract_specification_callable_identities(source_text):
     text = str(source_text or "")
     identities = []
+    for identity in known_standard_callable_identities(text):
+        append_callable_identity(identities, identity)
     for match in re.finditer(
         r"\b(?:function\s+module|call\s+function|function)\s+['`\"]?([A-Za-z][A-Za-z0-9_]{1,29})['`\"]?",
         text,
@@ -1572,6 +1581,17 @@ def extract_specification_callable_identities(source_text):
         if class_name:
             append_callable_identity(identities, f"{class_name}=>{method}")
     return dedupe_strings(identities)
+
+
+def known_standard_callable_identities(source_text):
+    text = str(source_text or "")
+    upper_text = text.upper()
+    identities = []
+    if "CATS" in upper_text and "BAPI" in upper_text:
+        identities.append("BAPI_CATIMESHEETMGR_INSERT")
+    if re.search(r"\bALV\b", upper_text):
+        identities.append("REUSE_ALV_GRID_DISPLAY")
+    return identities
 
 
 def declared_reference_object_classes(source_text):
@@ -1605,6 +1625,7 @@ CALLABLE_PROSE_STOP_WORDS = {
     "A",
     "AN",
     "AND",
+    "NAME",
     "OR",
     "THE",
     "METHOD",
@@ -1661,6 +1682,25 @@ def clean_response(response_text):
             text = "\n".join(lines[:-1]).strip()
     text = remove_llm_abap_preface_lines(text).strip()
     return text
+
+
+GENERATION_REFUSAL_PATTERNS = (
+    re.compile(r"\bcannot\s+generate\s+(?:a\s+)?(?:compliant\s+)?(?:compilable\s+)?report\b", re.IGNORECASE),
+    re.compile(r"\bI\s+(?:can(?:not|'t)|am\s+unable\s+to)\s+generate\b", re.IGNORECASE),
+    re.compile(r"\brequired\s+.+?\bmetadata\b.+?\bnot\s+supplied\b", re.IGNORECASE | re.DOTALL),
+)
+
+
+def is_generation_refusal(source_text):
+    text = str(source_text or "").strip()
+    return bool(text and any(pattern.search(text) for pattern in GENERATION_REFUSAL_PATTERNS))
+
+
+def generation_refusal_error(source_text):
+    first_line = next((line.strip() for line in str(source_text or "").splitlines() if line.strip()), "")
+    if first_line:
+        return f"ABAP generation returned refusal text instead of source code: {first_line}"
+    return "ABAP generation returned refusal text instead of source code."
 
 
 def normalize_llm_result(llm_result):

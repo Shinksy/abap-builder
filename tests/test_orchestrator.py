@@ -23,6 +23,7 @@ from services.orchestrator import (
     generate_chunked_abap_program,
     processing_plan_response_format,
     discover_processing_rule_dependencies,
+    ensure_callable_parameter_declarations,
     ensure_database_read_declarations,
     ensure_form_chunk_uses_declared_globals,
     ensure_required_global_declarations,
@@ -936,6 +937,72 @@ class OrchestratorTest(unittest.TestCase):
             "callable_parameter",
         )
 
+    def test_callable_table_parameter_declarations_use_verified_signature_type(self):
+        source = "\n".join(
+            [
+                "REPORT ztest.",
+                "TYPES: BEGIN OF ty_bapi,",
+                "         type TYPE bapiret2-type,",
+                "         message TYPE bapiret2-message,",
+                "       END OF ty_bapi.",
+                "DATA t_bapi TYPE STANDARD TABLE OF ty_bapi.",
+                "DATA st_bapi TYPE ty_bapi.",
+                "START-OF-SELECTION.",
+                "  CALL FUNCTION 'BAPI_CATIMESHEETMGR_INSERT'",
+                "    TABLES",
+                "      return = t_bapi.",
+                "  LOOP AT t_bapi INTO st_bapi.",
+                "  ENDLOOP.",
+            ]
+        )
+        callable_metadata = {
+            "callable_signatures": {
+                "BAPI_CATIMESHEETMGR_INSERT": {
+                    "parameters": {
+                        "RETURN": {
+                            "direction": "TABLES",
+                            "abap_type": "BAPIRET2",
+                            "required": True,
+                        }
+                    }
+                }
+            }
+        }
+
+        fixed = ensure_callable_parameter_declarations(source, callable_metadata)
+
+        self.assertIn("DATA t_bapi TYPE STANDARD TABLE OF BAPIRET2.", fixed)
+        self.assertIn("DATA st_bapi TYPE BAPIRET2.", fixed)
+        self.assertNotIn("ty_bapi", fixed.lower())
+
+    def test_callable_method_returning_declaration_uses_verified_signature_type(self):
+        source = "\n".join(
+            [
+                "REPORT ztest.",
+                "DATA lo_sender TYPE REF TO object.",
+                "START-OF-SELECTION.",
+                "  CALL METHOD zcl_mailer=>create",
+                "    RECEIVING",
+                "      ro_sender = lo_sender.",
+            ]
+        )
+        callable_metadata = {
+            "callable_signatures": {
+                "ZCL_MAILER=>CREATE": {
+                    "parameters": {},
+                    "returning": {
+                        "name": "RO_SENDER",
+                        "direction": "RETURNING",
+                        "abap_type": "REF TO ZCL_MAILER",
+                    },
+                }
+            }
+        }
+
+        fixed = ensure_callable_parameter_declarations(source, callable_metadata)
+
+        self.assertIn("DATA lo_sender TYPE REF TO ZCL_MAILER.", fixed)
+
     def test_all_chunk_prompts_are_loaded_from_prompt_files(self):
         self.assertEqual(
             set(CHUNK_PROMPT_PATHS),
@@ -1426,7 +1493,8 @@ class OrchestratorTest(unittest.TestCase):
         self.assertNotIn("Database access rules", prompt)
         self.assertNotIn("Processing rules", prompt)
         self.assertNotIn("Output rules", prompt)
-        self.assertNotIn("SAP callable signature catalogue", prompt)
+        self.assertIn("SAP callable signature catalogue:", prompt)
+        self.assertIn("- Z_TEST_FUNCTION: MESSAGE [IMPORTING CHAR]", prompt)
         self.assertNotIn("Full-program final review", prompt)
         self.assertNotIn("START-OF-SELECTION", prompt)
         self.assertIn("Exact internal-table names: t_edidc", prompt)
@@ -1911,6 +1979,27 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(second_pass.count("*Internal Tables"), 1)
         self.assertEqual(second_pass.count("*Structures"), 1)
         self.assertEqual(second_pass.count("*Variables"), 1)
+
+    def test_declaration_prefix_grouping_collapses_excessive_blank_lines_before_parameters(self):
+        result = group_declaration_statements_by_prefix(
+            "\n".join(
+                [
+                    "REPORT zcats_absence_upload.",
+                    "DATA w_filename TYPE string.",
+                    "DATA w_csv_line TYPE string.",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "PARAMETERS: p_local RADIOBUTTON GROUP src1,",
+                    "            p_al11 RADIOBUTTON GROUP src1.",
+                ]
+            )
+        )
+
+        self.assertNotIn("\n\n\n", result)
+        self.assertIn("DATA w_csv_line TYPE string.\n\nPARAMETERS:", result)
 
     def test_declaration_prefix_grouping_preserves_chained_output_and_alv_globals(self):
         result = group_declaration_statements_by_prefix(
@@ -4026,12 +4115,51 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("missing processing_steps", prompts[1])
         self.assertEqual({"processing_steps": []}, result["plan"])
 
+    def test_processing_plan_extraction_retries_empty_steps_for_required_processing(self):
+        prompts = []
+        responses = [
+            json.dumps({"processing_steps": []}),
+            json.dumps({"processing_steps": [{"operation": "CLEAR", "target": "w_output"}]}),
+        ]
+
+        def generator(prompt_text, source_text):
+            prompts.append(prompt_text)
+            return {"text": responses[len(prompts) - 1], "model": "test-model", "usage": None}
+
+        result = extract_processing_plan(
+            "1. Read all input rows.\n2. Validate each row before processing.",
+            generator,
+            metadata_context="Shared generation contract:\nExact callable identities: none",
+            declaration_requirements=json.dumps(
+                {"global_variables": [{"name": "w_output", "declaration": "DATA w_output TYPE ty_output."}]}
+            ),
+        )
+
+        self.assertEqual(2, len(prompts))
+        self.assertIn("empty processing_steps", prompts[1])
+        self.assertEqual("CLEAR", result["plan"]["processing_steps"][0]["operation"])
+
+    def test_processing_plan_extraction_rejects_repeated_empty_steps_for_required_processing(self):
+        def generator(_prompt_text, _source_text):
+            return {"text": json.dumps({"processing_steps": []}), "model": "test-model", "usage": None}
+
+        with self.assertRaises(ProcessingPlanValidationError) as raised:
+            extract_processing_plan(
+                "1. Read all input rows.\n2. Validate each row before processing.",
+                generator,
+                metadata_context="Shared generation contract:\nExact callable identities: none",
+                declaration_requirements=json.dumps({"output_structure_fields": []}),
+            )
+
+        errors = "\n".join(raised.exception.diagnostics["retryable_validation_errors"])
+        self.assertIn("empty processing_steps for source text that contains required business processing", errors)
+
     def test_processing_plan_uses_only_processing_rules_section_as_source_text(self):
         captured_sources = []
 
         def generator(prompt_text, source_text):
             captured_sources.append(source_text)
-            return {"text": json.dumps({"processing_steps": []}), "model": "test-model", "usage": None}
+            return {"text": json.dumps({"processing_steps": [{"operation": "CLEAR", "target": "w_output"}]}), "model": "test-model", "usage": None}
 
         source_text = (
             "# Functional Specification\n"
@@ -4044,7 +4172,13 @@ class OrchestratorTest(unittest.TestCase):
             "Display columns that should not be sent.\n"
         )
 
-        result = extract_processing_plan(source_text, generator)
+        result = extract_processing_plan(
+            source_text,
+            generator,
+            declaration_requirements=json.dumps(
+                {"global_variables": [{"name": "w_output", "declaration": "DATA w_output TYPE ty_output."}]}
+            ),
+        )
 
         expected = "Loop over selected rows.\n### Nested Detail\nMap the status text."
         self.assertEqual([expected], captured_sources)

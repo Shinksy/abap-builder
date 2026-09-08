@@ -420,7 +420,7 @@ summary {
 }
 
 .jobs-actions-col {
-  width: 10%;
+  width: 13%;
 }
 
 .jobs-table th,
@@ -437,6 +437,12 @@ summary {
 .jobs-table td:nth-child(2) {
   white-space: nowrap;
   overflow-wrap: anywhere;
+}
+
+.job-rerun-note {
+  color: #52606d;
+  font-size: 12px;
+  margin-top: 3px;
 }
 
 .jobs-table th:nth-child(8),

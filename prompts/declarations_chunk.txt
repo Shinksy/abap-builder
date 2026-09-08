@@ -24,5 +24,8 @@ For every entry in tables_declarations, generate one TABLES declaration for that
 Relevant SAP DDIC metadata:
 {{DDIC_METADATA}}
 
+Relevant SAP callable metadata:
+{{CALLABLE_METADATA}}
+
 Declaration chunk contract:
 {{CHUNK_CONTRACT}}

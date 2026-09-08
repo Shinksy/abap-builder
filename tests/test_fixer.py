@@ -547,6 +547,39 @@ class FixerTest(unittest.TestCase):
         self.assertIn("DATA item_row TYPE mara.", fixed)
         self.assertIn("READ TABLE item_table INTO item_row INDEX 1.", fixed)
 
+    def test_incomplete_standard_table_declaration_uses_matching_work_area_type(self):
+        source = "\n".join(
+            [
+                "DATA st_record TYPE string.",
+                "DATA t_record TYPE STANDARD TABLE.",
+                "LOOP AT t_record INTO st_record.",
+                "ENDLOOP.",
+            ]
+        )
+
+        result = auto_fix_abap(source)
+
+        self.assertIn("DATA t_record TYPE STANDARD TABLE OF string.", result["fixed_source"])
+        self.assertNotIn("DATA t_record TYPE STANDARD TABLE.", result["fixed_source"])
+        self.assertEqual(result["final_issues"], [])
+
+    def test_incomplete_standard_table_declaration_infers_row_type_from_append_usage(self):
+        source = "\n".join(
+            [
+                "DATA t_text TYPE STANDARD TABLE.",
+                "DATA w_line TYPE string.",
+                "APPEND w_line TO t_text.",
+                "LOOP AT t_text INTO w_line.",
+                "ENDLOOP.",
+            ]
+        )
+
+        result = auto_fix_abap(source)
+
+        self.assertIn("DATA t_text TYPE STANDARD TABLE OF string.", result["fixed_source"])
+        self.assertNotIn("DATA t_text TYPE STANDARD TABLE.", result["fixed_source"])
+        self.assertEqual(result["final_issues"], [])
+
     def test_direct_table_declaration_infers_loop_row_type(self):
         source = "\n".join(
             [

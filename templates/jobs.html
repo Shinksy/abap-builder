@@ -48,7 +48,12 @@
                   <tr>
                     <td>{{ job.started_at_display }}</td>
                     <td>{{ job.specification_name }}</td>
-                    <td>{{ job.job_mode_display }}</td>
+                    <td>
+                      <div>{{ job.job_mode_display }}</div>
+                      {% if job.rerun_of %}
+                        <div class="job-rerun-note">Re-run of {{ job.rerun_of_display }}</div>
+                      {% endif %}
+                    </td>
                     <td>{{ job.model_preset_label }}</td>
                     <td>{{ job.status }}</td>
                     <td>{{ job.duration_display }}</td>
@@ -60,6 +65,9 @@
                         {% else %}
                           <a class="button-link compact-link" href="{{ url_for('progress', job_id=job.job_id) }}">View</a>
                         {% endif %}
+                        <form action="{{ url_for('rerun_job_route', job_id=job.job_id) }}" method="post">
+                          <button class="secondary-button compact-button" type="submit">Re-run</button>
+                        </form>
                         <form action="{{ url_for('delete_job_route', job_id=job.job_id) }}" method="post" onsubmit="return confirm('Delete job {{ job.job_id }} and its uploaded/generated files?');">
                           <button class="danger-button compact-button" type="submit">Delete</button>
                         </form>

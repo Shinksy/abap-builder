@@ -499,17 +499,34 @@ def extract_typed_qualified_field_references(text):
 def extract_typed_sql_tables(text):
     dependencies = []
     patterns = [
-        rf"\bSELECT\b[\s\S]{{0,500}}?\bFROM\s+({OBJECT_PATTERN})\b",
-        rf"\bJOIN\s+({OBJECT_PATTERN})\b",
-        rf"\bUPDATE\s+({OBJECT_PATTERN})\b",
-        rf"\bMODIFY\s+({OBJECT_PATTERN})\b",
-        rf"\bDELETE\s+FROM\s+({OBJECT_PATTERN})\b",
-        rf"\bINSERT\s+(?:INTO\s+)?(?:TABLE\s+)?({OBJECT_PATTERN})\b",
+        (rf"(?im)^\s*SELECT\b[\s\S]{{0,500}}?\bFROM\s+({OBJECT_PATTERN})\b", False),
+        (rf"\bJOIN\s+({OBJECT_PATTERN})\b", False),
+        (rf"(?im)^\s*UPDATE\s+({OBJECT_PATTERN})\b", True),
+        (rf"(?im)^\s*MODIFY\s+({OBJECT_PATTERN})\b", True),
+        (rf"(?im)^\s*DELETE\s+FROM\s+({OBJECT_PATTERN})\b", True),
+        (rf"(?im)^\s*INSERT\s+(?:INTO\s+)?(?:TABLE\s+)?({OBJECT_PATTERN})\b", True),
     ]
-    for pattern in patterns:
+    for pattern, require_abap_clause in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE):
+            if require_abap_clause and not has_abap_sql_target_context(text, match.end(1)):
+                continue
             add_typed_object_dependency(dependencies, "ddic_table", match.group(1), match.start(1), "sql_table")
     return dependencies
+
+
+def has_abap_sql_target_context(text, position):
+    following = str(text or "")[position:]
+    if not following.strip():
+        return True
+    if re.match(r"\s*(?:[.,]|$)", following):
+        return True
+    return bool(
+        re.match(
+            r"\s+(?:ACCEPTING|BYPASSING|CLIENT|CONNECTION|FROM|INTO|SET|TRANSPORTING|USING|VALUE|VALUES|VERSION|WHERE)\b",
+            following,
+            re.IGNORECASE,
+        )
+    )
 
 
 def extract_typed_tables_statements(text):
@@ -619,15 +636,18 @@ def extract_qualified_reference_tables(text):
 def extract_sql_tables(text):
     names = []
     patterns = [
-        rf"\bSELECT\b[\s\S]{{0,500}}?\bFROM\s+({OBJECT_PATTERN})\b",
-        rf"\bJOIN\s+({OBJECT_PATTERN})\b",
-        rf"\bUPDATE\s+({OBJECT_PATTERN})\b",
-        rf"\bMODIFY\s+({OBJECT_PATTERN})\b",
-        rf"\bDELETE\s+FROM\s+({OBJECT_PATTERN})\b",
-        rf"\bINSERT\s+(?:INTO\s+)?(?:TABLE\s+)?({OBJECT_PATTERN})\b",
+        (rf"(?im)^\s*SELECT\b[\s\S]{{0,500}}?\bFROM\s+({OBJECT_PATTERN})\b", False),
+        (rf"\bJOIN\s+({OBJECT_PATTERN})\b", False),
+        (rf"(?im)^\s*UPDATE\s+({OBJECT_PATTERN})\b", True),
+        (rf"(?im)^\s*MODIFY\s+({OBJECT_PATTERN})\b", True),
+        (rf"(?im)^\s*DELETE\s+FROM\s+({OBJECT_PATTERN})\b", True),
+        (rf"(?im)^\s*INSERT\s+(?:INTO\s+)?(?:TABLE\s+)?({OBJECT_PATTERN})\b", True),
     ]
-    for pattern in patterns:
-        names.extend(extract_first_group(text, pattern))
+    for pattern, require_abap_clause in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE):
+            if require_abap_clause and not has_abap_sql_target_context(text, match.end(1)):
+                continue
+            names.append(match.group(1).upper())
     return names
 
 

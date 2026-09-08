@@ -550,9 +550,15 @@ def tables_section_runs_to_call_end(call_lines, section_index):
 def fix_table_declarations(source):
     fixed_lines = []
     fixes = []
+    source_lines = source.splitlines()
+    declared_types = collect_declared_types(source_lines)
 
     generic_table = re.compile(
         r"\bTYPE\s+TABLE\s+OF\b",
+        re.IGNORECASE,
+    )
+    incomplete_data_table = re.compile(
+        r"^(\s*DATA\s+([A-Za-z_]\w*)\s+TYPE\s+(?:(?:STANDARD|SORTED|HASHED)\s+)?TABLE)\s*\.\s*$",
         re.IGNORECASE,
     )
     empty_key = re.compile(
@@ -560,10 +566,17 @@ def fix_table_declarations(source):
         re.IGNORECASE,
     )
 
-    for line_number, line in enumerate(source.splitlines(), start=1):
+    for line_number, line in enumerate(source_lines, start=1):
         code, comment = split_code_and_comment(line)
         rewritten = code
         changes = []
+
+        incomplete_match = incomplete_data_table.match(rewritten)
+        if incomplete_match:
+            row_type = infer_incomplete_table_row_type(incomplete_match.group(2), declared_types, source_lines)
+            if row_type:
+                rewritten = f"{incomplete_match.group(1)} OF {row_type}."
+                changes.append(f"added missing row type {row_type}")
 
         normalized = generic_table.sub("TYPE STANDARD TABLE OF", rewritten)
         if normalized != rewritten:
@@ -590,6 +603,49 @@ def fix_table_declarations(source):
             )
 
     return "\n".join(fixed_lines), fixes
+
+
+def infer_incomplete_table_row_type(table_name, declared_types, lines=None):
+    table = str(table_name or "").lower()
+    candidates = []
+    if table.startswith("t_") and len(table) > 2:
+        suffix = table[2:]
+        candidates.extend([f"st_{suffix}", f"w_{suffix}"])
+        if suffix.endswith("s") and len(suffix) > 1:
+            candidates.extend([f"st_{suffix[:-1]}", f"w_{suffix[:-1]}"])
+    candidates.extend(infer_table_row_candidates_from_usage(table, lines or []))
+    for candidate in candidates:
+        metadata = declared_types.get(candidate)
+        row_type = metadata.get("type") if isinstance(metadata, dict) else None
+        if row_type and not metadata.get("row_type"):
+            return row_type
+    return None
+
+
+def infer_table_row_candidates_from_usage(table_name, lines):
+    if not table_name:
+        return []
+    table_ref = re.escape(table_name)
+    patterns = (
+        re.compile(rf"\bLOOP\s+AT\s+{table_ref}\b.*\bINTO\s+([A-Za-z_]\w*)\b", re.IGNORECASE),
+        re.compile(rf"\bREAD\s+TABLE\s+{table_ref}\b.*\bINTO\s+([A-Za-z_]\w*)\b", re.IGNORECASE),
+        re.compile(rf"\bAPPEND\s+([A-Za-z_]\w*)\s+TO\s+{table_ref}\b", re.IGNORECASE),
+        re.compile(rf"\bINSERT\s+([A-Za-z_]\w*)\s+INTO\s+(?:TABLE\s+)?{table_ref}\b", re.IGNORECASE),
+    )
+    candidates = []
+    seen = set()
+    for line in lines:
+        code = split_code_and_comment(line)[0]
+        for pattern in patterns:
+            match = pattern.search(code)
+            if not match:
+                continue
+            candidate = match.group(1).lower()
+            if candidate not in seen:
+                candidates.append(candidate)
+                seen.add(candidate)
+    return candidates
+
 
 def fix_simple_concatenation(source):
     fixed = []

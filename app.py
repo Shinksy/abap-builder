@@ -8,7 +8,7 @@ from config import Config
 from services.callable_signature_provider import get_configured_callable_signature_provider
 from services.ddic_metadata_provider import get_configured_ddic_metadata_provider
 from services.job_options import load_job_options, save_job_options
-from services.jobs import delete_job, list_jobs
+from services.jobs import delete_job, list_jobs, prepare_rerun_job
 from services.llm import generate_code_review_repair
 from services.model_settings import model_options_from_form, model_settings_for_template, normalize_model_settings
 from services.metadata_cache_upload import (
@@ -106,6 +106,38 @@ def create_app(config_overrides=None):
         if not delete_job(jobs_folder, upload_folder, job_id):
             abort(404)
         return redirect(url_for("jobs"))
+
+    @app.post("/jobs/<job_id>/rerun")
+    def rerun_job_route(job_id):
+        new_job_id = create_job(jobs_folder)
+        rerun_job = prepare_rerun_job(jobs_folder, upload_folder, job_id, new_job_id)
+        if not rerun_job:
+            delete_job(jobs_folder, upload_folder, new_job_id)
+            abort(404)
+        if rerun_job["mode"] == "enhance_existing_abap":
+            start_enhance_abap_job(
+                job_id=new_job_id,
+                source_path=rerun_job["source_path"],
+                specification_path=rerun_job["specification_path"],
+                jobs_folder=jobs_folder,
+                prompt_path=Path(app.config["ENHANCE_ABAP_PROMPT"]),
+                signature_provider=app.config.get("CALLABLE_SIGNATURE_PROVIDER"),
+                ddic_metadata_provider=app.config.get("DDIC_METADATA_PROVIDER"),
+                sap_syntax_checker=app.config.get("SAP_SYNTAX_CHECKER"),
+                code_review_repairer=app.config.get("CODE_REVIEW_REPAIRER"),
+            )
+        else:
+            start_create_abap_job(
+                job_id=new_job_id,
+                input_path=rerun_job["input_path"],
+                jobs_folder=jobs_folder,
+                prompt_path=Path(app.config["CREATE_ABAP_PROMPT"]),
+                signature_provider=app.config.get("CALLABLE_SIGNATURE_PROVIDER"),
+                ddic_metadata_provider=app.config.get("DDIC_METADATA_PROVIDER"),
+                sap_syntax_checker=app.config.get("SAP_SYNTAX_CHECKER"),
+                code_review_repairer=app.config.get("CODE_REVIEW_REPAIRER"),
+            )
+        return redirect(url_for("progress", job_id=new_job_id))
 
     @app.post("/metadata-cache/upload")
     def upload_metadata_cache_file():

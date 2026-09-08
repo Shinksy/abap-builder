@@ -18,6 +18,7 @@ LINE_RULES = (
     ("INLINE_DATA_CATCH", r"\bCATCH\b.*\bINTO\s+@?DATA\s*\(", "Inline DATA declaration in CATCH is not allowed.", "Declare the exception reference before CATCH."),
     ("INLINE_DATA_SELECT", r"\bSELECT\b.*\bINTO\s+@?DATA\s*\(", "Inline DATA declaration in SELECT is not allowed.", "Declare the target before SELECT."),
     ("INVALID_DATA_DECLARATION", r"@?DATA\s*\(\s*[A-Za-z_]\w*\s*\)\s+TYPE\b", "Parenthesised DATA declaration is not valid classical ABAP.", "Use DATA name TYPE type."),
+    ("INCOMPLETE_DATA_TABLE_DECLARATION", r"\bDATA\s+[A-Za-z_]\w*\s+TYPE\s+(?:(?:STANDARD|SORTED|HASHED)\s+)?TABLE\s*\.", "DATA table declaration is missing its row type.", "Declare the table as TYPE STANDARD TABLE OF <row_type>."),
     ("INLINE_DATA_CALL_PARAMETER", r"\b[A-Za-z_]\w*\s*=\s*@?DATA\s*\(", "Inline DATA declaration in a call parameter is not allowed.", "Declare the call parameter target before the call."),
     ("INLINE_DATA", r"@?DATA\s*\(", "Inline DATA declaration is not allowed.", "Declare the variable separately before it is used."),
     ("INLINE_FINAL", r"\bFINAL\s*\(", "Inline FINAL declaration is not allowed.", "Use a standard DATA declaration."),
@@ -404,9 +405,9 @@ def parse_callable_invocations(lines):
             call["end_index"] = number - 1
             call["lines"].append((number, call_line))
             stripped = split_code_and_comment(call_line)[0].strip()
-            section_match = re.match(r"^(EXPORTING|IMPORTING|CHANGING|TABLES|RETURNING|EXCEPTIONS)\b", stripped, re.IGNORECASE)
+            section_match = re.match(r"^(EXPORTING|IMPORTING|CHANGING|TABLES|RETURNING|RECEIVING|EXCEPTIONS)\b", stripped, re.IGNORECASE)
             if section_match:
-                current_section = section_match.group(1).upper()
+                current_section = "RETURNING" if section_match.group(1).upper() == "RECEIVING" else section_match.group(1).upper()
                 continue
             parameter_match = re.match(r"^([A-Za-z_]\w*)\s*=", stripped)
             if parameter_match and current_section in CALLABLE_DIRECTIONS:

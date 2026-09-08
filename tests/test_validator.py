@@ -67,6 +67,18 @@ class ValidatorTest(unittest.TestCase):
     def test_classical_data_type_declaration_passes(self):
         self.assertEqual(validate_abap("DATA lv_error_msg TYPE string."), [])
 
+    def test_incomplete_data_table_declaration_is_reported(self):
+        issues = validate_abap("DATA t_record TYPE STANDARD TABLE.")
+
+        self.assert_issue(issues, "INCOMPLETE_DATA_TABLE_DECLARATION", 1)
+
+    def test_form_standard_table_parameter_is_not_incomplete_data_declaration(self):
+        source = "FORM load_items USING p_items TYPE STANDARD TABLE.\nENDFORM."
+
+        self.assertFalse(
+            [issue for issue in validate_abap(source) if issue["rule_id"] == "INCOMPLETE_DATA_TABLE_DECLARATION"]
+        )
+
     def test_at_data_inline_detection(self):
         issues = validate_abap("SELECT * FROM mara INTO @DATA(ls_mara).")
 

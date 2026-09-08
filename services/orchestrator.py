@@ -13,6 +13,7 @@ from services.final_assembler import (
     normalize_final_assembly_mode,
 )
 from services.llm import generate_abap
+from services.validator import parse_callable_invocations
 CHUNK_DIAGNOSTIC = "abap_generation_chunks.json"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ALV_FIELDCAT_TABLE_NAME = "t_fieldcat"
@@ -304,6 +305,9 @@ def generate_chunked_abap_program(
             "usage": None,
             "duration_seconds": None,
         }
+    final_text = ensure_callable_parameter_declarations(final_text, callable_metadata)
+    if final_assembly_result is not None:
+        final_assembly_result["text"] = final_text
     return {
         "text": final_text,
         "chunks": chunks,
@@ -530,7 +534,12 @@ def extract_processing_plan(source_text, generator, metadata_context=None, calla
             callable_metadata=callable_metadata,
             normalization_diagnostics=normalized["diagnostics"],
         )
-        retryable_errors = processing_plan_retryable_validation_errors(parsed, validation, normalized)
+        retryable_errors = processing_plan_retryable_validation_errors(
+            parsed,
+            validation,
+            normalized,
+            source_text=processing_source_text,
+        )
         diagnostics = {
             "prompt": prompt,
             "source_text": processing_source_text,
@@ -942,7 +951,7 @@ def processing_plan_retry_prompt(base_prompt, validation_errors=None):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def processing_plan_retryable_validation_errors(parsed, validation, normalized):
+def processing_plan_retryable_validation_errors(parsed, validation, normalized, source_text=None):
     errors = []
     parse_error = (parsed or {}).get("error")
     if parse_error:
@@ -958,7 +967,38 @@ def processing_plan_retryable_validation_errors(parsed, validation, normalized):
         if processing_plan_rejection_reason_is_retryable(reason):
             path = format_processing_plan_path((item or {}).get("path"))
             errors.append(f"{path}: {reason}")
+    plan = (normalized or {}).get("plan") or {}
+    steps = plan.get("processing_steps") if isinstance(plan, dict) else None
+    if steps == [] and processing_source_requires_steps(source_text):
+        errors.append("empty processing_steps for source text that contains required business processing")
     return dedupe_preserve_order(errors)
+
+
+PROCESSING_REQUIRED_NEGATION_RE = re.compile(
+    r"\b(?:no|none|without)\s+(?:explicit\s+)?(?:business\s+)?processing\b",
+    re.IGNORECASE,
+)
+PROCESSING_REQUIRED_ACTION_RE = re.compile(
+    r"\b(?:append|assign|calculate|call|check|commit|compare|convert|create|derive|display|duplicate|"
+    r"find|insert|loop|lookup|map|mark|move|perform|populate|process|read|roll\s+back|rollback|"
+    r"search|sort|sum|transform|update|validate|write)\b",
+    re.IGNORECASE,
+)
+PROCESSING_REQUIRED_STRUCTURE_RE = re.compile(r"(?im)^\s*(?:\d+[.)]|[-*])\s+")
+
+
+def processing_source_requires_steps(source_text):
+    text = str(source_text or "").strip()
+    if not text:
+        return False
+    if PROCESSING_REQUIRED_NEGATION_RE.search(text):
+        return False
+    if re.search(r"\b(?:CALL\s+FUNCTION|BAPI_[A-Z0-9_]+|=>|->)\b", text, re.IGNORECASE):
+        return True
+    if PROCESSING_REQUIRED_STRUCTURE_RE.search(text) and PROCESSING_REQUIRED_ACTION_RE.search(text):
+        return True
+    action_matches = PROCESSING_REQUIRED_ACTION_RE.findall(text)
+    return len(action_matches) >= 2
 
 
 def processing_plan_rejection_reason_is_retryable(reason):
@@ -4249,6 +4289,203 @@ def required_global_variable_declarations(declaration_requirements=None):
     return result
 
 
+def ensure_callable_parameter_declarations(source, callable_metadata=None):
+    requirements = callable_parameter_declaration_requirements(source, callable_metadata)
+    if not requirements:
+        return source
+    lines = str(source or "").splitlines()
+    replaced_type_names = []
+    existing = {name: declaration_type_for_name(lines, name) for name in requirements}
+    rewritten = []
+    handled = set()
+    for line in lines:
+        replaced = False
+        for name, expected_type in requirements.items():
+            if data_declaration_declares_name(line, name):
+                current_type = existing.get(name, "")
+                if current_type.lower().startswith("ty_") and normalize_type_keyword(f"TYPE {current_type}").upper() != expected_type.upper():
+                    append_unique(replaced_type_names, current_type)
+                rewritten.append(data_declaration_for_name(name, expected_type))
+                handled.add(name)
+                replaced = True
+                break
+        if not replaced:
+            rewritten.append(line)
+    missing = [
+        data_declaration_for_name(name, expected_type)
+        for name, expected_type in requirements.items()
+        if name not in handled and name not in existing
+    ]
+    fixed = "\n".join(rewritten)
+    if missing:
+        fixed = insert_declaration_statements(fixed, missing)
+    return remove_unreferenced_local_type_declarations(fixed, replaced_type_names)
+
+
+def callable_parameter_declaration_requirements(source, callable_metadata=None):
+    signatures = normalize_provider_signatures(callable_metadata)
+    if not signatures:
+        return {}
+    signature_by_name = {str(name or "").upper(): signature for name, signature in signatures.items()}
+    requirements = {}
+    table_requirements = {}
+    lines = str(source or "").splitlines()
+    for call in parse_callable_invocations(lines):
+        signature = signature_by_name.get(str(call.get("name") or "").upper())
+        if not isinstance(signature, dict):
+            continue
+        parameters = callable_signature_parameters(signature)
+        for actual in call.get("parameters") or []:
+            parameter = parameters.get(str(actual.get("name") or "").upper())
+            value = actual.get("value_identifier") or ""
+            if not parameter or not value or is_builtin_call_parameter_value(value):
+                continue
+            actual_value_text = call_parameter_actual_value_text(actual.get("source_line"))
+            if not actual_value_text or "-" in actual_value_text:
+                continue
+            expected_type = callable_parameter_expected_declaration_type(parameter, actual.get("section"))
+            if not expected_type:
+                continue
+            normalized_name = normalize_abap_identifier(value)
+            if not normalized_name:
+                continue
+            requirements[normalized_name] = expected_type
+            if is_table_like_callable_section(actual.get("section"), parameter):
+                table_requirements[normalized_name.lower()] = callable_parameter_row_type(parameter)
+    for table_name, row_type in table_requirements.items():
+        if not row_type:
+            continue
+        for work_area in work_areas_for_internal_table(lines, table_name):
+            requirements[work_area] = f"TYPE {row_type}"
+    return requirements
+
+
+def callable_signature_parameters(signature):
+    params = signature.get("parameters", {}) if isinstance(signature, dict) else {}
+    result = {}
+    if isinstance(params, dict):
+        result.update({str(name or "").upper(): value for name, value in params.items() if isinstance(value, dict)})
+    returning = signature.get("returning") if isinstance(signature, dict) else None
+    if isinstance(returning, dict) and returning.get("name"):
+        result[str(returning.get("name")).upper()] = returning
+    return result
+
+
+def callable_parameter_expected_declaration_type(parameter, actual_section):
+    row_type = callable_parameter_row_type(parameter)
+    if not row_type:
+        return ""
+    if is_table_like_callable_section(actual_section, parameter):
+        return f"TYPE STANDARD TABLE OF {row_type}"
+    return f"TYPE {row_type}"
+
+
+def callable_parameter_row_type(parameter):
+    type_or_like = verified_callable_parameter_type(parameter)
+    match = re.fullmatch(r"(?:TYPE|LIKE)\s+(.+)", type_or_like, re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def is_table_like_callable_section(actual_section, parameter):
+    direction = str((parameter or {}).get("direction") or "").upper()
+    section = str(actual_section or "").upper()
+    return direction == "TABLES" or section == "TABLES"
+
+
+def call_parameter_actual_value_text(source_line):
+    code = split_code_and_comment(str(source_line or ""))[0].strip()
+    match = re.match(r"^[A-Za-z_]\w*\s*=\s*(.+?)\s*[,\.]?\s*$", code)
+    return match.group(1).strip() if match else ""
+
+
+def is_builtin_call_parameter_value(value):
+    return str(value or "").upper() in {"SPACE", "ABAP_TRUE", "ABAP_FALSE", "SY", "X"}
+
+
+def data_declaration_declares_name(line, name):
+    return bool(
+        re.match(
+            rf"^\s*DATA\s+{re.escape(str(name or ''))}\s+(?:TYPE|LIKE)\b.*\.\s*$",
+            split_code_and_comment(str(line or ""))[0],
+            re.IGNORECASE,
+        )
+    )
+
+
+def data_declaration_for_name(name, expected_type):
+    return f"DATA {name} {expected_type}."
+
+
+def declaration_type_for_name(lines, name):
+    pattern = re.compile(
+        rf"^\s*DATA\s+{re.escape(str(name or ''))}\s+(?:TYPE|LIKE)\s+(.+?)\s*\.\s*$",
+        re.IGNORECASE,
+    )
+    for line in lines:
+        match = pattern.match(split_code_and_comment(str(line or ""))[0])
+        if match:
+            return " ".join(match.group(1).split())
+    return ""
+
+
+def work_areas_for_internal_table(lines, table_name):
+    names = []
+    table = re.escape(str(table_name or ""))
+    patterns = [
+        re.compile(rf"\bLOOP\s+AT\s+{table}\b.*?\bINTO\s+([A-Za-z_]\w*)\b", re.IGNORECASE),
+        re.compile(rf"\bREAD\s+TABLE\s+{table}\b.*?\bINTO\s+([A-Za-z_]\w*)\b", re.IGNORECASE),
+    ]
+    for line in lines:
+        code = split_code_and_comment(str(line or ""))[0]
+        for pattern in patterns:
+            match = pattern.search(code)
+            if match:
+                append_unique(names, normalize_abap_identifier(match.group(1)))
+    return [name for name in names if name]
+
+
+def remove_unreferenced_local_type_declarations(source, type_names):
+    names = {str(name or "").lower() for name in type_names if str(name or "").lower().startswith("ty_")}
+    if not names:
+        return source
+    lines = str(source or "").splitlines()
+    referenced = set()
+    for line in lines:
+        code = split_code_and_comment(line)[0]
+        if re.match(r"^\s*TYPES\b", code, re.IGNORECASE):
+            continue
+        for name in names:
+            if re.search(rf"\b(?:TYPE|LIKE)\s+(?:STANDARD\s+TABLE\s+OF\s+)?{re.escape(name)}\b", code, re.IGNORECASE):
+                referenced.add(name)
+    remove_ranges = []
+    index = 0
+    while index < len(lines):
+        code = split_code_and_comment(lines[index])[0]
+        begin_match = re.match(r"^\s*TYPES\s*:?\s+BEGIN\s+OF\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+        simple_match = re.match(r"^\s*TYPES\s*:?\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+        type_name = (begin_match or simple_match).group(1).lower() if (begin_match or simple_match) else ""
+        if type_name in names and type_name not in referenced:
+            end = index
+            if begin_match:
+                while end < len(lines):
+                    end_code = split_code_and_comment(lines[end])[0]
+                    if re.match(rf"^\s*END\s+OF\s+{re.escape(type_name)}\s*\.\s*$", end_code, re.IGNORECASE):
+                        break
+                    end += 1
+            remove_ranges.append((index, end))
+            index = end + 1
+            continue
+        index += 1
+    if not remove_ranges:
+        return source
+    kept = []
+    for index, line in enumerate(lines):
+        if any(start <= index <= end for start, end in remove_ranges):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def ensure_database_read_declarations(source, base_prompt=None, source_text=None, declaration_requirements=None, ddic_metadata=None):
     declarations = deterministic_database_read_declarations(
         base_prompt,
@@ -4548,7 +4785,24 @@ def group_declaration_statements_by_prefix(source):
     before_lines = [line for unit in kept[:insert_at] for line in unit]
     after_lines = [line for unit in kept[insert_at:] for line in unit]
     declaration_lines = formatted_declaration_section_lines(grouped)
-    return "\n".join(before_lines + declaration_lines + after_lines)
+    return normalize_abap_blank_lines("\n".join(before_lines + declaration_lines + after_lines))
+
+
+def normalize_abap_blank_lines(source, max_blank_lines=1):
+    lines = str(source or "").splitlines()
+    normalized = []
+    blank_count = 0
+    for line in lines:
+        if not line.strip():
+            blank_count += 1
+            if blank_count <= max_blank_lines:
+                normalized.append("")
+            continue
+        blank_count = 0
+        normalized.append(line)
+    while normalized and not normalized[-1].strip():
+        normalized.pop()
+    return "\n".join(normalized)
 
 
 def formatted_declaration_section_lines(grouped):
@@ -4918,11 +5172,12 @@ def declaration_chunk_context_prompt(base_prompt, source_text=None, declaration_
     )
 
 
-def render_declarations_chunk_prompt(source_text=None, ddic_catalogue=None, declaration_contract=None):
+def render_declarations_chunk_prompt(source_text=None, ddic_catalogue=None, declaration_contract=None, callable_catalogue=None):
     return render_chunk_prompt_template(
         "declarations",
         source_text=source_text,
         ddic_catalogue=ddic_catalogue,
+        callable_catalogue=callable_catalogue,
         chunk_contract=declaration_contract,
     )
 
@@ -5822,14 +6077,18 @@ def filtered_ddic_fields(table_name, fields, matched_fields):
 
 
 def chunk_callable_catalogue(chunk_name, base_prompt, processing_plan=None):
-    if chunk_name != "processing_form":
+    if chunk_name not in {"declarations", "processing_form"}:
         return ""
     catalogue = prompt_block(
         base_prompt,
         "SAP callable signature catalogue:",
         ("Shared generation contract:",),
     )
-    names = processing_plan_callable_names(processing_plan, base_prompt=base_prompt)
+    names = (
+        processing_plan_callable_names(processing_plan, base_prompt=base_prompt)
+        if chunk_name == "processing_form"
+        else callable_identities_from_prompt(base_prompt)
+    )
     if not names:
         return ""
     lines = []
