@@ -9,6 +9,8 @@ DEFAULT_JOB_OPTIONS = {
     "job_title": "",
     "run_sap_syntax_check": False,
     "sap_syntax_check_attempts": 2,
+    "modification_developer": "",
+    "modification_log_number": "",
     "final_assembly_mode": APP_FINAL_ASSEMBLY_MODE,
     "model_preset": DEFAULT_MODEL_PRESET,
 }
@@ -44,6 +46,8 @@ def normalize_job_options(options):
     normalized["sap_syntax_check_attempts"] = clamp_sap_syntax_check_attempts(
         normalized.get("sap_syntax_check_attempts")
     )
+    normalized["modification_developer"] = str(normalized.get("modification_developer") or "").strip()
+    normalized["modification_log_number"] = str(normalized.get("modification_log_number") or "").strip()
     normalized["final_assembly_mode"] = normalize_final_assembly_mode(
         normalized.get("final_assembly_mode")
     )

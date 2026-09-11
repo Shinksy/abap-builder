@@ -102,6 +102,8 @@ def create_app(config_overrides=None):
             "model_settings": model_settings_for_template(app.config),
             "rerun_context": rerun_context,
             "model_preset_default": rerun_context.get("model_preset") or model_settings_for_template(app.config)["default_preset"],
+            "default_modification_developer": app.config.get("ABAP_MODIFICATION_DEVELOPER", ""),
+            "default_modification_log_number": app.config.get("ABAP_MODIFICATION_LOG_NUMBER", ""),
         }
         context.update(kwargs)
         return context
@@ -170,11 +172,23 @@ def create_app(config_overrides=None):
                         "enhancement_specification": normalize_enhancement_specification_text(
                             request.form.get("enhancement_specification", "")
                         ),
+                        "modification_developer": request.form.get("modification_developer", "").strip(),
+                        "modification_log_number": request.form.get("modification_log_number", "").strip(),
                     },
                     progress=get_progress(jobs_folder, job_id),
                     error="Enter the enhancement specification before re-running.",
                 ), 400
             write_enhancement_specification(context["specification_path"], updated_specification)
+            rerun_options = load_job_options(jobs_folder, job_id)
+            rerun_options["modification_developer"] = (
+                request.form.get("modification_developer", "").strip()
+                or app.config.get("ABAP_MODIFICATION_DEVELOPER", "")
+            )
+            rerun_options["modification_log_number"] = (
+                request.form.get("modification_log_number", "").strip()
+                or app.config.get("ABAP_MODIFICATION_LOG_NUMBER", "")
+            )
+            save_job_options(jobs_folder, job_id, rerun_options)
             update_progress(
                 jobs_folder,
                 job_id,
@@ -332,6 +346,14 @@ def create_app(config_overrides=None):
         )
         uploaded_file = request.files.get("existing_abap_file")
         job_title = request.form.get("job_title", "").strip()
+        modification_developer = (
+            request.form.get("modification_developer", "").strip()
+            or app.config.get("ABAP_MODIFICATION_DEVELOPER", "")
+        )
+        modification_log_number = (
+            request.form.get("modification_log_number", "").strip()
+            or app.config.get("ABAP_MODIFICATION_LOG_NUMBER", "")
+        )
         enhancement_specification = normalize_enhancement_specification_text(
             request.form.get("enhancement_specification", "")
         )
@@ -368,6 +390,8 @@ def create_app(config_overrides=None):
                 "job_title": job_title,
                 "run_sap_syntax_check": run_sap_syntax_check,
                 "sap_syntax_check_attempts": request.form.get("sap_syntax_check_attempts"),
+                "modification_developer": modification_developer,
+                "modification_log_number": modification_log_number,
                 "model_settings": model_settings,
                 "rerun_of": rerun_context.get("source_job_id") if rerun_context else None,
                 "rerun": bool(rerun_context),
@@ -788,6 +812,8 @@ def load_enhancement_rerun_context(jobs_folder, job_id):
             specification_path.read_text(encoding="utf-8")
         ),
         "job_title": options.get("job_title") or "",
+        "modification_developer": options.get("modification_developer") or app.config.get("ABAP_MODIFICATION_DEVELOPER", ""),
+        "modification_log_number": options.get("modification_log_number") or app.config.get("ABAP_MODIFICATION_LOG_NUMBER", ""),
     }
 
 
@@ -810,6 +836,8 @@ def load_rerun_form_context(jobs_folder, upload_folder, job_id):
         "source_job_id": metadata.get("source_job_id") or "",
         "source_job_short_id": metadata.get("source_job_short_id") or "",
         "job_title": options.get("job_title") or "",
+        "modification_developer": options.get("modification_developer") or app.config.get("ABAP_MODIFICATION_DEVELOPER", ""),
+        "modification_log_number": options.get("modification_log_number") or app.config.get("ABAP_MODIFICATION_LOG_NUMBER", ""),
         "run_sap_syntax_check": bool(options.get("run_sap_syntax_check")),
         "sap_syntax_check_attempts": options.get("sap_syntax_check_attempts") or 2,
         "final_assembly_mode": options.get("final_assembly_mode") or "app",
@@ -873,6 +901,8 @@ def load_rerun_source_form_context(jobs_folder, upload_folder, source_job_id):
         "source_job_id": source_job_id,
         "source_job_short_id": source_job_id[:8],
         "job_title": options.get("job_title") or "",
+        "modification_developer": options.get("modification_developer") or app.config.get("ABAP_MODIFICATION_DEVELOPER", ""),
+        "modification_log_number": options.get("modification_log_number") or app.config.get("ABAP_MODIFICATION_LOG_NUMBER", ""),
         "run_sap_syntax_check": bool(options.get("run_sap_syntax_check")),
         "sap_syntax_check_attempts": options.get("sap_syntax_check_attempts") or 2,
         "final_assembly_mode": options.get("final_assembly_mode") or "app",

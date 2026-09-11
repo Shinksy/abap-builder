@@ -150,6 +150,10 @@
               {% endif %}
               <label for="enhancement_specification">Functional Specification</label>
               <textarea id="enhancement_specification" name="enhancement_specification" rows="8" required>{{ rerun_context.enhancement_specification if rerun_context.mode == "enhance_existing_abap" else "" }}</textarea>
+              <label for="modification_developer">Developer Name</label>
+              <input id="modification_developer" name="modification_developer" type="text" maxlength="80" value="{{ rerun_context.modification_developer if rerun_context.mode == 'enhance_existing_abap' else default_modification_developer }}">
+              <label for="modification_log_number">Change / Log Number</label>
+              <input id="modification_log_number" name="modification_log_number" type="text" maxlength="80" value="{{ rerun_context.modification_log_number if rerun_context.mode == 'enhance_existing_abap' else default_modification_log_number }}">
               <div class="syntax-check-row">
                 <label class="checkbox-option">
                   <input name="run_sap_syntax_check" type="checkbox" value="1" {% if rerun_context.mode == "enhance_existing_abap" and rerun_context.run_sap_syntax_check %}checked{% endif %}>

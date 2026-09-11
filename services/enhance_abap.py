@@ -39,6 +39,7 @@ from services.abap_source import split_string_segments
 from services.fixer import auto_fix_abap
 from services.job_options import load_job_options
 from services.llm import generate_code_review_repair, reset_current_model_settings, set_current_model_settings
+from services.modification_history import apply_modification_history
 from services.modifier_guardrails import build_identifier_provenance
 from services.progress import update_progress
 from services.sap_dependency_analysis import analyze_sap_dependencies, normalize_identifiers
@@ -419,6 +420,19 @@ def run_enhance_abap(
         if cleaned_final_abap != final_abap:
             final_abap = cleaned_final_abap
             record_post_generation_stage(post_generation_diagnostics, "after_enhancement_required_perform_removal", final_abap)
+        modification_result = apply_modification_history(
+            existing_abap,
+            final_abap,
+            changed_source=enhanced_abap,
+            developer_name=options.get("modification_developer"),
+            log_number=options.get("modification_log_number"),
+            description=enhancement_specification,
+        )
+        final_abap = modification_result["source"]
+        modification_history_issues = modification_result.get("issues") or []
+        if modification_result.get("modification_id"):
+            fix_result.setdefault("diagnostics", {})["enhancement_modification_id"] = modification_result["modification_id"]
+            record_post_generation_stage(post_generation_diagnostics, "after_enhancement_modification_history", final_abap)
 
         final_ddic = classify_post_generation_ddic_candidates(final_abap)
         record_post_generation_ddic_diagnostics(dependency_analysis, final_ddic)
@@ -440,6 +454,7 @@ def run_enhance_abap(
         validation_issues = list(fix_result["final_issues"])
         validation_issues = merge_validation_issues_for_enhancement(validation_issues, pre_merge_validation_issues)
         validation_issues = merge_validation_issues_for_enhancement(validation_issues, declaration_cleanup_issues)
+        validation_issues = merge_validation_issues_for_enhancement(validation_issues, modification_history_issues)
         provenance = build_identifier_provenance(
             original_source=existing_abap,
             functional_specification=enhancement_specification,
@@ -1152,7 +1167,7 @@ def select_table_name(statement_text):
 
 
 def select_field_names(statement_text):
-    text = str(statement_text or "")
+    text = "\n".join(strip_abap_comment(line) for line in str(statement_text or "").splitlines())
     boundary_matches = [
         match
         for match in (
@@ -1178,7 +1193,8 @@ def select_field_names(statement_text):
 
 
 def select_statement_key(statement):
-    return normalize_structural_line((statement or {}).get("text", ""))
+    text = "\n".join(strip_abap_comment(line) for line in str((statement or {}).get("text", "")).splitlines())
+    return normalize_structural_line(text)
 
 
 def select_target_signature(statement):

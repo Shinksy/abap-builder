@@ -46,6 +46,10 @@
         <form method="post">
           <label for="enhancement_specification">Functional Specification</label>
           <textarea id="enhancement_specification" name="enhancement_specification" rows="22" required>{{ context.enhancement_specification }}</textarea>
+          <label for="modification_developer">Developer Name</label>
+          <input id="modification_developer" name="modification_developer" type="text" maxlength="80" value="{{ context.modification_developer }}">
+          <label for="modification_log_number">Change / Log Number</label>
+          <input id="modification_log_number" name="modification_log_number" type="text" maxlength="80" value="{{ context.modification_log_number }}">
           <div class="button-row">
             <button type="submit" name="action" value="start">Re-run enhancement</button>
             <button type="submit" name="action" value="cancel" class="secondary-button">Cancel</button>

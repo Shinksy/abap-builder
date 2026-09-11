@@ -68,6 +68,8 @@ class Config:
         "ENHANCE_ABAP_PROMPT",
         str(BASE_DIR / "prompts" / "enhance_existing_abap.txt"),
     )
+    ABAP_MODIFICATION_DEVELOPER = os.environ.get("ABAP_MODIFICATION_DEVELOPER", "")
+    ABAP_MODIFICATION_LOG_NUMBER = os.environ.get("ABAP_MODIFICATION_LOG_NUMBER", "")
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
     ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
     ANTHROPIC_API_URL = os.environ.get("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages")

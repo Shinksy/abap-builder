@@ -27,6 +27,7 @@ from services.enhance_abap import (
     validate_enhancement_structure,
 )
 from services.create_abap import restore_unrelated_select_endselect_blocks
+from services.job_options import save_job_options
 from services.progress import create_job, get_progress
 
 
@@ -74,6 +75,8 @@ class EnhanceAbapFlowTest(unittest.TestCase):
                         "job_title": "Holiday upload enhancement",
                         "existing_abap_file": (BytesIO(b"REPORT zold."), "zold.abap"),
                         "enhancement_specification": "Add an ALV output.",
+                        "modification_developer": "Ada Developer",
+                        "modification_log_number": "REQ900",
                         "sap_syntax_check_attempts": "2",
                     },
                     content_type="multipart/form-data",
@@ -89,6 +92,8 @@ class EnhanceAbapFlowTest(unittest.TestCase):
             )
             options = json.loads((jobs_folder / job_id / "options.json").read_text(encoding="utf-8"))
             self.assertEqual(options["job_title"], "Holiday upload enhancement")
+            self.assertEqual(options["modification_developer"], "Ada Developer")
+            self.assertEqual(options["modification_log_number"], "REQ900")
             starter.assert_called_once()
             self.assertEqual(starter.call_args.kwargs["job_id"], job_id)
             self.assertEqual(starter.call_args.kwargs["prompt_path"], prompt_path)
@@ -1315,6 +1320,36 @@ class EnhanceAbapFlowTest(unittest.TestCase):
         self.assertNotIn("kunn2", mismatch_fields)
         self.assertEqual(mismatch_fields, ["zslsman1"])
 
+    def test_select_validation_ignores_inline_change_marker_comments(self):
+        original = "\n".join(
+            [
+                "REPORT zstruct.",
+                "TYPES: BEGIN OF ty_pa0002,",
+                "         pernr TYPE pernr_d,",
+                "         gbdat TYPE dats,",
+                "       END OF ty_pa0002.",
+                "DATA t_pa0002 TYPE STANDARD TABLE OF ty_pa0002.",
+                "FORM read_data.",
+                "  SELECT pernr",
+                "         gbdat",
+                "         INTO TABLE t_pa0002",
+                "         FROM pa0002.",
+                "ENDFORM.",
+            ]
+        )
+        final = original.replace("         gbdat", '         gbdat  "ATOS04')
+
+        issues = validate_enhancement_structure(original, final, enhancement_specification="Add change markers.")
+
+        self.assertFalse(
+            [
+                issue
+                for issue in issues
+                if issue["rule_id"] == "ENHANCEMENT_SELECT_TARGET_MISMATCH"
+                and issue.get("field") == "atos04"
+            ]
+        )
+
     def test_generated_select_extension_repairs_missing_target_structure_component(self):
         original = "\n".join(
             [
@@ -1720,6 +1755,82 @@ class EnhanceAbapFlowTest(unittest.TestCase):
             self.assertIn("DATA: lt_strings TYPE STANDARD TABLE OF string.", generated)
             self.assertIn("SPLIT st_pa0032-anlnr AT '-' INTO TABLE lt_strings.", generated)
             self.assertIn("gbdat TYPE dats", generated)
+            self.assertEqual(get_progress(jobs_folder, "job")["status"], "Complete")
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_run_enhance_abap_adds_detected_modification_history_and_markers(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            uploads_folder = temp_path / "uploads"
+            jobs_folder = temp_path / "jobs"
+            source_path = uploads_folder / "job" / "zmod.abap"
+            specification_path = uploads_folder / "job" / "enhancement.txt"
+            prompt_path = temp_path / "enhance_existing_abap.txt"
+            source_path.parent.mkdir(parents=True)
+            original = "\n".join(
+                [
+                    "REPORT zmod.",
+                    "************************************************************************",
+                    "*  Change History                                                       *",
+                    "************************************************************************",
+                    "*  Date        : 01.01.2026               Change Ref  : MOD001        *",
+                    "*                                                                      *",
+                    "*  Developer   : Existing Dev            Request No  : REQ1          *",
+                    "*                                                                      *",
+                    "*  Description : Initial change                                      *",
+                    "*                                                                      *",
+                    "************************************************************************",
+                    "*  Date        : 02.01.2026               Change Ref  : MOD002        *",
+                    "*                                                                      *",
+                    "*  Developer   : Existing Dev            Request No  : REQ2          *",
+                    "*                                                                      *",
+                    "*  Description : Second change                                       *",
+                    "*                                                                      *",
+                    "************************************************************************",
+                    "DATA gv_old TYPE string.",
+                    'WRITE gv_old.  "MOD002',
+                ]
+            )
+            enhanced = original.replace(
+                "DATA gv_old TYPE string.",
+                "DATA gv_old TYPE string.\nDATA gv_new TYPE string.",
+            ).replace(
+                'WRITE gv_old.  "MOD002',
+                'WRITE gv_old.  "MOD002\nWRITE gv_new.',
+            )
+            source_path.write_text(original, encoding="utf-8")
+            specification_path.write_text("Add the new output value.", encoding="utf-8")
+            prompt_path.write_text("Prompt\n{{FUNCTIONAL_SPECIFICATION}}\n{{EXISTING_ABAP}}", encoding="utf-8")
+            save_job_options(
+                jobs_folder,
+                "job",
+                {
+                    "job_title": "Modification history",
+                    "modification_developer": "Ada Developer",
+                    "modification_log_number": "REQ900",
+                },
+            )
+
+            run_enhance_abap(
+                "job",
+                source_path,
+                specification_path,
+                jobs_folder,
+                prompt_path,
+                enhancement_review_required=False,
+                approved_enhancement={"proposed_abap": enhanced, "model": "approved-test", "usage": None, "chunks": []},
+            )
+
+            generated = (jobs_folder / "job" / "generated.abap").read_text(encoding="utf-8")
+            self.assertIn("Change Ref  : MOD003", generated)
+            self.assertIn("Developer   : Ada Developer", generated)
+            self.assertIn("Request No  : REQ900", generated)
+            self.assertIn("Description : Add the new output value.", generated)
+            self.assertIn('DATA gv_new TYPE string.  "MOD003', generated)
+            self.assertIn('WRITE gv_new.  "MOD003', generated)
+            self.assertNotIn('WRITE gv_old.  "MOD002  "MOD003', generated)
             self.assertEqual(get_progress(jobs_folder, "job")["status"], "Complete")
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
