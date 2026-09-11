@@ -1,14 +1,24 @@
 import json
+import re
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
 from config import Config
 from services.callable_signature_provider import get_configured_callable_signature_provider
 from services.ddic_metadata_provider import get_configured_ddic_metadata_provider
 from services.job_options import load_job_options, save_job_options
-from services.jobs import delete_job, list_jobs, prepare_rerun_job
+from services.jobs import (
+    create_job_specification_path,
+    delete_job,
+    enhancement_specification_path,
+    existing_input_path,
+    inferred_job_mode,
+    list_jobs,
+    load_rerun_metadata,
+    prepare_rerun_job,
+)
 from services.llm import generate_code_review_repair
 from services.model_settings import model_options_from_form, model_settings_for_template, normalize_model_settings
 from services.metadata_cache_upload import (
@@ -84,18 +94,31 @@ def create_app(config_overrides=None):
         return {"asset_version": static_asset_version("style.css")}
 
     def home_template_context(active_tab="new", **kwargs):
+        rerun_context = kwargs.pop("rerun_context", None) or {}
         context = {
             "metadata_type_labels": METADATA_TYPE_LABELS,
             "active_tab": active_tab,
             "metadata_export_code": load_metadata_export_template(),
             "model_settings": model_settings_for_template(app.config),
+            "rerun_context": rerun_context,
+            "model_preset_default": rerun_context.get("model_preset") or model_settings_for_template(app.config)["default_preset"],
         }
         context.update(kwargs)
         return context
 
     @app.get("/")
     def home():
-        return render_template("home.html", **home_template_context())
+        rerun_context = (
+            load_rerun_source_form_context(jobs_folder, upload_folder, request.args.get("rerun_source_job_id"))
+            or load_rerun_form_context(jobs_folder, upload_folder, request.args.get("rerun_job_id"))
+        )
+        return render_template(
+            "home.html",
+            **home_template_context(
+                active_tab=rerun_context.get("active_tab") or "new",
+                rerun_context=rerun_context,
+            ),
+        )
 
     @app.get("/jobs")
     def jobs():
@@ -109,16 +132,60 @@ def create_app(config_overrides=None):
 
     @app.post("/jobs/<job_id>/rerun")
     def rerun_job_route(job_id):
-        new_job_id = create_job(jobs_folder)
-        rerun_job = prepare_rerun_job(jobs_folder, upload_folder, job_id, new_job_id)
-        if not rerun_job:
-            delete_job(jobs_folder, upload_folder, new_job_id)
+        if not load_rerun_source_form_context(jobs_folder, upload_folder, job_id):
             abort(404)
-        if rerun_job["mode"] == "enhance_existing_abap":
+        return redirect(url_for("home", rerun_source_job_id=job_id))
+
+    @app.get("/jobs/<job_id>/rerun/enhancement")
+    def enhancement_rerun_review(job_id):
+        context = load_enhancement_rerun_context(jobs_folder, job_id)
+        if not context:
+            abort(404)
+        return render_template(
+            "enhancement_rerun_review.html",
+            job_id=job_id,
+            context=context,
+            progress=get_progress(jobs_folder, job_id),
+        )
+
+    @app.post("/jobs/<job_id>/rerun/enhancement")
+    def enhancement_rerun_action(job_id):
+        context = load_enhancement_rerun_context(jobs_folder, job_id)
+        if not context:
+            abort(404)
+        action = request.form.get("action")
+        if action == "cancel":
+            delete_job(jobs_folder, upload_folder, job_id)
+            return redirect(url_for("jobs"))
+        if action == "start":
+            updated_specification = normalize_enhancement_specification_text(
+                request.form.get("enhancement_specification", "")
+            )
+            if not updated_specification:
+                return render_template(
+                    "enhancement_rerun_review.html",
+                    job_id=job_id,
+                    context={
+                        **context,
+                        "enhancement_specification": normalize_enhancement_specification_text(
+                            request.form.get("enhancement_specification", "")
+                        ),
+                    },
+                    progress=get_progress(jobs_folder, job_id),
+                    error="Enter the enhancement specification before re-running.",
+                ), 400
+            write_enhancement_specification(context["specification_path"], updated_specification)
+            update_progress(
+                jobs_folder,
+                job_id,
+                "Running",
+                "Enhancement specification confirmed. Re-run is starting.",
+                stage="Reading specification",
+            )
             start_enhance_abap_job(
-                job_id=new_job_id,
-                source_path=rerun_job["source_path"],
-                specification_path=rerun_job["specification_path"],
+                job_id=job_id,
+                source_path=Path(context["source_path"]),
+                specification_path=Path(context["specification_path"]),
                 jobs_folder=jobs_folder,
                 prompt_path=Path(app.config["ENHANCE_ABAP_PROMPT"]),
                 signature_provider=app.config.get("CALLABLE_SIGNATURE_PROVIDER"),
@@ -126,18 +193,8 @@ def create_app(config_overrides=None):
                 sap_syntax_checker=app.config.get("SAP_SYNTAX_CHECKER"),
                 code_review_repairer=app.config.get("CODE_REVIEW_REPAIRER"),
             )
-        else:
-            start_create_abap_job(
-                job_id=new_job_id,
-                input_path=rerun_job["input_path"],
-                jobs_folder=jobs_folder,
-                prompt_path=Path(app.config["CREATE_ABAP_PROMPT"]),
-                signature_provider=app.config.get("CALLABLE_SIGNATURE_PROVIDER"),
-                ddic_metadata_provider=app.config.get("DDIC_METADATA_PROVIDER"),
-                sap_syntax_checker=app.config.get("SAP_SYNTAX_CHECKER"),
-                code_review_repairer=app.config.get("CODE_REVIEW_REPAIRER"),
-            )
-        return redirect(url_for("progress", job_id=new_job_id))
+            return redirect(url_for("progress", job_id=job_id))
+        abort(400)
 
     @app.post("/metadata-cache/upload")
     def upload_metadata_cache_file():
@@ -178,26 +235,52 @@ def create_app(config_overrides=None):
 
     @app.post("/upload")
     def upload_file():
+        rerun_job_id = request.form.get("rerun_job_id", "").strip()
+        rerun_source_job_id = request.form.get("rerun_source_job_id", "").strip()
+        rerun_context = (
+            load_rerun_source_form_context(jobs_folder, upload_folder, rerun_source_job_id)
+            or load_rerun_form_context(jobs_folder, upload_folder, rerun_job_id)
+        )
         uploaded_file = request.files.get("abap_file")
+        job_title = request.form.get("job_title", "").strip()
         pasted_specification = request.form.get("specification_text", "").strip()
         has_uploaded_file = bool(uploaded_file and uploaded_file.filename)
+        if not job_title:
+            return render_template(
+                "home.html",
+                **home_template_context(active_tab="new", error="Enter a job title."),
+            ), 400
         if not has_uploaded_file and not pasted_specification:
             return render_template(
                 "home.html",
-                **home_template_context(active_tab="new", error="Upload a specification file or paste the specification text."),
+                **home_template_context(
+                    active_tab="new",
+                    rerun_context={**rerun_context, "job_title": job_title, "specification_text": pasted_specification},
+                    error="Upload a specification file or paste the specification text.",
+                ),
             ), 400
 
-        job_id = create_job(jobs_folder)
+        job_id = rerun_job_id if rerun_context.get("rerun_job_id") and rerun_context.get("mode") == "create_abap" else create_job(jobs_folder)
+        prepared_rerun = None
+        if rerun_context.get("is_source_rerun") and rerun_context.get("mode") == "create_abap":
+            prepared_rerun = prepare_rerun_job(jobs_folder, upload_folder, rerun_context["source_job_id"], job_id)
+            if not prepared_rerun:
+                delete_job(jobs_folder, upload_folder, job_id)
+                abort(404)
         run_sap_syntax_check = request.form.get("run_sap_syntax_check") == "1"
         model_settings = normalize_model_settings(model_options_from_form(request.form), app.config)
         save_job_options(
             jobs_folder,
             job_id,
             {
+                "job_title": job_title,
                 "run_sap_syntax_check": run_sap_syntax_check,
                 "sap_syntax_check_attempts": request.form.get("sap_syntax_check_attempts"),
                 "final_assembly_mode": request.form.get("final_assembly_mode"),
+                "prepare_functional_specification": request.form.get("prepare_functional_specification") == "1",
                 "model_settings": model_settings,
+                "rerun_of": rerun_context.get("source_job_id") if rerun_context else None,
+                "rerun": bool(rerun_context),
             },
         )
         job_upload_folder = upload_folder / job_id
@@ -207,7 +290,13 @@ def create_app(config_overrides=None):
             input_path = job_upload_folder / filename
             uploaded_file.save(input_path)
         else:
-            input_path = job_upload_folder / "pasted_specification.txt"
+            input_path = (
+                Path(prepared_rerun["input_path"])
+                if prepared_rerun
+                else Path(rerun_context["input_path"])
+                if rerun_context.get("input_path")
+                else job_upload_folder / "pasted_specification.txt"
+            )
             input_path.write_text(pasted_specification, encoding="utf-8")
 
         if request.form.get("prepare_functional_specification") == "1":
@@ -235,9 +324,24 @@ def create_app(config_overrides=None):
 
     @app.post("/enhance")
     def enhance_file():
+        rerun_job_id = request.form.get("rerun_job_id", "").strip()
+        rerun_source_job_id = request.form.get("rerun_source_job_id", "").strip()
+        rerun_context = (
+            load_rerun_source_form_context(jobs_folder, upload_folder, rerun_source_job_id)
+            or load_rerun_form_context(jobs_folder, upload_folder, rerun_job_id)
+        )
         uploaded_file = request.files.get("existing_abap_file")
-        enhancement_specification = request.form.get("enhancement_specification", "").strip()
-        if not uploaded_file or not uploaded_file.filename:
+        job_title = request.form.get("job_title", "").strip()
+        enhancement_specification = normalize_enhancement_specification_text(
+            request.form.get("enhancement_specification", "")
+        )
+        if not job_title:
+            return render_template(
+                "home.html",
+                **home_template_context(active_tab="enhance", error="Enter a job title."),
+            ), 400
+        has_uploaded_file = bool(uploaded_file and uploaded_file.filename)
+        if not has_uploaded_file and rerun_context.get("mode") != "enhance_existing_abap":
             return render_template(
                 "home.html",
                 **home_template_context(active_tab="enhance", error="Select an existing ABAP program to enhance."),
@@ -248,24 +352,42 @@ def create_app(config_overrides=None):
                 **home_template_context(active_tab="enhance", error="Enter the enhancement specification."),
             ), 400
 
-        job_id = create_job(jobs_folder)
+        job_id = rerun_job_id if rerun_context.get("rerun_job_id") and rerun_context.get("mode") == "enhance_existing_abap" else create_job(jobs_folder)
+        prepared_rerun = None
+        if rerun_context.get("is_source_rerun") and rerun_context.get("mode") == "enhance_existing_abap":
+            prepared_rerun = prepare_rerun_job(jobs_folder, upload_folder, rerun_context["source_job_id"], job_id)
+            if not prepared_rerun:
+                delete_job(jobs_folder, upload_folder, job_id)
+                abort(404)
         run_sap_syntax_check = request.form.get("run_sap_syntax_check") == "1"
         model_settings = normalize_model_settings(model_options_from_form(request.form), app.config)
         save_job_options(
             jobs_folder,
             job_id,
             {
+                "job_title": job_title,
                 "run_sap_syntax_check": run_sap_syntax_check,
                 "sap_syntax_check_attempts": request.form.get("sap_syntax_check_attempts"),
                 "model_settings": model_settings,
+                "rerun_of": rerun_context.get("source_job_id") if rerun_context else None,
+                "rerun": bool(rerun_context),
             },
         )
         job_upload_folder = upload_folder / job_id
         job_upload_folder.mkdir(parents=True, exist_ok=True)
-        source_path = job_upload_folder / secure_filename(uploaded_file.filename)
-        specification_path = job_upload_folder / "enhancement_specification.txt"
-        uploaded_file.save(source_path)
-        specification_path.write_text(enhancement_specification, encoding="utf-8")
+        if has_uploaded_file:
+            source_path = job_upload_folder / secure_filename(uploaded_file.filename)
+            uploaded_file.save(source_path)
+        else:
+            source_path = Path(prepared_rerun["source_path"]) if prepared_rerun else Path(rerun_context["source_path"])
+        specification_path = (
+            Path(prepared_rerun["specification_path"])
+            if prepared_rerun
+            else Path(rerun_context["specification_path"])
+            if rerun_context.get("specification_path")
+            else job_upload_folder / "enhancement_specification.txt"
+        )
+        write_enhancement_specification(specification_path, enhancement_specification)
 
         start_enhance_abap_job(
             job_id=job_id,
@@ -514,15 +636,16 @@ def create_app(config_overrides=None):
     def result(job_id):
         if not is_abap_result_ready(jobs_folder, job_id):
             return redirect(url_for("progress", job_id=job_id))
-        generated_path = final_abap_path_for_job(jobs_folder, job_id)
-        if not generated_path.exists():
+        generated_result = load_final_abap_for_job(jobs_folder, job_id)
+        if not generated_result["text"]:
             abort(404)
-        generated_abap = generated_path.read_text(encoding="utf-8")
+        generated_abap = generated_result["text"]
         record_result_page_source(jobs_folder / job_id, generated_abap)
         dependency_analysis = load_dependency_analysis(jobs_folder, job_id)
         ddic_metadata = load_ddic_metadata(jobs_folder, job_id)
         options = load_job_options(jobs_folder, job_id)
         metrics = load_metrics(jobs_folder, job_id)
+        job_progress = get_progress(jobs_folder, job_id)
         if metrics.get("job_mode") == "enhance_existing_abap":
             abap_generation_diagnostics = load_enhancement_generation_diagnostics(jobs_folder, job_id)
             abap_generation_chunks = load_enhancement_generation_chunks(jobs_folder, job_id)
@@ -533,6 +656,8 @@ def create_app(config_overrides=None):
             "result.html",
             job_id=job_id,
             generated_abap=generated_abap,
+            generated_abap_source_label=generated_result["label"],
+            job_progress=job_progress,
             metrics=metrics,
             fix_summary=load_fix_summary(jobs_folder, job_id),
             validation_issues=load_validation_issues(jobs_folder, job_id),
@@ -549,9 +674,16 @@ def create_app(config_overrides=None):
         if not is_abap_result_ready(jobs_folder, job_id):
             return redirect(url_for("progress", job_id=job_id))
         generated_path = final_abap_path_for_job(jobs_folder, job_id)
-        if not generated_path.exists():
+        if generated_path.exists():
+            return send_file(generated_path, as_attachment=True, download_name=generated_path.name)
+        generated_result = load_final_abap_for_job(jobs_folder, job_id)
+        if not generated_result["text"]:
             abort(404)
-        return send_file(generated_path, as_attachment=True, download_name=generated_path.name)
+        return Response(
+            generated_result["text"],
+            mimetype="text/plain",
+            headers={"Content-Disposition": "attachment; filename=generated.abap"},
+        )
 
     return app
 
@@ -564,12 +696,38 @@ def final_abap_path_for_job(jobs_folder, job_id):
     return job_folder / "generated.abap"
 
 
+def load_final_abap_for_job(jobs_folder, job_id):
+    job_folder = Path(jobs_folder) / job_id
+    for filename, label in (
+        ("sap_syntax_repaired.abap", "SAP syntax repaired ABAP"),
+        ("generated.abap", "generated ABAP"),
+        ("original_generated.abap", "original generated ABAP"),
+    ):
+        path = job_folder / filename
+        if path.exists():
+            return {"text": path.read_text(encoding="utf-8"), "label": label, "path": path}
+    chunks_path = job_folder / "abap_generation_chunks.json"
+    if chunks_path.exists():
+        try:
+            chunks = json.loads(chunks_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            chunks = {}
+        assembled = str((chunks or {}).get("assembled_abap") or "").strip()
+        if assembled:
+            return {"text": assembled, "label": "assembled ABAP diagnostic", "path": chunks_path}
+        final_assembly = (chunks or {}).get("final_assembly") or {}
+        final_text = str(final_assembly.get("text") or "").strip() if isinstance(final_assembly, dict) else ""
+        if final_text:
+            return {"text": final_text, "label": "final assembly diagnostic", "path": chunks_path}
+    return {"text": "", "label": "", "path": None}
+
+
 def has_abap_result(jobs_folder, job_id):
     return is_abap_result_ready(jobs_folder, job_id)
 
 
 def is_abap_result_ready(jobs_folder, job_id):
-    if not final_abap_path_for_job(jobs_folder, job_id).exists():
+    if not load_final_abap_for_job(jobs_folder, job_id)["text"]:
         return False
     progress = get_progress(jobs_folder, job_id)
     return not bool(progress.get("is_active"))
@@ -577,6 +735,7 @@ def is_abap_result_ready(jobs_folder, job_id):
 
 def review_url_for_job(jobs_folder, job_id):
     job_folder = Path(jobs_folder) / job_id
+    rerun_metadata = load_rerun_metadata(job_folder)
     if (
         (job_folder / "functional_specification_proposal.json").exists()
         and not (job_folder / "accepted_functional_specification.txt").exists()
@@ -584,19 +743,179 @@ def review_url_for_job(jobs_folder, job_id):
         return url_for("functional_spec_review", job_id=job_id)
     if (job_folder / "enhancement_proposal.json").exists():
         return url_for("enhancement_review", job_id=job_id)
+    if rerun_metadata.get("mode") == "enhance_existing_abap" and not (job_folder / "enhancement_proposal.json").exists():
+        return url_for("home", rerun_job_id=job_id)
+    if rerun_metadata.get("mode") == "create_abap" and not (job_folder / "processing_plan_proposal.json").exists():
+        return url_for("home", rerun_job_id=job_id)
     return url_for("processing_plan_review", job_id=job_id)
 
 
 def review_label_for_job(jobs_folder, job_id):
     job_folder = Path(jobs_folder) / job_id
+    rerun_metadata = load_rerun_metadata(job_folder)
     if (
         (job_folder / "functional_specification_proposal.json").exists()
         and not (job_folder / "accepted_functional_specification.txt").exists()
     ):
-        return "Review functional specification"
+        return "Review Structured Specification"
     if (job_folder / "enhancement_proposal.json").exists():
         return "Review proposed changes"
+    if rerun_metadata.get("mode") == "enhance_existing_abap" and not (job_folder / "enhancement_proposal.json").exists():
+        return "Review enhancement details"
+    if rerun_metadata.get("mode") == "create_abap" and not (job_folder / "processing_plan_proposal.json").exists():
+        return "Review generation details"
     return "Review processing plan"
+
+
+def load_enhancement_rerun_context(jobs_folder, job_id):
+    job_folder = Path(jobs_folder) / job_id
+    metadata = load_rerun_metadata(job_folder)
+    if metadata.get("mode") != "enhance_existing_abap":
+        return {}
+    source_path = Path(metadata.get("source_path") or "")
+    specification_path = Path(metadata.get("specification_path") or "")
+    if not source_path.exists() or not specification_path.exists():
+        return {}
+    options = load_job_options(jobs_folder, job_id)
+    return {
+        "source_job_id": metadata.get("source_job_id") or "",
+        "source_job_short_id": metadata.get("source_job_short_id") or "",
+        "source_path": str(source_path),
+        "source_name": source_path.name,
+        "source_text": source_path.read_text(encoding="utf-8"),
+        "specification_path": str(specification_path),
+        "enhancement_specification": normalize_enhancement_specification_text(
+            specification_path.read_text(encoding="utf-8")
+        ),
+        "job_title": options.get("job_title") or "",
+    }
+
+
+def load_rerun_form_context(jobs_folder, upload_folder, job_id):
+    job_id = str(job_id or "").strip()
+    if not job_id:
+        return {}
+    job_folder = Path(jobs_folder) / job_id
+    metadata = load_rerun_metadata(job_folder)
+    mode = metadata.get("mode")
+    if mode not in {"create_abap", "enhance_existing_abap"}:
+        return {}
+    options = load_job_options(jobs_folder, job_id)
+    model_settings = options.get("model_settings") or {}
+    context = {
+        "job_id": job_id,
+        "rerun_job_id": job_id,
+        "mode": mode,
+        "active_tab": "enhance" if mode == "enhance_existing_abap" else "new",
+        "source_job_id": metadata.get("source_job_id") or "",
+        "source_job_short_id": metadata.get("source_job_short_id") or "",
+        "job_title": options.get("job_title") or "",
+        "run_sap_syntax_check": bool(options.get("run_sap_syntax_check")),
+        "sap_syntax_check_attempts": options.get("sap_syntax_check_attempts") or 2,
+        "final_assembly_mode": options.get("final_assembly_mode") or "app",
+        "prepare_functional_specification": bool(options.get("prepare_functional_specification")),
+        "model_preset": model_settings.get("preset") or options.get("model_preset") or "",
+    }
+    if mode == "enhance_existing_abap":
+        source_path = Path(metadata.get("source_path") or "")
+        specification_path = Path(metadata.get("specification_path") or "")
+        if not source_path.exists() or not specification_path.exists():
+            return {}
+        context.update(
+            {
+                "source_path": str(source_path),
+                "source_name": source_path.name,
+                "source_text": source_path.read_text(encoding="utf-8"),
+                "specification_path": str(specification_path),
+                "enhancement_specification": normalize_enhancement_specification_text(
+                    specification_path.read_text(encoding="utf-8")
+                ),
+            }
+        )
+        return context
+    input_path = Path(metadata.get("input_path") or "")
+    if not input_path.exists():
+        return {}
+    display_path = input_path
+    source_job_id = metadata.get("source_job_id")
+    if source_job_id:
+        source_original_path = create_job_specification_path(
+            Path(jobs_folder) / source_job_id,
+            Path(upload_folder) / source_job_id,
+        )
+        if source_original_path:
+            display_path = Path(source_original_path)
+    context.update(
+        {
+            "input_path": str(input_path),
+            "input_name": display_path.name,
+            "specification_text": display_path.read_text(encoding="utf-8"),
+        }
+    )
+    return context
+
+
+def load_rerun_source_form_context(jobs_folder, upload_folder, source_job_id):
+    source_job_id = str(source_job_id or "").strip()
+    if not source_job_id:
+        return {}
+    job_folder = Path(jobs_folder) / source_job_id
+    upload_job_folder = Path(upload_folder) / source_job_id
+    if not job_folder.exists() or not job_folder.is_dir():
+        return {}
+    mode = inferred_job_mode(job_folder, upload_job_folder)
+    options = load_job_options(jobs_folder, source_job_id)
+    model_settings = options.get("model_settings") or {}
+    context = {
+        "mode": mode,
+        "is_source_rerun": True,
+        "active_tab": "enhance" if mode == "enhance_existing_abap" else "new",
+        "source_job_id": source_job_id,
+        "source_job_short_id": source_job_id[:8],
+        "job_title": options.get("job_title") or "",
+        "run_sap_syntax_check": bool(options.get("run_sap_syntax_check")),
+        "sap_syntax_check_attempts": options.get("sap_syntax_check_attempts") or 2,
+        "final_assembly_mode": options.get("final_assembly_mode") or "app",
+        "prepare_functional_specification": bool(options.get("prepare_functional_specification")),
+        "model_preset": model_settings.get("preset") or options.get("model_preset") or "",
+    }
+    if mode == "enhance_existing_abap":
+        source_path = existing_input_path(job_folder, upload_job_folder)
+        specification_path = enhancement_specification_path(job_folder, upload_job_folder)
+        if not source_path or not specification_path:
+            return {}
+        context.update(
+            {
+                "source_path": str(source_path),
+                "source_name": Path(source_path).name,
+                "source_text": Path(source_path).read_text(encoding="utf-8"),
+                "specification_path": str(specification_path),
+                "enhancement_specification": normalize_enhancement_specification_text(
+                    Path(specification_path).read_text(encoding="utf-8")
+                ),
+            }
+        )
+        return context
+    input_path = create_job_specification_path(job_folder, upload_job_folder)
+    if not input_path:
+        return {}
+    context.update(
+        {
+            "input_path": str(input_path),
+            "input_name": Path(input_path).name,
+            "specification_text": Path(input_path).read_text(encoding="utf-8"),
+        }
+    )
+    return context
+
+
+def normalize_enhancement_specification_text(text):
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return re.sub(r"\n{3,}", "\n\n", normalized)
+
+
+def write_enhancement_specification(path, text):
+    Path(path).write_text(normalize_enhancement_specification_text(text), encoding="utf-8", newline="\n")
 
 
 def record_result_page_source(job_folder, generated_abap):

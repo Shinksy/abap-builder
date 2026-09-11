@@ -248,6 +248,23 @@ class SapDependencyIdentificationTest(unittest.TestCase):
         )
         self.assertEqual(analysis["rejected_analysis_entries"], [])
 
+    def test_llm_ddic_objects_are_kept_for_existing_record_check_evidence(self):
+        specification = "\n".join(
+            [
+                "It must check ZABSENCE_LOG to determine whether an entry already exists.",
+                "Read the relevant existing ZABSENCE_LOG records in bulk where possible.",
+                "If a ZABSENCE_LOG record already exists for the same employee and date, mark the row.",
+            ]
+        )
+
+        analysis = normalize_dependency_analysis(
+            analysis_json(ddic_objects=[ddic_object("ZABSENCE_LOG")]),
+            specification_text=specification,
+        )
+
+        self.assertEqual(analysis["ddic_objects"], [ddic_object("ZABSENCE_LOG")])
+        self.assertEqual(analysis["rejected_analysis_entries"], [])
+
     def test_explicit_table_read_heading_keeps_llm_ddic_object(self):
         specification = "\n".join(
             [

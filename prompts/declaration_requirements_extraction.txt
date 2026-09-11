@@ -52,6 +52,7 @@ Rules:
 - Include only fields explicitly required to be read or returned in generated structures.
 - Fields used only in WHERE conditions are filter fields and must not be added to internal table structures, work areas, processing structures, or output structures unless explicitly required elsewhere in the functional specification.
 - For every output_structure_fields entry, return an object with name and type_or_like.
+- Add "heading" only when the functional specification explicitly gives a column heading, label, or description for that output field. Do not invent headings.
 - Add "include_when" only when the functional specification makes the output field conditional.
 - Determine output_structure_fields.type_or_like generically from the functional specification and available SAP DDIC metadata.
 - When an output field maps to an SAP table or structure field present in the SAP DDIC metadata, use TYPE <DDIC_OBJECT>-<FIELD>.

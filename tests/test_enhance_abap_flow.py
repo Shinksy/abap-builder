@@ -11,6 +11,7 @@ from app import create_app
 from services.enhance_abap import (
     APPROVED_ENHANCEMENT_ARTIFACT,
     ENHANCEMENT_PROPOSAL_ARTIFACT,
+    enhancement_review_payload,
     generate_targeted_enhancement,
     identify_affected_chunks,
     preserve_authoritative_existing_lines,
@@ -25,6 +26,7 @@ from services.enhance_abap import (
     split_existing_program_chunks,
     validate_enhancement_structure,
 )
+from services.create_abap import restore_unrelated_select_endselect_blocks
 from services.progress import create_job, get_progress
 
 
@@ -39,6 +41,8 @@ class EnhanceAbapFlowTest(unittest.TestCase):
         self.assertIn('class="tab-view"', page)
         self.assertIn("New Program", page)
         self.assertIn("Enhance Program", page)
+        self.assertIn('name="job_title"', page)
+        self.assertIn('name="job_title" type="text" maxlength="120" required', page)
         self.assertIn("Upload Meta Cache", page)
         self.assertIn("ABAP Metadata Export Utility", page)
         self.assertIn('id="copy-metadata-export"', page)
@@ -67,6 +71,7 @@ class EnhanceAbapFlowTest(unittest.TestCase):
                 response = app.test_client().post(
                     "/enhance",
                     data={
+                        "job_title": "Holiday upload enhancement",
                         "existing_abap_file": (BytesIO(b"REPORT zold."), "zold.abap"),
                         "enhancement_specification": "Add an ALV output.",
                         "sap_syntax_check_attempts": "2",
@@ -82,6 +87,8 @@ class EnhanceAbapFlowTest(unittest.TestCase):
                 (uploads_folder / job_id / "enhancement_specification.txt").read_text(encoding="utf-8"),
                 "Add an ALV output.",
             )
+            options = json.loads((jobs_folder / job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertEqual(options["job_title"], "Holiday upload enhancement")
             starter.assert_called_once()
             self.assertEqual(starter.call_args.kwargs["job_id"], job_id)
             self.assertEqual(starter.call_args.kwargs["prompt_path"], prompt_path)
@@ -102,12 +109,41 @@ class EnhanceAbapFlowTest(unittest.TestCase):
 
             response = app.test_client().post(
                 "/enhance",
-                data={"existing_abap_file": (BytesIO(b"REPORT zold."), "zold.abap")},
+                data={
+                    "job_title": "Missing spec job",
+                    "existing_abap_file": (BytesIO(b"REPORT zold."), "zold.abap"),
+                },
                 content_type="multipart/form-data",
             )
 
             self.assertEqual(response.status_code, 400)
             self.assertIn("Enter the enhancement specification.", response.data.decode("utf-8"))
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_enhance_upload_requires_job_title(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            app = create_app(
+                {
+                    "TESTING": True,
+                    "UPLOAD_FOLDER": str(temp_path / "uploads"),
+                    "JOBS_FOLDER": str(temp_path / "jobs"),
+                }
+            )
+
+            response = app.test_client().post(
+                "/enhance",
+                data={
+                    "existing_abap_file": (BytesIO(b"REPORT zold."), "zold.abap"),
+                    "enhancement_specification": "Add an ALV output.",
+                },
+                content_type="multipart/form-data",
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Enter a job title.", response.data.decode("utf-8"))
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -217,6 +253,7 @@ class EnhanceAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/enhance",
                     data={
+                        "job_title": "Approval enhancement",
                         "existing_abap_file": (
                             BytesIO(b"REPORT zold.\nSTART-OF-SELECTION.\n  WRITE: / 'Old'."),
                             "zold.abap",
@@ -239,7 +276,10 @@ class EnhanceAbapFlowTest(unittest.TestCase):
 
                 review = client.get(f"/enhancement-review/{job_id}")
                 self.assertEqual(review.status_code, 200)
-                self.assertIn(b"Proposed Diff", review.data)
+                self.assertIn(b"Proposed Changes", review.data)
+                self.assertIn(b"Technical Diff", review.data)
+                self.assertNotIn(b"<summary>Proposed Diff</summary>", review.data)
+                self.assertNotIn(b"<details class=\"code-panel\" open>\n          <summary>Technical Diff</summary>", review.data)
                 self.assertIn(b"Approve changes", review.data)
 
                 approve = client.post(f"/enhancement-review/{job_id}", data={"action": "approve"}, follow_redirects=False)
@@ -255,6 +295,114 @@ class EnhanceAbapFlowTest(unittest.TestCase):
             self.assertTrue(metrics["cost_breakdown"]["by_stage"])
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_enhancement_review_payload_summarizes_detected_changes_generically(self):
+        original = "\n".join(
+            [
+                "REPORT ztest.",
+                "TYPES: BEGIN OF ty_output,",
+                "         old_field TYPE string,",
+                "       END OF ty_output.",
+                "DATA t_output TYPE STANDARD TABLE OF ty_output.",
+                "FORM read_data.",
+                "  SELECT old_field",
+                "    FROM ztable",
+                "    INTO TABLE t_output.",
+                "ENDFORM.",
+                "FORM display_data.",
+                "  WRITE old_field.",
+                "ENDFORM.",
+            ]
+        )
+        proposed = "\n".join(
+            [
+                "REPORT ztest.",
+                "TYPES: BEGIN OF ty_output,",
+                "         old_field TYPE string,",
+                "         new_field TYPE string,",
+                "       END OF ty_output.",
+                "DATA t_output TYPE STANDARD TABLE OF ty_output.",
+                "DATA t_extra TYPE STANDARD TABLE OF string.",
+                "FORM read_data.",
+                "  SELECT old_field",
+                "         new_field",
+                "    FROM ztable",
+                "    INTO TABLE t_output.",
+                "ENDFORM.",
+                "FORM display_data.",
+                "  WRITE new_field.",
+                "ENDFORM.",
+            ]
+        )
+
+        payload = enhancement_review_payload(original, proposed, "Add the requested output field.")
+
+        self.assertEqual(
+            payload["proposed_changes"],
+            [
+                {
+                    "category": "Data Structures",
+                    "descriptions": ["Added field NEW_FIELD to structure TY_OUTPUT."],
+                },
+                {
+                    "category": "Declarations",
+                    "descriptions": ["Added internal table T_EXTRA."],
+                },
+                {
+                    "category": "Database Reads",
+                    "descriptions": ["Added field NEW_FIELD to SELECT from table ZTABLE."],
+                },
+                {
+                    "category": "Output / ALV",
+                    "descriptions": ["Added output field NEW_FIELD.", "Removed output field OLD_FIELD."],
+                },
+            ],
+        )
+        summary_text = json.dumps(payload["proposed_changes"])
+        self.assertIn("NEW_FIELD", summary_text)
+        self.assertIn("TY_OUTPUT", summary_text)
+        self.assertIn("T_EXTRA", summary_text)
+        self.assertIn("ZTABLE", summary_text)
+        self.assertIn("+         new_field TYPE string,", payload["diff"])
+
+    def test_enhancement_review_payload_names_selection_calls_forms_and_file_objects(self):
+        original = "\n".join(
+            [
+                "REPORT ztest.",
+                "FORM run_process.",
+                "  DATA w_count TYPE i.",
+                "ENDFORM.",
+            ]
+        )
+        proposed = "\n".join(
+            [
+                "REPORT ztest.",
+                "PARAMETERS p_flag TYPE c.",
+                "SELECT-OPTIONS s_date FOR sy-datum.",
+                "FORM run_process.",
+                "  DATA w_count TYPE i.",
+                "  w_count = w_count + 1.",
+                "  CALL FUNCTION 'Z_DO_WORK'.",
+                "  zcl_worker=>run( ).",
+                "  OPEN DATASET p_file FOR OUTPUT IN TEXT MODE.",
+                "ENDFORM.",
+            ]
+        )
+
+        payload = enhancement_review_payload(original, proposed, "Add generic processing support.")
+        changes_by_category = {
+            item["category"]: item["descriptions"]
+            for item in payload["proposed_changes"]
+        }
+
+        self.assertEqual(
+            changes_by_category["Selection Screen"],
+            ["Added parameter P_FLAG.", "Added select-option S_DATE."],
+        )
+        self.assertIn("Updated FORM RUN_PROCESS.", changes_by_category["Processing Logic"])
+        self.assertIn("Added function module call Z_DO_WORK.", changes_by_category["Function/Method Calls"])
+        self.assertIn("Added method call ZCL_WORKER=>RUN.", changes_by_category["Function/Method Calls"])
+        self.assertIn("Updated file handling for P_FILE.", changes_by_category["File Handling"])
 
     def test_enhancement_reject_does_not_generate_result(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
@@ -281,6 +429,7 @@ class EnhanceAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/enhance",
                     data={
+                        "job_title": "Rejected enhancement",
                         "existing_abap_file": (BytesIO(b"REPORT zold."), "zold.abap"),
                         "enhancement_specification": "Keep it simple.",
                     },
@@ -611,6 +760,58 @@ class EnhanceAbapFlowTest(unittest.TestCase):
 
         self.assertIn(unaffected, result["text"])
         self.assertEqual(result["text"].lower().count("from kna1"), 1)
+
+    def test_alv_only_output_enhancement_does_not_select_customer_or_file_chunks(self):
+        source = "\n".join(
+            [
+                "REPORT ztest.",
+                "TYPES: BEGIN OF ty_pa0002,",
+                "         pernr TYPE pernr_d,",
+                "         nachn TYPE pad_nachn,",
+                "       END OF ty_pa0002.",
+                "TYPES: BEGIN OF ty_customer_data,",
+                "         name_last TYPE string,",
+                "       END OF ty_customer_data.",
+                "TYPES: BEGIN OF ty_output,",
+                "         nachn TYPE string,",
+                "       END OF ty_output.",
+                "DATA: st_customer_data TYPE ty_customer_data,",
+                "      st_output TYPE ty_output.",
+                "FORM define_field_catalog.",
+                "  st_alv_fieldcat-fieldname = 'NACHN'.",
+                "  st_alv_fieldcat-seltext_l = 'Surname'.",
+                "ENDFORM.",
+                "FORM read_pa0002.",
+                "  SELECT pernr nachn INTO TABLE t_pa0002 FROM pa0002.",
+                "ENDFORM.",
+                "FORM define_customer_data.",
+                "  st_customer_data-name_last = st_pa0002-nachn.",
+                "ENDFORM.",
+                "FORM build_file_content.",
+                "  CONCATENATE st_output-nachn INTO st_content SEPARATED BY ','.",
+                "ENDFORM.",
+                "FORM check_pernr_name_change.",
+                "  PERFORM change_cell USING 'NACHN'.",
+                "ENDFORM.",
+            ]
+        )
+        spec = (
+            "For the read from PA0002 also extract GBDAT. This is only required on the ALV report "
+            "and should be output as GBDAT - Date of Birth. It needs to be placed after the surname. "
+            "Do not make any other changes to functionality. Amend the existing SQL read of PA0002. "
+            "Do not create new SQL for a read of PA0002."
+        )
+
+        chunks = split_existing_program_chunks(source)
+        affected = identify_affected_chunks(chunks, spec)
+        ids = [chunk["id"] for chunk in affected]
+
+        self.assertIn("global", ids)
+        self.assertIn("form:read_pa0002", ids)
+        self.assertIn("form:define_field_catalog", ids)
+        self.assertNotIn("form:define_customer_data", ids)
+        self.assertNotIn("form:build_file_content", ids)
+        self.assertNotIn("form:check_pernr_name_change", ids)
 
     def test_package_select_conversion_keeps_read_data_as_owner(self):
         source = "\n".join(
@@ -1426,6 +1627,229 @@ class EnhanceAbapFlowTest(unittest.TestCase):
             )
             self.assertFalse((jobs_folder / "job" / "generated.abap").exists())
             self.assertEqual(get_progress(jobs_folder, "job")["status"], "Error")
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_run_enhance_abap_restores_unrelated_fixer_rewrites(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            uploads_folder = temp_path / "uploads"
+            jobs_folder = temp_path / "jobs"
+            source_path = uploads_folder / "job" / "zoutput.abap"
+            specification_path = uploads_folder / "job" / "enhancement.txt"
+            prompt_path = temp_path / "enhance_existing_abap.txt"
+            source_path.parent.mkdir(parents=True)
+            original = "\n".join(
+                [
+                    "REPORT zoutput.",
+                    "TYPES: BEGIN OF ty_pa0002,",
+                    "         pernr TYPE pernr_d,",
+                    "         nachn TYPE pad_nachn,",
+                    "       END OF ty_pa0002.",
+                    "TYPES: BEGIN OF ty_output,",
+                    "         nachn TYPE string,",
+                    "       END OF ty_output.",
+                    "DATA: t_pa0002 TYPE STANDARD TABLE OF ty_pa0002,",
+                    "      t_alv_fieldcat TYPE slis_t_fieldcat_alv,",
+                    "      st_alv_fieldcat TYPE slis_fieldcat_alv,",
+                    "      st_output TYPE ty_output.",
+                    "FORM define_field_catalog.",
+                    "  st_alv_fieldcat-fieldname = 'NACHN'.",
+                    "  st_alv_fieldcat-seltext_l = 'Surname'.",
+                    "ENDFORM.",
+                    "FORM read_pa0002.",
+                    "  SELECT pernr",
+                    "         nachn",
+                    "         INTO TABLE t_pa0002",
+                    "         FROM pa0002.",
+                    "ENDFORM.",
+                    "FORM map_0006_field_changes USING p_fieldname.",
+                    "  DATA: l_source_field TYPE string,",
+                    "        l_target_field TYPE string,",
+                    "        l_output_field TYPE string.",
+                    "  l_source_field = 'ST_PA0006_CURRENT_OUTPUT-' && p_fieldname.",
+                    "  l_target_field = 'ST_PA0006_SECOND_OUTPUT-'  && p_fieldname.",
+                    "  l_output_field = 'ST_OUTPUT-'                && p_fieldname.",
+                    "ENDFORM.",
+                    "FORM split_anlnr.",
+                    "  DATA: lt_strings TYPE STANDARD TABLE OF string.",
+                    "  DATA: lst_strings TYPE string.",
+                    "  SPLIT st_pa0032-anlnr AT '-' INTO TABLE lt_strings.",
+                    "  LOOP AT lt_strings INTO lst_strings.",
+                    "  ENDLOOP.",
+                    "ENDFORM.",
+                ]
+            )
+            enhanced = original.replace(
+                "         nachn TYPE pad_nachn,\n       END OF ty_pa0002.",
+                "         nachn TYPE pad_nachn,\n         gbdat TYPE dats,\n       END OF ty_pa0002.",
+            ).replace(
+                "         nachn TYPE string,\n       END OF ty_output.",
+                "         nachn TYPE string,\n         gbdat TYPE dats,\n       END OF ty_output.",
+            ).replace(
+                "         nachn\n         INTO TABLE t_pa0002",
+                "         nachn\n         gbdat\n         INTO TABLE t_pa0002",
+            ).replace(
+                "  st_alv_fieldcat-seltext_l = 'Surname'.",
+                "  st_alv_fieldcat-seltext_l = 'Surname'.\n"
+                "  APPEND st_alv_fieldcat TO t_alv_fieldcat.\n"
+                "  CLEAR st_alv_fieldcat.\n"
+                "  st_alv_fieldcat-fieldname = 'GBDAT'.\n"
+                "  st_alv_fieldcat-seltext_l = 'Date of Birth'.",
+            )
+            source_path.write_text(original, encoding="utf-8")
+            specification_path.write_text(
+                "For the read from PA0002 also extract GBDAT. This is only required on the ALV report.",
+                encoding="utf-8",
+            )
+            prompt_path.write_text("Prompt\n{{FUNCTIONAL_SPECIFICATION}}\n{{EXISTING_ABAP}}", encoding="utf-8")
+
+            run_enhance_abap(
+                "job",
+                source_path,
+                specification_path,
+                jobs_folder,
+                prompt_path,
+                enhancement_review_required=False,
+                approved_enhancement={"proposed_abap": enhanced, "model": "approved-test", "usage": None, "chunks": []},
+            )
+
+            generated = (jobs_folder / "job" / "generated.abap").read_text(encoding="utf-8")
+            self.assertIn("l_source_field = 'ST_PA0006_CURRENT_OUTPUT-' && p_fieldname.", generated)
+            self.assertIn("DATA: lt_strings TYPE STANDARD TABLE OF string.", generated)
+            self.assertIn("SPLIT st_pa0032-anlnr AT '-' INTO TABLE lt_strings.", generated)
+            self.assertIn("gbdat TYPE dats", generated)
+            self.assertEqual(get_progress(jobs_folder, "job")["status"], "Complete")
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_restore_select_blocks_preserves_logic_between_similar_blocks(self):
+        original = "\n".join(
+            [
+                "FORM build_file_content.",
+                "  SELECT low UP TO 1 ROWS",
+                "         INTO w_zzcolleague_location",
+                "         FROM hrv1222a",
+                "         WHERE attrib EQ 'ZCOLL_LOCN'.",
+                "  ENDSELECT.",
+                "",
+                "  TRANSLATE w_zzcolleague_location TO UPPER CASE.",
+                "",
+                "  READ TABLE t_site_addresses INTO st_site_addresses",
+                "    WITH KEY name = w_zzcolleague_location",
+                "    BINARY SEARCH.",
+                "",
+                "  IF sy-subrc NE 0.",
+                "    SELECT low UP TO 1 ROWS",
+                "           INTO w_zzcolleague_location",
+                "           FROM hrv1222a",
+                "           WHERE attrib EQ 'ZCOLL_LOC2'.",
+                "    ENDSELECT.",
+                "  ENDIF.",
+                "ENDFORM.",
+            ]
+        )
+        fixed = original.replace(
+            "\n".join(
+                [
+                    "  SELECT low UP TO 1 ROWS",
+                    "         INTO w_zzcolleague_location",
+                    "         FROM hrv1222a",
+                    "         WHERE attrib EQ 'ZCOLL_LOCN'.",
+                    "  ENDSELECT.",
+                ]
+            ),
+            "  SELECT low UP TO 1 ROWS FROM hrv1222a INTO w_zzcolleague_location WHERE attrib EQ 'ZCOLL_LOCN'.\n  ENDSELECT.",
+        ).replace(
+            "\n".join(
+                [
+                    "    SELECT low UP TO 1 ROWS",
+                    "           INTO w_zzcolleague_location",
+                    "           FROM hrv1222a",
+                    "           WHERE attrib EQ 'ZCOLL_LOC2'.",
+                    "    ENDSELECT.",
+                ]
+            ),
+            "    SELECT low UP TO 1 ROWS FROM hrv1222a INTO w_zzcolleague_location WHERE attrib EQ 'ZCOLL_LOC2'.\n    ENDSELECT.",
+        )
+
+        restored, blocks = restore_unrelated_select_endselect_blocks(original, fixed, None)
+
+        self.assertEqual(restored, original)
+        self.assertEqual(len(blocks), 2)
+        self.assertIn("TRANSLATE w_zzcolleague_location TO UPPER CASE.", restored)
+        self.assertIn("READ TABLE t_site_addresses INTO st_site_addresses", restored)
+        self.assertIn("WHERE attrib EQ 'ZCOLL_LOC2'.", restored)
+
+    def test_run_enhance_abap_restores_unrelated_select_blocks_after_fixer(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            uploads_folder = temp_path / "uploads"
+            jobs_folder = temp_path / "jobs"
+            source_path = uploads_folder / "job" / "zselect.abap"
+            specification_path = uploads_folder / "job" / "enhancement.txt"
+            prompt_path = temp_path / "enhance_existing_abap.txt"
+            source_path.parent.mkdir(parents=True)
+            select_block = "\n".join(
+                [
+                    "  SELECT low UP TO 1 ROWS",
+                    "         INTO w_location",
+                    "         FROM zlookup",
+                    "         WHERE key_field EQ w_key.",
+                    "  ENDSELECT.",
+                ]
+            )
+            original = "\n".join(
+                [
+                    "REPORT zselect.",
+                    "DATA: w_location TYPE string,",
+                    "      w_key TYPE string.",
+                    "FORM build_output.",
+                    select_block,
+                    "  WRITE: / 'old'.",
+                    "ENDFORM.",
+                ]
+            )
+            enhanced = original.replace("  WRITE: / 'old'.", "  WRITE: / 'old'.\n  WRITE: / 'new'.")
+            bad_fixed = enhanced.replace(
+                "         WHERE key_field EQ w_key.\n  ENDSELECT.",
+                "         WHERE key_field EQ w_key.\n"
+                "  SELECT low UP TO 1 ROWS FROM zlookup INTO w_location WHERE key_field EQ w_key.\n"
+                "  ENDSELECT.",
+            )
+            source_path.write_text(original, encoding="utf-8")
+            specification_path.write_text("Add an output line.", encoding="utf-8")
+            prompt_path.write_text("Prompt\n{{FUNCTIONAL_SPECIFICATION}}\n{{EXISTING_ABAP}}", encoding="utf-8")
+            fixer_result = {
+                "fixed_source": bad_fixed,
+                "original_issues": [],
+                "final_issues": [],
+                "original_issue_count": 0,
+                "final_issue_count": 0,
+                "fixes": [],
+                "diagnostics": {"source_after_fixer": bad_fixed},
+            }
+
+            with patch("services.enhance_abap.auto_fix_abap", return_value=fixer_result):
+                run_enhance_abap(
+                    "job",
+                    source_path,
+                    specification_path,
+                    jobs_folder,
+                    prompt_path,
+                    enhancement_review_required=False,
+                    approved_enhancement={"proposed_abap": enhanced, "model": "approved-test", "usage": None, "chunks": []},
+                )
+
+            generated = (jobs_folder / "job" / "generated.abap").read_text(encoding="utf-8")
+            self.assertIn(select_block, generated)
+            self.assertNotIn("SELECT low UP TO 1 ROWS FROM zlookup INTO w_location", generated)
+            self.assertIn("WRITE: / 'new'.", generated)
+            fix_summary = json.loads((jobs_folder / "job" / "fix_summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(fix_summary["diagnostics"]["enhancement_restored_unrelated_select_blocks"])
+            self.assertEqual(get_progress(jobs_folder, "job")["status"], "Complete")
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 

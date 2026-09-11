@@ -40,7 +40,11 @@ from services.orchestrator import (
     ChunkedGenerationError,
     ProcessingContractValidationError,
     ProcessingPlanValidationError,
+    StructuredGenerationContractValidationError,
     aggregate_usage,
+    apply_deterministic_alv_field_catalogue,
+    apply_deterministic_file_input_support,
+    apply_deterministic_selection_screen_declarations,
     declaration_requirements_with_processing_plan_variables,
     declaration_requirements_for_prompt,
     ensure_callable_parameter_declarations,
@@ -367,6 +371,18 @@ def run_create_abap(
         final_abap = group_declaration_statements_by_prefix(final_abap)
         final_abap = ensure_callable_parameter_declarations(final_abap, callable_metadata)
         final_abap = group_declaration_statements_by_prefix(final_abap)
+        final_abap = apply_deterministic_selection_screen_declarations(
+            final_abap,
+            llm_result.get("structured_generation_contract") if isinstance(llm_result, dict) else None,
+        )
+        final_abap = apply_deterministic_alv_field_catalogue(
+            final_abap,
+            generation_contract=llm_result.get("structured_generation_contract") if isinstance(llm_result, dict) else None,
+            declaration_requirements=declaration_requirements_for_prompt(llm_result.get("declaration_requirements")),
+            ddic_metadata=ddic_metadata,
+            source_text=source_text,
+        )
+        final_abap = apply_deterministic_file_input_support(final_abap, source_text)
         final_abap = ensure_standard_report_header(final_abap)
         for stage in fixer_diagnostic_stages(fix_result):
             record_post_generation_stage(post_generation_diagnostics, stage["stage"], stage["source"])
@@ -454,10 +470,36 @@ def run_create_abap(
         final_abap = group_declaration_statements_by_prefix(final_abap)
         final_abap = ensure_callable_parameter_declarations(final_abap, callable_metadata)
         final_abap = group_declaration_statements_by_prefix(final_abap)
+        final_abap = apply_deterministic_selection_screen_declarations(
+            final_abap,
+            llm_result.get("structured_generation_contract") if isinstance(llm_result, dict) else None,
+        )
+        final_abap = apply_deterministic_alv_field_catalogue(
+            final_abap,
+            generation_contract=llm_result.get("structured_generation_contract") if isinstance(llm_result, dict) else None,
+            declaration_requirements=declaration_requirements_for_prompt(llm_result.get("declaration_requirements")),
+            ddic_metadata=ddic_metadata,
+            source_text=source_text,
+        )
+        final_abap = apply_deterministic_file_input_support(final_abap, source_text)
         final_abap = ensure_standard_report_header(final_abap)
         add_section_duration(section_durations, "sap_syntax_check", time.monotonic() - sap_syntax_started_at)
         record_post_generation_stage(post_generation_diagnostics, "complete_source_immediately_before_final_save", final_abap)
         (job_folder / "generated.abap").write_text(final_abap, encoding="utf-8")
+        validation_issues = merge_validation_issues(
+            validation_issues,
+            validate_generated_processing_completeness(
+                final_abap,
+                source_text=source_text,
+                processing_plan=llm_result.get("processing_plan") if isinstance(llm_result, dict) else approved_processing_plan,
+                declaration_requirements=(
+                    llm_result.get("declaration_requirements")
+                    if isinstance(llm_result, dict)
+                    else prepared_declaration_requirements
+                ),
+            ),
+        )
+        save_validation_issues(job_folder, validation_issues)
         save_post_generation_diagnostics(job_folder, post_generation_diagnostics)
         cost_breakdown = cost_breakdown_from_job_artifacts(job_folder)
         if not cost_breakdown_has_entries(cost_breakdown):
@@ -635,6 +677,11 @@ def processing_plan_review_payload(processing_plan, prompt_text=None, source_tex
         "validation_errors": validation_errors,
         "validation_warnings": warnings,
         "llm_request": processing_plan_llm_request_text(review_candidate),
+        "output_plan": processing_plan_output_plan(
+            prompt_text=prompt_text,
+            source_text=source_text,
+            declaration_requirements=declaration_requirements,
+        ),
         "variable_contract": processing_plan_variable_contract(
             plan,
             prompt_text=prompt_text,
@@ -644,6 +691,51 @@ def processing_plan_review_payload(processing_plan, prompt_text=None, source_tex
         "diagnostics": processing_plan or {},
         "approved": False,
     }
+
+
+def processing_plan_output_plan(prompt_text=None, source_text=None, declaration_requirements=None):
+    text = str(source_text or "")
+    steps = []
+    if specification_requests_alv(text):
+        steps.append({"description": "Display the output using ALV."})
+    if specification_requests_output_file(text):
+        if re.search(r"\bCSV\b|\bcomma[-\s]?separated\b", text, re.IGNORECASE):
+            steps.append({"description": "Create the requested CSV file output."})
+        else:
+            steps.append({"description": "Create the requested file output."})
+    for field in processing_plan_output_fields(declaration_requirements):
+        name = str(field.get("name") or "").strip()
+        heading = str(field.get("heading") or "").strip()
+        if not name:
+            continue
+        if heading:
+            steps.append({"description": f"Show {name} with heading {heading}."})
+        else:
+            steps.append({"description": f"Show {name}."})
+    return steps
+
+
+def processing_plan_output_fields(declaration_requirements):
+    if isinstance(declaration_requirements, dict) and isinstance(declaration_requirements.get("output_structure_fields"), list):
+        return [item for item in declaration_requirements.get("output_structure_fields") or [] if isinstance(item, dict)]
+    requirements = parse_declaration_requirements_text(
+        declaration_requirements_for_prompt(declaration_requirements)
+        if isinstance(declaration_requirements, dict)
+        else str(declaration_requirements or "")
+    )
+    if not isinstance(requirements, dict):
+        return []
+    return [item for item in requirements.get("output_structure_fields") or [] if isinstance(item, dict)]
+
+
+def specification_requests_output_file(source_text):
+    text = str(source_text or "")
+    if re.search(r"\bno\s+output\s+file\b|\bno\s+(?:separate\s+)?file\s+output\b|\boutput\s+file\s+is\s+not\s+required\b", text, re.IGNORECASE):
+        return False
+    return bool(
+        re.search(r"\bCSV\b|\bcomma[-\s]?separated\b|\bdownload\b|\bexport\b|\bfile\s+output\b", text, re.IGNORECASE)
+        or re.search(r"\b(?:output|create|write|generate|save)\b.{0,40}\bfile\b", text, re.IGNORECASE | re.DOTALL)
+    )
 
 
 def processing_plan_variable_contract(plan, prompt_text=None, source_text=None, declaration_requirements=None):
@@ -663,9 +755,17 @@ def processing_plan_variable_contract(plan, prompt_text=None, source_text=None, 
         )
     requirements = parse_declaration_requirements_text(declaration_text)
     if isinstance(requirements, dict):
-        output_names = {"type": "ty_output", "table": "t_output", "work_area": "w_output"} if requirements.get("output_structure_fields") else {}
+        output_fields = processing_plan_output_fields(requirements)
+        output_names = {"type": "ty_output", "table": "t_output", "work_area": "w_output"} if output_fields else {}
         if output_names:
-            add_review_variable(variables, output_names["type"], "Type", f"TYPES {output_names['type']}.", "Output structure contract")
+            add_review_variable(
+                variables,
+                output_names["type"],
+                "Type",
+                f"TYPES {output_names['type']}.",
+                "Output structure contract",
+                fields=processing_plan_type_field_definitions(output_fields),
+            )
         for item in requirements.get("parameters") or []:
             if isinstance(item, dict):
                 add_review_variable(variables, item.get("name"), "Selection parameter", "", "Declaration requirements")
@@ -685,7 +785,26 @@ def processing_plan_variable_contract(plan, prompt_text=None, source_text=None, 
     }
 
 
-def add_review_variable(variables, name, kind, declaration, source):
+def processing_plan_type_field_definitions(fields):
+    definitions = []
+    for field in fields or []:
+        if not isinstance(field, dict):
+            continue
+        raw_name = str(field.get("name") or "").strip()
+        name = raw_name.rsplit("-", 1)[-1] if "-" in raw_name else raw_name
+        type_or_like = str(field.get("type_or_like") or "").strip()
+        if not name:
+            continue
+        definitions.append(
+            {
+                "name": name,
+                "definition": f"{name} {type_or_like}".strip(),
+            }
+        )
+    return definitions
+
+
+def add_review_variable(variables, name, kind, declaration, source, fields=None):
     normalized = normalize_review_variable_name(name)
     if not normalized:
         return
@@ -693,6 +812,8 @@ def add_review_variable(variables, name, kind, declaration, source):
         if existing["name"].lower() == normalized.lower():
             if declaration and not existing.get("declaration"):
                 existing["declaration"] = declaration
+            if fields and not existing.get("fields"):
+                existing["fields"] = fields
             return
     variables.append(
         {
@@ -700,6 +821,7 @@ def add_review_variable(variables, name, kind, declaration, source):
             "kind": kind,
             "declaration": str(declaration or ""),
             "source": source,
+            "fields": fields or [],
         }
     )
 
@@ -980,6 +1102,7 @@ def load_processing_plan_proposal(jobs_folder, job_id):
         return {}
     payload = ensure_processing_plan_proposal_summary(payload)
     payload = ensure_processing_plan_proposal_llm_request(payload, jobs_folder, job_id)
+    payload = ensure_processing_plan_proposal_output_plan(payload, jobs_folder, job_id)
     return ensure_processing_plan_proposal_variable_contract(payload, jobs_folder, job_id)
 
 
@@ -1011,8 +1134,26 @@ def ensure_processing_plan_proposal_llm_request(payload, jobs_folder, job_id):
     return payload
 
 
+def ensure_processing_plan_proposal_output_plan(payload, jobs_folder, job_id):
+    if not isinstance(payload, dict) or payload.get("output_plan"):
+        return payload
+    context = load_processing_plan_context(jobs_folder, job_id)
+    input_path = Path(context.get("input_path") or "")
+    source_text = input_path.read_text(encoding="utf-8") if input_path.is_file() else ""
+    updated = dict(payload)
+    updated["output_plan"] = processing_plan_output_plan(
+        prompt_text=context.get("prompt_text"),
+        source_text=source_text,
+        declaration_requirements=context.get("declaration_requirements"),
+    )
+    return updated
+
+
 def ensure_processing_plan_proposal_variable_contract(payload, jobs_folder, job_id):
-    if not isinstance(payload, dict) or payload.get("variable_contract"):
+    if not isinstance(payload, dict):
+        return payload
+    existing_contract = payload.get("variable_contract")
+    if existing_contract and processing_plan_variable_contract_has_type_fields(existing_contract):
         return payload
     context = load_processing_plan_context(jobs_folder, job_id)
     input_path = Path(context.get("input_path") or "")
@@ -1025,6 +1166,15 @@ def ensure_processing_plan_proposal_variable_contract(payload, jobs_folder, job_
         declaration_requirements=context.get("declaration_requirements"),
     )
     return updated
+
+
+def processing_plan_variable_contract_has_type_fields(variable_contract):
+    if not isinstance(variable_contract, dict):
+        return False
+    for variable in variable_contract.get("variables_to_define") or []:
+        if isinstance(variable, dict) and variable.get("kind") == "Type" and variable.get("fields"):
+            return True
+    return False
 
 
 def load_approved_processing_plan(jobs_folder, job_id):
@@ -1065,6 +1215,13 @@ def approve_processing_plan_for_job(jobs_folder, job_id, plan, allow_validation_
         "structured_json": json.dumps(normalized["plan"], indent=2, sort_keys=True),
         "validation_errors": validation["errors"],
         "validation_warnings": processing_plan_validation_warnings(normalized["diagnostics"]),
+        "output_plan": processing_plan_output_plan(
+            prompt_text=prompt_text,
+            source_text=Path(context.get("input_path") or "").read_text(encoding="utf-8")
+            if Path(context.get("input_path") or "").is_file()
+            else "",
+            declaration_requirements=declaration_requirements,
+        ),
         "variable_contract": processing_plan_variable_contract(
             normalized["plan"],
             prompt_text=prompt_text,
@@ -1223,16 +1380,23 @@ def build_generation_contract(source_text, dependency_analysis, ddic_metadata=No
         for item in (dependency_analysis or {}).get("ddic_objects", []) or []
         if isinstance(item, dict) and item.get("name") and item.get("structure") and item.get("table")
     ]
+    ddic_metadata_objects = dedupe_preserve_order([item["name"] for item in ddic_objects])
+    runtime_ddic_objects = [
+        item
+        for item in ddic_objects
+        if ddic_object_requires_runtime_aliases(item, source_text)
+    ]
     output_fields = []
     for table_metadata in normalized_tables(ddic_metadata or {}).values():
         output_fields.extend(normalized_fields(table_metadata))
     callable_identities = callable_identities_from_dependency_analysis(dependency_analysis, callable_metadata)
     return {
-        "internal_tables": [item["table"] for item in ddic_objects],
-        "work_areas": [work_area_name_for_ddic_object(item) for item in ddic_objects],
+        "internal_tables": [item["table"] for item in runtime_ddic_objects],
+        "work_areas": [work_area_name_for_ddic_object(item) for item in runtime_ddic_objects],
         "output_structure_fields": dedupe_preserve_order(output_fields),
-        "form_names": form_names_for_generation_contract(source_text, ddic_objects, callable_identities),
+        "form_names": form_names_for_generation_contract(source_text, runtime_ddic_objects, callable_identities),
         "callable_identities": callable_identities,
+        "ddic_metadata_objects": ddic_metadata_objects,
         "ddic_objects": [
             {
                 "name": item["name"],
@@ -1240,9 +1404,30 @@ def build_generation_contract(source_text, dependency_analysis, ddic_metadata=No
                 "table": item["table"],
                 "work_area": work_area_name_for_ddic_object(item),
             }
-            for item in ddic_objects
+            for item in runtime_ddic_objects
         ],
     }
+
+
+def ddic_object_requires_runtime_aliases(item, source_text=None):
+    object_name = str((item or {}).get("name") or "").strip().upper()
+    if not object_name:
+        return False
+    text = str(source_text or "")
+    aliases = [
+        str((item or {}).get("structure") or ""),
+        str((item or {}).get("table") or ""),
+        work_area_name_for_ddic_object(item),
+    ]
+    for alias in aliases:
+        if alias and re.search(rf"\b{re.escape(alias)}\b", text, re.IGNORECASE):
+            return True
+    return bool(
+        re.search(rf"\b(?:read|select|loop|search|join\s+to|from)\s+(?:SAP\s+)?(?:table|structure|view)?\s*{re.escape(object_name)}\b", text, re.IGNORECASE)
+        or re.search(rf"\bread\s+(?:the\s+)?(?:(?:current|relevant|existing)\s+)*{re.escape(object_name)}\s+records?\b", text, re.IGNORECASE)
+        or re.search(rf"\bchecks?\s+(?:the\s+)?(?:(?:current|relevant|existing)\s+)*{re.escape(object_name)}\s+(?:records?\b|for\b|to\s+(?:determine|identify|find|see)\b)", text, re.IGNORECASE)
+        or re.search(rf"^\s*#+\s*{re.escape(object_name)}\b[\s\S]*?\b(?:read fields|selection fields|join to|selection)\b", text, re.IGNORECASE | re.MULTILINE)
+    )
 
 
 def append_generation_contract(prompt_text, contract):
@@ -1267,6 +1452,8 @@ def append_generation_contract(prompt_text, contract):
         "Exact output structure fields: " + comma_or_none(contract.get("output_structure_fields")),
         "Exact FORM names: " + comma_or_none(contract.get("form_names")),
         "Exact callable identities: " + comma_or_none(contract.get("callable_identities")),
+        "Exact DDIC metadata dependencies: "
+        + comma_or_none(contract.get("ddic_metadata_objects") or [item.get("name") for item in contract.get("ddic_objects", []) or []]),
     ]
     for item in contract.get("ddic_objects", []) or []:
         lines.append(
@@ -1331,6 +1518,8 @@ def generate_abap_with_orchestrator(
             approved_processing_plan=approved_processing_plan,
             final_assembly_mode=final_assembly_mode,
         )
+    except StructuredGenerationContractValidationError:
+        raise
     except Exception as exc:
         fallback = generator(prompt_text, source_text)
         response_text, model_name, usage = normalize_llm_result(fallback)
@@ -2190,6 +2379,12 @@ def maybe_run_sap_syntax_check(
                 save_syntax_repair_flow_diagnostic(job_folder, diagnostic)
                 raise RuntimeError("Syntax repair returned standalone END. in a FORM repair.")
             repaired_abap = rebuild_report_with_repaired_form(current_source, repair_target, repaired_abap)
+            repaired_abap, restored_select_blocks = restore_unrelated_select_endselect_blocks(
+                current_source,
+                repaired_abap,
+                current_result.get("errors", []),
+            )
+            diagnostic["syntax_repair_restored_unrelated_select_blocks"] = restored_select_blocks
             record_post_generation_stage(post_generation_diagnostics, "after_syntax_repair_rebuild", repaired_abap)
         repair_fix_result = auto_fix_abap(
             repaired_abap,
@@ -2197,6 +2392,13 @@ def maybe_run_sap_syntax_check(
             callable_mappings=callable_metadata or {},
         )
         repaired_abap = repair_fix_result["fixed_source"]
+        repaired_abap, restored_after_fixer = restore_unrelated_select_endselect_blocks(
+            current_source,
+            repaired_abap,
+            current_result.get("errors", []),
+        )
+        if restored_after_fixer:
+            diagnostic["syntax_repair_restored_unrelated_select_blocks"].extend(restored_after_fixer)
         record_post_generation_stage(post_generation_diagnostics, "after_syntax_repair_deterministic_fixer", repaired_abap)
         diagnostic["abap_after_deterministic_repairs"] = repaired_abap
         diagnostic["deterministic_repairs_ran_after_llm_repair"] = True
@@ -2344,6 +2546,204 @@ def rebuild_report_with_repaired_form(source_code, target, repaired_source):
     return "".join(lines[:target["start"]]) + replacement + "".join(lines[target["end"]:])
 
 
+def restore_unrelated_select_endselect_blocks(original_source, repaired_source, errors):
+    restore_all_blocks = errors is None
+    error_lines = set()
+    if not restore_all_blocks:
+        error_lines = {
+            error.get("line")
+            for error in errors or []
+            if isinstance(error, dict) and isinstance(error.get("line"), int)
+        }
+        if not error_lines:
+            return repaired_source, []
+
+    original_blocks = [
+        block for block in select_endselect_blocks(original_source)
+        if restore_all_blocks or not any(block["start"] + 1 <= line <= block["end"] for line in error_lines)
+    ]
+    if not original_blocks:
+        return repaired_source, []
+
+    repaired_lines = source_lines_with_endings(repaired_source)
+    repaired_blocks = select_endselect_blocks(repaired_source)
+    replacements = []
+    restored = []
+    used_repaired_indexes = set()
+    for original_block in original_blocks:
+        original_signature = select_opening_signature(original_block["lines"])
+        if not original_signature:
+            continue
+        original_text = "".join(original_block["lines"])
+        candidates = [
+            (repaired_index, repaired_block)
+            for repaired_index, repaired_block in enumerate(repaired_blocks)
+            if repaired_index not in used_repaired_indexes
+            and select_opening_signature(repaired_block["lines"]) == original_signature
+        ]
+        if not candidates:
+            continue
+        repaired_index, repaired_block = min(
+            candidates,
+            key=lambda item: abs(item[1]["start"] - original_block["start"]),
+        )
+        repaired_text = "".join(repaired_block["lines"])
+        if repaired_text == original_text:
+            duplicate_index = preceding_duplicate_collapsed_select_index(
+                repaired_lines,
+                repaired_block["start"],
+                original_signature,
+            )
+            if duplicate_index is not None:
+                replacements.append((duplicate_index, duplicate_index + 1, []))
+                restored.append(
+                    {
+                        "line": original_block["start"] + 1,
+                        "signature": original_signature,
+                    }
+                )
+            used_repaired_indexes.add(repaired_index)
+            continue
+        replacements.append((repaired_block["start"], repaired_block["end"], original_block["lines"]))
+        restored.append(
+            {
+                "line": original_block["start"] + 1,
+                "signature": original_signature,
+            }
+        )
+        used_repaired_indexes.add(repaired_index)
+
+    for start, end, replacement_lines in sorted(replacements, reverse=True):
+        repaired_lines[start:end] = replacement_lines
+    return "".join(repaired_lines), restored
+
+
+def select_endselect_blocks(source_code):
+    lines = source_lines_with_endings(source_code)
+    blocks = []
+    index = 0
+    while index < len(lines):
+        if not re.match(r"^\s*SELECT\b", abap_code_without_comment(lines[index]), flags=re.IGNORECASE):
+            index += 1
+            continue
+        statement_end = select_statement_end_index(lines, index)
+        end = index + 1
+        while end < len(lines):
+            if re.match(r"^\s*ENDSELECT\s*\.", abap_code_without_comment(lines[end]).strip(), flags=re.IGNORECASE):
+                if (
+                    statement_end is not None
+                    and end > statement_end + 1
+                    and not duplicate_collapsed_select_lines_between(lines, statement_end + 1, end, index)
+                ):
+                    break
+                blocks.append({"start": index, "end": end + 1, "lines": lines[index : end + 1]})
+                break
+            end += 1
+        index += 1
+    return blocks
+
+
+def duplicate_collapsed_select_lines_between(lines, start_index, end_index, select_start_index):
+    signature = select_opening_signature(lines[select_start_index : end_index + 1])
+    if not signature:
+        return False
+    found_duplicate = False
+    for index in range(start_index, end_index):
+        code = abap_code_without_comment(lines[index]).strip()
+        if not code:
+            continue
+        if collapsed_select_line_signature(lines[index]) != signature:
+            return False
+        found_duplicate = True
+    return found_duplicate
+
+
+def preceding_duplicate_collapsed_select_index(lines, start_index, signature):
+    index = start_index - 1
+    while index >= 0 and not abap_code_without_comment(lines[index]).strip():
+        index -= 1
+    if index < 0:
+        return None
+    if collapsed_select_line_signature(lines[index]) == signature:
+        return index
+    return None
+
+
+def collapsed_select_line_signature(line):
+    code = abap_code_without_comment(line)
+    if not re.match(r"^\s*SELECT\b", code, flags=re.IGNORECASE):
+        return ""
+    if "." not in code:
+        return ""
+    return select_opening_signature([line])
+
+
+def select_statement_end_index(lines, start_index):
+    for index in range(start_index, len(lines)):
+        code = abap_code_without_comment(lines[index])
+        if "." in code:
+            return index
+    return None
+
+
+def select_opening_signature(lines):
+    statement_lines = []
+    for line in lines or []:
+        code = abap_code_without_comment(line)
+        if re.match(r"^\s*ENDSELECT\b", code.strip(), flags=re.IGNORECASE):
+            break
+        statement_lines.append(code)
+        if "." in code:
+            break
+    statement = " ".join(statement_lines)
+    return canonical_select_signature(statement) or normalize_abap_statement_signature(statement)
+
+
+def canonical_select_signature(statement):
+    text = normalize_abap_statement_signature(statement).rstrip(".")
+    if not re.match(r"^SELECT\b", text):
+        return ""
+    table_match = re.search(r"\bFROM\s+([A-Z0-9_/]+)\b", text)
+    target_match = re.search(r"\bINTO\s+([A-Z_]\w*)\b", text)
+    if not table_match or not target_match:
+        return ""
+    fields = select_projection_signature(text)
+    where = select_where_signature(text)
+    return "|".join(
+        [
+            f"TABLE={table_match.group(1)}",
+            f"TARGET={target_match.group(1)}",
+            f"FIELDS={fields}",
+            f"WHERE={where}",
+        ]
+    )
+
+
+def select_projection_signature(statement):
+    match = re.match(r"^SELECT\s+(.+?)(?:\s+UP\s+TO\b|\s+INTO\b|\s+FROM\b)", statement, flags=re.IGNORECASE)
+    return normalize_abap_statement_signature(match.group(1)) if match else ""
+
+
+def select_where_signature(statement):
+    match = re.search(r"\bWHERE\s+(.+)$", statement, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    conditions = re.split(r"\s+AND\s+", match.group(1), flags=re.IGNORECASE)
+    return " AND ".join(sorted(normalize_abap_statement_signature(condition) for condition in conditions if condition.strip()))
+
+
+def normalize_abap_statement_signature(source):
+    return re.sub(r"\s+", " ", str(source or "").strip()).upper()
+
+
+def abap_code_without_comment(line):
+    code = str(line or "")
+    comment_index = code.find('"')
+    if comment_index >= 0:
+        return code[:comment_index]
+    return code
+
+
 def has_standalone_end_statement(source_code):
     return any(
         re.match(r"^\s*END\s*\.\s*$", line, flags=re.IGNORECASE)
@@ -2439,6 +2839,7 @@ def default_syntax_repair_flow_diagnostic(options):
         "bapi_message_getdetail_repaired_result_stored": False,
         "bapi_message_getdetail_repaired_result_passed_forward": False,
         "repaired_abap_replaced_original": False,
+        "syntax_repair_restored_unrelated_select_blocks": [],
         "second_sap_syntax_api_called": False,
         "second_syntax_check_result": None,
         "syntax_repair_prompt_source_routing": {
@@ -2457,6 +2858,8 @@ def save_syntax_repair_flow_diagnostic(job_folder, diagnostic):
         diagnostic["abap_source_passed_to_repair_llm"] or "None",
         "Complete raw response returned by repair LLM:",
         diagnostic["raw_llm_response"] or "None",
+        "Unrelated SELECT blocks restored after repair:",
+        json.dumps(diagnostic.get("syntax_repair_restored_unrelated_select_blocks") or [], indent=2),
         "Complete final ABAP source sent to final SAP syntax check:",
         diagnostic["final_abap_source_sent_to_final_sap_syntax_check"] or "None",
     ]

@@ -20,9 +20,14 @@ from services.orchestrator import (
     extract_declaration_requirements,
     extract_processing_plan,
     extract_processing_rules_section,
+    enrich_declaration_requirements_for_form_globals,
     generate_chunked_abap_program,
     processing_plan_response_format,
     discover_processing_rule_dependencies,
+    apply_deterministic_alv_field_catalogue,
+    apply_deterministic_callable_interfaces,
+    apply_deterministic_file_input_support,
+    apply_deterministic_selection_screen_declarations,
     ensure_callable_parameter_declarations,
     ensure_database_read_declarations,
     ensure_form_chunk_uses_declared_globals,
@@ -34,10 +39,12 @@ from services.orchestrator import (
     normalize_processing_plan,
     normalize_processing_plan_with_diagnostics,
     remove_database_read_declaration_units,
+    StructuredGenerationContractValidationError,
     validate_generated_processing_completeness,
     validate_processing_plan,
 )
 from services.create_abap import append_generation_contract
+from services.generation_contract import build_structured_generation_contract
 
 
 class OrchestratorTest(unittest.TestCase):
@@ -49,6 +56,8 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("{{DDIC_METADATA}}", prompt_text)
         self.assertIn("{{DECLARATION_REQUIREMENTS}}", prompt_text)
         self.assertIn("{{CHUNK_CONTRACT}}", prompt_text)
+        self.assertIn("Do not generate PARAMETERS or SELECT-OPTIONS.", prompt_text)
+        self.assertIn("selection-screen declarations deterministically", prompt_text)
         self.assertNotIn("{{FUNCTIONAL_SPECIFICATION}}", prompt_text)
         self.assertNotIn("SAP callable signature catalogue", prompt_text)
         self.assertNotIn("START-OF-SELECTION", prompt_text)
@@ -194,6 +203,65 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn('"operation": "CALL_FUNCTION"', processing_chunk["prompt"])
         self.assertIn('"name": "BAPI_MESSAGE_GETDETAIL"', processing_chunk["prompt"])
 
+    def test_structured_generation_contract_blocks_unresolved_metadata_before_generation(self):
+        def generator(_prompt_text, _source_text):
+            self.fail("ABAP chunk generation must not run after contract validation fails")
+
+        with self.assertRaises(StructuredGenerationContractValidationError) as raised:
+            generate_chunked_abap_program(
+                "Shared generation contract:\nExact FORM names: read_edidc",
+                "Read EDIDC-NOPE.",
+                abap_generator=generator,
+                declaration_requirements={
+                    "requirements": {
+                        "report_name": "ztest",
+                        "select_options": [{"name": "s_nope", "for_field": "EDIDC-NOPE"}],
+                    }
+                },
+                approved_processing_plan={
+                    "processing_steps": [
+                        {"operation": "PERFORM", "name": "read_edidc"},
+                    ]
+                },
+                ddic_metadata={
+                    "tables": {
+                        "EDIDC": {
+                            "fields": {
+                                "DOCNUM": {"datatype": "NUMC", "length": 16},
+                            }
+                        }
+                    }
+                },
+            )
+
+        self.assertIn("DDIC reference EDIDC-NOPE is unresolved", str(raised.exception))
+
+    def test_structured_generation_contract_blocks_missing_callable_signature_before_generation(self):
+        def generator(_prompt_text, _source_text):
+            self.fail("ABAP chunk generation must not run after contract validation fails")
+
+        with self.assertRaises(StructuredGenerationContractValidationError) as raised:
+            generate_chunked_abap_program(
+                "Shared generation contract:\nExact callable identities: Z_LOOKUP",
+                "Call Z_LOOKUP with IV_DOCNUM.",
+                abap_generator=generator,
+                declaration_requirements={
+                    "requirements": {
+                        "report_name": "ztest",
+                        "global_variables": [{"name": "gv_docnum", "declaration": "TYPE EDIDC-DOCNUM"}],
+                    }
+                },
+                approved_processing_plan={
+                    "processing_steps": [
+                        {"operation": "CALL_FUNCTION", "name": "Z_LOOKUP", "input_parameters": {"IV_DOCNUM": "gv_docnum"}},
+                    ]
+                },
+                ddic_metadata={"tables": {"EDIDC": {"fields": {"DOCNUM": {"datatype": "NUMC", "length": 16}}}}},
+                callable_metadata={"callable_signatures": {}},
+            )
+
+        self.assertIn("callable signature Z_LOOKUP is unresolved", str(raised.exception))
+
     def test_processing_form_generation_splits_by_top_level_processing_step(self):
         processing_prompts = []
         plan = {
@@ -266,22 +334,46 @@ class OrchestratorTest(unittest.TestCase):
             base_prompt,
             "Read EDIDC-DOCNUM and EDIDS-STATUS. Processing is defined by the approved plan.",
             abap_generator=generator,
-            declaration_requirements={"requirements": {"report_name": "ztest"}},
+            declaration_requirements={
+                "requirements": {
+                    "report_name": "ztest",
+                    "internal_tables": [
+                        {"name": "t_edidc", "row_type": "ty_edidc"},
+                        {"name": "t_edids", "row_type": "ty_edids"},
+                    ],
+                    "work_areas": [
+                        {"name": "st_edidc", "row_type": "ty_edidc"},
+                        {"name": "st_edids", "row_type": "ty_edids"},
+                    ],
+                }
+            },
             approved_processing_plan=plan,
+            ddic_metadata={
+                "tables": {
+                    "EDIDC": {"fields": {"DOCNUM": {"datatype": "NUMC", "length": 16}}},
+                    "EDIDS": {"fields": {"STATUS": {"datatype": "CHAR", "length": 1}}},
+                }
+            },
+            callable_metadata={
+                "callable_signatures": {
+                    "BAPI_ONE": {"parameters": {"IV_DOCNUM": {"direction": "IMPORTING", "abap_type": "EDIDC-DOCNUM"}}},
+                    "BAPI_TWO": {"parameters": {"IV_STATUS": {"direction": "IMPORTING", "abap_type": "EDIDS-STATUS"}}},
+                }
+            },
         )
 
         self.assertEqual(len(processing_prompts), 2)
         first_prompt, second_prompt = processing_prompts
         self.assertIn('"source": "t_edidc"', first_prompt)
         self.assertIn('"name": "BAPI_ONE"', first_prompt)
-        self.assertIn("- EDIDC: DOCNUM [TYPE EDIDC-DOCNUM]", first_prompt)
+        self.assertIn("- EDIDC: DOCNUM [NUMC(16)]", first_prompt)
         self.assertIn("- BAPI_ONE: IV_DOCNUM [IMPORTING EDIDC-DOCNUM]", first_prompt)
         self.assertNotIn("t_edids", first_prompt)
         self.assertNotIn("BAPI_TWO", first_prompt)
         self.assertNotIn("IX_UNUSED", first_prompt)
         self.assertIn('"source": "t_edids"', second_prompt)
         self.assertIn('"name": "BAPI_TWO"', second_prompt)
-        self.assertIn("- EDIDS: STATUS [TYPE EDIDS-STATUS]", second_prompt)
+        self.assertIn("- EDIDS: STATUS [CHAR(1)]", second_prompt)
         self.assertIn("- BAPI_TWO: IV_STATUS [IMPORTING EDIDS-STATUS]", second_prompt)
         self.assertNotIn("t_edidc", second_prompt)
         self.assertNotIn("BAPI_ONE", second_prompt)
@@ -386,7 +478,7 @@ class OrchestratorTest(unittest.TestCase):
             declaration_requirements={
                 "requirements": {
                     "report_name": "ztest",
-                    "parameters": [{"name": "p_rule"}],
+                    "parameters": [{"name": "p_rule", "type_or_like": "TYPE c"}],
                     "global_variables": [
                         {"name": "lo_rule", "declaration": "DATA lo_rule TYPE REF TO zcl_rule."}
                     ],
@@ -394,6 +486,21 @@ class OrchestratorTest(unittest.TestCase):
                         {"name": "PERNR", "type_or_like": "TYPE PA0000-PERNR"},
                         {"name": "STATUS", "type_or_like": "TYPE c LENGTH 1"},
                     ],
+                }
+            },
+            ddic_metadata={"tables": {"PA0000": {"fields": {"PERNR": {"datatype": "NUMC", "length": 8}}}}},
+            callable_metadata={
+                "callable_signatures": {
+                    "ZCL_RULE_FACTORY=>CREATE": {
+                        "parameters": {"IV_KEY": {"direction": "IMPORTING", "abap_type": "c"}},
+                        "returning": {"name": "RO_RULE", "direction": "RETURNING", "abap_type": "REF TO zcl_rule"},
+                    },
+                    "ZCL_RULE=>EXECUTE": {
+                        "parameters": {
+                            "IV_PERNR": {"direction": "IMPORTING", "abap_type": "PA0000-PERNR"},
+                            "EV_STATUS": {"direction": "EXPORTING", "abap_type": "c LENGTH 1"},
+                        }
+                    },
                 }
             },
         )
@@ -776,6 +883,39 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("DATA w_filename TYPE string.", fixed)
         self.assertLess(fixed.index("DATA w_filename"), fixed.index("SELECT-OPTIONS"))
 
+    def test_form_global_enrichment_skips_type_only_ddic_contract_aliases(self):
+        diagnostics = {
+            "requirements": {
+                "report_name": "ztest",
+                "global_variables": [],
+                "output_structure_fields": [
+                    {"name": "ERROR_MESSAGE", "type_or_like": "TYPE BAPIRET2-MESSAGE"}
+                ],
+            }
+        }
+        base_prompt = "\n".join(
+            [
+                "Shared generation contract:",
+                "- EDIDC: structure st_edidc, table t_edidc, work area st_edidc",
+                "- BAPIRET2: structure st_bapiret2, table t_bapiret2, work area st_bapiret2",
+            ]
+        )
+
+        result = enrich_declaration_requirements_for_form_globals(
+            diagnostics,
+            base_prompt=base_prompt,
+            source_text="Read EDIDC-DOCNUM and define ERROR_MESSAGE using BAPIRET2-MESSAGE.",
+        )
+
+        globals_by_name = {
+            item["name"]: item["declaration"]
+            for item in result["requirements"]["global_variables"]
+        }
+        self.assertIn("t_edidc", globals_by_name)
+        self.assertIn("st_edidc", globals_by_name)
+        self.assertNotIn("t_bapiret2", globals_by_name)
+        self.assertNotIn("st_bapiret2", globals_by_name)
+
     def test_form_chunk_rejects_undeclared_global_style_variables(self):
         declaration_requirements = json.dumps(
             {
@@ -975,6 +1115,37 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("DATA st_bapi TYPE BAPIRET2.", fixed)
         self.assertNotIn("ty_bapi", fixed.lower())
 
+    def test_callable_table_type_parameter_keeps_direct_table_type(self):
+        source = "\n".join(
+            [
+                "REPORT ztest.",
+                "DATA t_fieldcat TYPE slis_t_fieldcat_alv.",
+                "DATA w_fieldcat TYPE slis_fieldcat_alv.",
+                "START-OF-SELECTION.",
+                "  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'",
+                "    TABLES",
+                "      it_fieldcat = t_fieldcat.",
+            ]
+        )
+        callable_metadata = {
+            "callable_signatures": {
+                "REUSE_ALV_GRID_DISPLAY": {
+                    "parameters": {
+                        "IT_FIELDCAT": {
+                            "direction": "IMPORTING",
+                            "abap_type": "SLIS_T_FIELDCAT_ALV",
+                            "required": False,
+                        }
+                    }
+                }
+            }
+        }
+
+        fixed = ensure_callable_parameter_declarations(source, callable_metadata)
+
+        self.assertIn("DATA t_fieldcat TYPE SLIS_T_FIELDCAT_ALV.", fixed)
+        self.assertNotIn("DATA t_fieldcat TYPE STANDARD TABLE OF SLIS_T_FIELDCAT_ALV.", fixed)
+
     def test_callable_method_returning_declaration_uses_verified_signature_type(self):
         source = "\n".join(
             [
@@ -1102,13 +1273,146 @@ class OrchestratorTest(unittest.TestCase):
             result["text"],
             "\n".join(
                 [
-                    "REPORT ztest.\nDATA w_edidc TYPE edidc.",
-                    "SELECT-OPTIONS s_docnum FOR w_edidc-docnum.",
+                    "REPORT ztest.\n*Variables\n\nDATA w_edidc TYPE edidc.",
                     "START-OF-SELECTION.\n  PERFORM read_data.\n  PERFORM process_data.\n  PERFORM display_data.",
                     "FORM read_data.\nENDFORM.\nFORM process_data.\nENDFORM.\nFORM display_data.\nENDFORM.",
                 ]
             ),
         )
+
+    def test_selection_screen_declarations_are_generated_from_structured_contract_not_llm_chunk(self):
+        responses = {
+            "declarations": (
+                "REPORT ztest.\n"
+                "PARAMETERS p_wrong TYPE string.\n"
+                "SELECT-OPTIONS s_wrong FOR mara-matnr.\n"
+                "DATA gv_count TYPE i."
+            ),
+            "database_read_forms": "FORM read_data.\nENDFORM.",
+            "processing_form": "FORM process_data.\nENDFORM.",
+            "output_forms": "",
+            "main_program_flow": "START-OF-SELECTION.\n  PERFORM read_data.",
+        }
+
+        def generator(prompt_text, _source_text):
+            if "Extract business-processing logic" in prompt_text:
+                return {"text": json.dumps({"processing_steps": []}), "model": "test-model", "usage": None}
+            chunk_name = next(name for name in responses if f"Chunk: {name}" in prompt_text)
+            return {"text": responses[chunk_name], "model": "test-model", "usage": None}
+
+        result = generate_chunked_abap_program(
+            "Base prompt with metadata.",
+            "Functional spec.",
+            abap_generator=generator,
+            declaration_requirements={
+                "requirements": {
+                    "report_name": "ztest",
+                    "parameters": [
+                        {"name": "p_limit", "type_or_like": "TYPE i"},
+                        {"name": "p_file", "as_checkbox": True, "default": "'X'"},
+                    ],
+                    "select_options": [{"name": "s_docnum", "for_field": "EDIDC-DOCNUM"}],
+                    "global_variables": [{"name": "gv_count", "declaration": "DATA gv_count TYPE i."}],
+                }
+            },
+            ddic_metadata={"tables": {"EDIDC": {"fields": {"DOCNUM": {"datatype": "NUMC", "length": 16}}}}},
+        )
+
+        source = result["text"]
+        self.assertIn("PARAMETERS p_limit TYPE i.", source)
+        self.assertIn("PARAMETERS p_file AS CHECKBOX DEFAULT 'X'.", source)
+        self.assertIn("SELECT-OPTIONS s_docnum FOR edidc-docnum.", source)
+        self.assertNotIn("p_wrong", source)
+        self.assertNotIn("s_wrong", source)
+        self.assertLess(source.index("DATA gv_count TYPE i."), source.index("PARAMETERS p_limit TYPE i."))
+
+    def test_deterministic_selection_screen_replaces_existing_selection_units(self):
+        source = "\n".join(
+            [
+                "REPORT ztest.",
+                "PARAMETERS p_wrong TYPE string.",
+                "DATA gv_count TYPE i.",
+                "SELECT-OPTIONS s_wrong FOR mara-matnr.",
+                "START-OF-SELECTION.",
+            ]
+        )
+        contract = {
+            "selection_screen": [
+                {"kind": "PARAMETERS", "name": "p_date", "type_or_like": "TYPE sy-datum"},
+                {"kind": "SELECT-OPTIONS", "name": "s_doc", "for_field": "EDIDC-DOCNUM"},
+            ]
+        }
+
+        fixed = apply_deterministic_selection_screen_declarations(source, contract)
+
+        self.assertIn("PARAMETERS p_date TYPE sy-datum.", fixed)
+        self.assertIn("SELECT-OPTIONS s_doc FOR edidc-docnum.", fixed)
+        self.assertNotIn("p_wrong", fixed)
+        self.assertNotIn("s_wrong", fixed)
+        self.assertLess(fixed.index("DATA gv_count TYPE i."), fixed.index("PARAMETERS p_date"))
+        self.assertLess(fixed.index("SELECT-OPTIONS s_doc"), fixed.index("START-OF-SELECTION."))
+
+    def test_deterministic_callable_interfaces_replace_raw_llm_call_blocks(self):
+        source = "\n".join(
+            [
+                "FORM process_data.",
+                "  CALL FUNCTION 'BAPI_MESSAGE_GETDETAIL'",
+                "    TABLES",
+                "      text = t_text.",
+                "  CALL METHOD lo_send_request->send",
+                "    EXPORTING",
+                "      wrong = gv_sent.",
+                "ENDFORM.",
+            ]
+        )
+        contract = {
+            "function_module_calls": [
+                {
+                    "name": "BAPI_MESSAGE_GETDETAIL",
+                    "sequence": 1,
+                    "parameters": [
+                        {"parameter": "MESSAGE", "variable": "gv_message", "direction": "output"},
+                    ],
+                }
+            ],
+            "class_method_calls": [
+                {
+                    "name": "CL_BCS=>SEND",
+                    "sequence": 2,
+                    "call_type": "instance",
+                    "receiver": "lo_send_request",
+                    "parameters": [
+                        {"parameter": "I_WITH_ERROR_SCREEN", "variable": "gv_error_screen", "direction": "input"},
+                        {"parameter": "", "variable": "gv_sent", "direction": "output", "returning": True},
+                    ],
+                }
+            ],
+        }
+        callable_metadata = {
+            "callable_signatures": {
+                "BAPI_MESSAGE_GETDETAIL": {
+                    "parameters": {
+                        "MESSAGE": {"direction": "EXPORTING", "abap_type": "BAPIRET2", "field": "MESSAGE"},
+                    }
+                },
+                "CL_BCS=>SEND": {
+                    "parameters": {
+                        "I_WITH_ERROR_SCREEN": {"direction": "IMPORTING", "abap_type": "OS_BOOLEAN"},
+                    },
+                    "returning": {"name": "RESULT", "direction": "RETURNING", "abap_type": "OS_BOOLEAN"},
+                },
+            }
+        }
+
+        fixed = apply_deterministic_callable_interfaces(source, contract, callable_metadata)
+
+        self.assertIn("CALL FUNCTION 'BAPI_MESSAGE_GETDETAIL'\n    IMPORTING\n      message = gv_message.", fixed)
+        self.assertIn(
+            "CALL METHOD lo_send_request->send\n    EXPORTING\n      i_with_error_screen = gv_error_screen\n    RECEIVING\n      result = gv_sent.",
+            fixed,
+        )
+        self.assertNotIn("TABLES", fixed)
+        self.assertNotIn("wrong = gv_sent", fixed)
 
     def test_processing_plan_output_record_creation_skips_output_data_form(self):
         calls = []
@@ -3591,6 +3895,165 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("SALES_TOTAL", [issue.get("field") for issue in issues])
         self.assertIn("MARGIN_PERCENT", [issue.get("field") for issue in issues])
 
+    def test_file_input_spec_gets_deterministic_pc_and_al11_support(self):
+        source_text = (
+            "The program must read an existing input file from either the user's Local PC "
+            "or an SAP application server / AL11 location. Local PC upload is foreground only. "
+            "Treat the first row as a header. Read PERNR, DATE, ABSENCE_TYPE, HOURS, and UNIT. "
+            "The CATS profile should default to BFG WK_1. The program must support Report Mode and Update Mode."
+        )
+        source = (
+            "REPORT z_upload_absence.\n"
+            "TYPES: BEGIN OF ty_output,\n"
+            "         file_row_number TYPE i,\n"
+            "         pernr TYPE string,\n"
+            "         date TYPE string,\n"
+            "         absence_type TYPE string,\n"
+            "         hours TYPE p DECIMALS 2,\n"
+            "         unit TYPE string,\n"
+            "       END OF ty_output.\n"
+            "DATA t_output TYPE STANDARD TABLE OF ty_output.\n"
+            "DATA w_output TYPE ty_output.\n"
+            "START-OF-SELECTION.\n"
+            "  PERFORM process_data.\n"
+            "FORM process_data.\n"
+            "ENDFORM.\n"
+        )
+
+        fixed = apply_deterministic_file_input_support(source, source_text)
+
+        self.assertIn("PARAMETERS p_pc RADIOBUTTON GROUP src DEFAULT 'X'.", fixed)
+        self.assertIn("PARAMETERS p_al11 RADIOBUTTON GROUP src.", fixed)
+        self.assertIn("PARAMETERS p_file TYPE string.", fixed)
+        self.assertIn("PARAMETERS p_rep RADIOBUTTON GROUP mod DEFAULT 'X'.", fixed)
+        self.assertIn("PARAMETERS p_upd RADIOBUTTON GROUP mod.", fixed)
+        self.assertIn("PARAMETERS p_prof TYPE string DEFAULT 'BFG WK_1'.", fixed)
+        self.assertIn("AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.", fixed)
+        self.assertIn("CALL FUNCTION 'GUI_UPLOAD'", fixed)
+        self.assertIn("OPEN DATASET p_file FOR INPUT IN TEXT MODE ENCODING DEFAULT.", fixed)
+        self.assertIn("READ DATASET p_file INTO w_file_line.", fixed)
+        self.assertIn("w_output-file_row_number = w_file_row.", fixed)
+        self.assertIn("SPLIT w_file_line AT ',' INTO w_output-pernr", fixed)
+        self.assertRegex(fixed, r"START-OF-SELECTION\.\n  PERFORM read_input_file\.\n  PERFORM process_data\.")
+
+        issues = validate_generated_processing_completeness(fixed, source_text=source_text)
+        rule_ids = [issue["rule_id"] for issue in issues]
+        self.assertNotIn("SPEC_FILE_SOURCE_SELECTION_MISSING", rule_ids)
+        self.assertNotIn("SPEC_PC_FILE_READ_MISSING", rule_ids)
+        self.assertNotIn("SPEC_AL11_FILE_READ_MISSING", rule_ids)
+
+    def test_file_input_support_does_not_populate_unrequested_row_number(self):
+        source_text = (
+            "The program must read an existing input file from either the user's Local PC "
+            "or an SAP application server / AL11 location. Treat the first row as a header. "
+            "Read PERNR, DATE, ABSENCE_TYPE, HOURS, and UNIT."
+        )
+        source = (
+            "REPORT z_upload_absence.\n"
+            "TYPES: BEGIN OF ty_output,\n"
+            "         pernr TYPE string,\n"
+            "         date TYPE string,\n"
+            "         absence_type TYPE string,\n"
+            "         hours TYPE p DECIMALS 2,\n"
+            "         unit TYPE string,\n"
+            "       END OF ty_output.\n"
+            "DATA t_output TYPE STANDARD TABLE OF ty_output.\n"
+            "DATA w_output TYPE ty_output.\n"
+            "START-OF-SELECTION.\n"
+            "  PERFORM process_data.\n"
+            "FORM process_data.\n"
+            "ENDFORM.\n"
+        )
+
+        fixed = apply_deterministic_file_input_support(source, source_text)
+
+        self.assertIn("DATA w_file_row TYPE i.", fixed)
+        self.assertIn("w_file_row = w_file_row + 1.", fixed)
+        self.assertNotIn("w_output-file_row_number = w_file_row.", fixed)
+        self.assertIn("SPLIT w_file_line AT ',' INTO w_output-pernr", fixed)
+
+    def test_file_input_declarations_are_added_when_names_are_only_referenced(self):
+        source_text = (
+            "The program must read an existing input file from either the user's Local PC "
+            "or an SAP application server / AL11 location."
+        )
+        source = (
+            "REPORT z_upload_absence.\n"
+            "PARAMETERS p_al11 RADIOBUTTON GROUP src.\n"
+            "AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.\n"
+            "  IF p_pc = 'X'.\n"
+            "  ENDIF.\n"
+            "START-OF-SELECTION.\n"
+            "  IF p_file IS INITIAL.\n"
+            "  ENDIF.\n"
+        )
+
+        fixed = apply_deterministic_file_input_support(source, source_text)
+
+        self.assertIn("PARAMETERS p_pc RADIOBUTTON GROUP src DEFAULT 'X'.", fixed)
+        self.assertIn("PARAMETERS p_al11 RADIOBUTTON GROUP src.", fixed)
+        self.assertIn("PARAMETERS p_file TYPE string.", fixed)
+        self.assertEqual(fixed.count("PARAMETERS p_al11 RADIOBUTTON GROUP src."), 1)
+
+    def test_spec_coverage_flags_missing_pc_al11_file_input(self):
+        source_text = (
+            "Read an existing input file from either Local PC or Application Server / AL11. "
+            "The first row is a header. Read PERNR, DATE, ABSENCE_TYPE, HOURS, and UNIT. "
+            "Report Mode and Update Mode are required. In Update Mode commit successful changes "
+            "and rollback failures. CATS profile default BFG WK_1. Check CATSDB for duplicate "
+            "existing records before insert. Show the result as ALV. No output file is required."
+        )
+        source = (
+            "REPORT z_upload_absence.\n"
+            "START-OF-SELECTION.\n"
+            "  PERFORM process_data.\n"
+            "  PERFORM write_csv.\n"
+            "FORM process_data.\n"
+            "ENDFORM.\n"
+            "FORM write_csv.\n"
+            "ENDFORM.\n"
+        )
+
+        issues = validate_generated_processing_completeness(source, source_text=source_text)
+        rule_ids = [issue["rule_id"] for issue in issues]
+
+        self.assertIn("SPEC_FILE_SOURCE_SELECTION_MISSING", rule_ids)
+        self.assertIn("SPEC_PC_FILE_READ_MISSING", rule_ids)
+        self.assertIn("SPEC_AL11_FILE_READ_MISSING", rule_ids)
+        self.assertIn("SPEC_PC_FOREGROUND_GUARD_MISSING", rule_ids)
+        self.assertIn("SPEC_INPUT_HEADER_SKIP_MISSING", rule_ids)
+        self.assertIn("SPEC_INPUT_COLUMNS_PARSE_MISSING", rule_ids)
+        self.assertIn("SPEC_PROCESSING_MODE_SELECTION_MISSING", rule_ids)
+        self.assertIn("SPEC_CATS_PROFILE_DEFAULT_MISSING", rule_ids)
+        self.assertIn("SPEC_UNREQUESTED_OUTPUT_FILE_FLOW", rule_ids)
+        self.assertIn("SPEC_CATSDB_READ_MISSING", rule_ids)
+        self.assertIn("SPEC_UPDATE_TRANSACTION_HANDLING_MISSING", rule_ids)
+        self.assertIn("SPEC_ALV_OUTPUT_MISSING", rule_ids)
+
+    def test_spec_coverage_accepts_catsdb_alv_and_update_transaction_support(self):
+        source_text = (
+            "Check CATSDB for duplicate existing records before insert. Show ALV output. "
+            "Update Mode must commit successful changes and rollback failures. No output file is required."
+        )
+        source = (
+            "REPORT z_upload_absence.\n"
+            "DATA t_output TYPE STANDARD TABLE OF string.\n"
+            "DATA t_catsdb TYPE STANDARD TABLE OF catsdb.\n"
+            "START-OF-SELECTION.\n"
+            "  SELECT * FROM catsdb INTO TABLE t_catsdb.\n"
+            "  CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'.\n"
+            "  CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.\n"
+            "  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'.\n"
+        )
+
+        issues = validate_generated_processing_completeness(source, source_text=source_text)
+        rule_ids = [issue["rule_id"] for issue in issues]
+
+        self.assertNotIn("SPEC_UNREQUESTED_OUTPUT_FILE_FLOW", rule_ids)
+        self.assertNotIn("SPEC_CATSDB_READ_MISSING", rule_ids)
+        self.assertNotIn("SPEC_UPDATE_TRANSACTION_HANDLING_MISSING", rule_ids)
+        self.assertNotIn("SPEC_ALV_OUTPUT_MISSING", rule_ids)
+
     def test_processing_plan_validation_rejects_callable_input_from_output_record(self):
         declaration_requirements = json.dumps(
             {
@@ -4895,7 +5358,22 @@ class OrchestratorTest(unittest.TestCase):
 
         def generator(prompt_text, source_text):
             calls.append(prompt_text)
-            return {"text": json.dumps({"processing_steps": []}), "model": "test-model", "usage": None}
+            return {
+                "text": json.dumps(
+                    {
+                        "processing_steps": [
+                            {
+                                "operation": "CALL_FUNCTION",
+                                "name": "Z_LOOKUP",
+                                "input_parameters": {},
+                                "output_parameters": {"MESSAGE": "w_output-ERROR_MESSAGE"},
+                            }
+                        ]
+                    }
+                ),
+                "model": "test-model",
+                "usage": None,
+            }
 
         result = extract_processing_plan(
             "If SY-DATUM is before today, check SY-SUBRC, SY-TABIX and SY-UNAME.",
@@ -5062,26 +5540,50 @@ class OrchestratorTest(unittest.TestCase):
                 }
             }
         }
-        calls = []
-
-        def generator(prompt_text, source_text):
-            calls.append(prompt_text)
-            return {"text": json.dumps({"processing_steps": []}), "model": "test-model", "usage": None}
-
-        result = extract_processing_plan(
-            "Call lookup and output the returned message.",
-            generator,
+        result = build_processing_contract(
             metadata_context=metadata_context,
             callable_metadata=callable_metadata,
             declaration_requirements=declaration_requirements,
+            processing_rules_text="Call lookup and output the returned message.",
         )
 
-        self.assertEqual(1, len(calls))
-        diagnostics = result["processing_contract_diagnostics"]
+        self.assertEqual([], result["validation_errors"])
+        self.assertEqual({}, result["filtered_metadata"])
+        prompt_payload = json.dumps(result["final_processing_contract"])
+        self.assertIn("BAPIRET2", prompt_payload)
+        self.assertIn("BAPITGA", prompt_payload)
+
+    def test_processing_contract_accepts_type_only_ddic_metadata_dependency(self):
+        declaration_requirements = json.dumps(
+            {"output_structure_fields": [{"name": "ERROR_MESSAGE", "type_or_like": "TYPE BAPIRET2-MESSAGE"}]}
+        )
+        metadata_context = (
+            "Shared generation contract:\n"
+            "Exact DDIC metadata dependencies: EDIDC, BAPIRET2\n"
+            "- EDIDC: structure st_edidc, table t_edidc, work area st_edidc\n"
+        )
+        ddic_metadata = {
+            "tables": {
+                "EDIDC": {"fields": {"DOCNUM": {"datatype": "NUMC", "length": 16}}},
+                "BAPIRET2": {"fields": {"MESSAGE": {"datatype": "CHAR", "length": 220}}},
+            }
+        }
+
+        diagnostics = build_processing_contract(
+            metadata_context=metadata_context,
+            declaration_requirements=declaration_requirements,
+            processing_rules_text=(
+                "MESSAGE is defined using BAPIRET2-MESSAGE.\n"
+                "Define ERROR_MESSAGE using the same DDIC type as BAPIRET2-MESSAGE."
+            ),
+            ddic_metadata=ddic_metadata,
+        )
+
         self.assertEqual([], diagnostics["validation_errors"])
-        self.assertEqual({}, diagnostics["filtered_metadata_supplied"])
-        self.assertIn("BAPIRET2", calls[0])
-        self.assertIn("BAPITGA", calls[0])
+        contract = diagnostics["final_processing_contract"]
+        self.assertEqual({}, contract["ddic_objects"]["BAPIRET2"])
+        self.assertIn("MESSAGE", [field["name"] for field in contract["metadata"]["BAPIRET2"]["fields"]])
+        self.assertNotIn("t_bapiret2", json.dumps(contract))
 
     def test_processing_contract_validation_reports_inconsistent_output_type(self):
         declaration_requirements = json.dumps(
@@ -5104,6 +5606,45 @@ class OrchestratorTest(unittest.TestCase):
 
         errors = "\n".join(raised.exception.diagnostics["validation_errors"])
         self.assertIn("required DDIC field ZMSG-MISSING is missing", errors)
+
+    def test_generation_contract_ignores_duplicate_output_global_declaration(self):
+        declaration_requirements = {
+            "global_variables": [
+                {
+                    "name": "t_output",
+                    "declaration": (
+                        "DATA: BEGIN OF t_output OCCURS 0, "
+                        "MPE_ID TYPE ZMD_MPE0001-IDENTIFIER, "
+                        "END OF t_output."
+                    ),
+                },
+                {"name": "w_record", "declaration": "DATA w_record TYPE string."},
+            ],
+            "output_structure_fields": [
+                {"name": "MPE_ID", "type_or_like": "TYPE ZMD_MPE0001-IDENTIFIER"}
+            ],
+        }
+        processing_plan = {
+            "processing_steps": [
+                {"operation": "CLEAR", "target": "w_output"},
+                {"operation": "MOVE", "source": "st_zmd_mpe0001-identifier", "target": "w_output-mpe_id"},
+                {"operation": "APPEND", "source": "w_output", "target": "t_output"},
+            ]
+        }
+        ddic_metadata = {"tables": {"ZMD_MPE0001": {"fields": {"IDENTIFIER": {"name": "IDENTIFIER"}}}}}
+
+        contract = build_structured_generation_contract(
+            declaration_requirements=declaration_requirements,
+            processing_plan=processing_plan,
+            ddic_metadata=ddic_metadata,
+        )
+
+        self.assertTrue(contract["validation"]["valid"])
+        self.assertEqual(
+            [{"name": "t_output", "row_type": "ty_output"}],
+            [item for item in contract["internal_tables"] if item.get("name") == "t_output"],
+        )
+        self.assertNotIn("DATA: BEGIN OF t_output", json.dumps(contract["scalar_variables"]))
 
     def test_processing_plan_extraction_raises_after_invalid_retry_attempts(self):
         declaration_requirements = json.dumps(
@@ -5324,11 +5865,90 @@ class OrchestratorTest(unittest.TestCase):
             "- Do not create local field-catalogue DATA, TYPES, CONSTANTS, FIELD-SYMBOLS, RANGES, or STATICS declarations inside output FORM routines.",
             output_prompt,
         )
+        self.assertIn("Do not generate field-catalogue population code.", output_prompt)
+        self.assertIn("The application inserts the field-catalogue entries deterministically", output_prompt)
+        self.assertIn("Do not REFRESH t_fieldcat", output_prompt)
         self.assertIn(
             "- Do not invent alternative field-catalogue names such as lt_fieldcat, it_fieldcat, gt_fieldcat, ls_fieldcat, wa_fieldcat, or gs_fieldcat.",
             output_prompt,
         )
         self.assertNotIn("T_FIELDCATALOG", output_prompt)
+
+    def test_deterministic_alv_field_catalogue_replaces_llm_population_from_output_contract(self):
+        source = "\n".join(
+            [
+                "REPORT ztest.",
+                "TYPES: BEGIN OF ty_output,",
+                "         docnum TYPE EDIDC-DOCNUM,",
+                "         status TYPE EDIDC-STATUS,",
+                "         error_message TYPE BAPIRET2-MESSAGE,",
+                "       END OF ty_output.",
+                "DATA t_output TYPE STANDARD TABLE OF ty_output.",
+                "DATA t_fieldcat TYPE slis_t_fieldcat_alv.",
+                "DATA w_fieldcat TYPE slis_fieldcat_alv.",
+                "FORM display_alv.",
+                "  IF p_alv = 'X'.",
+                "    REFRESH t_fieldcat.",
+                "    CLEAR w_fieldcat.",
+                "    w_fieldcat-fieldname = 'BOGUS'.",
+                "    w_fieldcat-seltext_l = 'Invented'.",
+                "    APPEND w_fieldcat TO t_fieldcat.",
+                "    IF p_idoc = 'X'.",
+                "      CLEAR w_fieldcat.",
+                "      w_fieldcat-fieldname = 'DUPLICATE'.",
+                "      APPEND w_fieldcat TO t_fieldcat.",
+                "    ENDIF.",
+                "    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'",
+                "      TABLES",
+                "        t_outtab = t_output",
+                "        it_fieldcat = t_fieldcat.",
+                "  ENDIF.",
+                "ENDFORM.",
+            ]
+        )
+        contract = {
+            "output_structures": [
+                {
+                    "name": "ty_output",
+                    "table": "t_output",
+                    "work_area": "w_output",
+                    "fields": [
+                        {"name": "DOCNUM", "type_or_like": "TYPE EDIDC-DOCNUM", "heading": "Document Number"},
+                        {"name": "STATUS", "type_or_like": "TYPE EDIDC-STATUS"},
+                        {
+                            "name": "ERROR_MESSAGE",
+                            "type_or_like": "TYPE BAPIRET2-MESSAGE",
+                            "include_when": "p_idoc = 'X'",
+                        },
+                        {"name": "DOCNUM", "type_or_like": "TYPE EDIDC-DOCNUM", "heading": "Duplicate"},
+                    ],
+                }
+            ]
+        }
+        ddic_metadata = {
+            "tables": {
+                "EDIDC": {"fields": {"STATUS": {"datatype": "CHAR", "length": 2, "description": "IDoc Status"}}},
+                "BAPIRET2": {"fields": {"MESSAGE": {"datatype": "CHAR", "length": 220}}},
+            }
+        }
+
+        fixed = apply_deterministic_alv_field_catalogue(
+            source,
+            generation_contract=contract,
+            ddic_metadata=ddic_metadata,
+            source_text="Display DOCNUM - Document Number and STATUS in ALV.",
+        )
+
+        self.assertIn("DATA t_fieldcat TYPE slis_t_fieldcat_alv.", fixed)
+        self.assertNotIn("TYPE STANDARD TABLE OF SLIS_T_FIELDCAT_ALV", fixed)
+        self.assertNotIn("BOGUS", fixed)
+        self.assertNotIn("Invented", fixed)
+        self.assertEqual(1, fixed.count("w_fieldcat-fieldname = 'DOCNUM'."))
+        self.assertLess(fixed.index("w_fieldcat-fieldname = 'DOCNUM'"), fixed.index("w_fieldcat-fieldname = 'STATUS'"))
+        self.assertIn("w_fieldcat-seltext_l = 'Document Number'.", fixed)
+        self.assertIn("w_fieldcat-seltext_l = 'IDoc Status'.", fixed)
+        self.assertIn("IF p_idoc = 'X'.\n      CLEAR w_fieldcat.\n      w_fieldcat-fieldname = 'ERROR_MESSAGE'.", fixed)
+        self.assertIn("CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'", fixed)
 
     def test_output_forms_prompt_uses_declared_alv_output_fields_over_csv_config_fields(self):
         declaration_requirements = json.dumps(

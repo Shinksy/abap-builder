@@ -69,7 +69,7 @@ class CreateAbapFlowTest(unittest.TestCase):
     def tearDown(self):
         Config.SAP_DEPENDENCY_ANALYSIS_ENABLED = self._old_dependency_analysis_enabled
 
-    def run_pipeline_with_declaration_block(self, declaration_block):
+    def run_pipeline_with_declaration_block(self, declaration_block, extracted_requirements=None, ddic_metadata=None):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
         temp_path.mkdir()
         try:
@@ -91,7 +91,11 @@ class CreateAbapFlowTest(unittest.TestCase):
 
             def generator(prompt_text, _source_text):
                 if "Extract declaration requirements" in prompt_text:
-                    return {"text": json.dumps({"report_name": "ztest"}), "model": "test-model", "usage": None}
+                    return {
+                        "text": json.dumps(extracted_requirements or {"report_name": "ztest"}),
+                        "model": "test-model",
+                        "usage": None,
+                    }
                 if "Extract business-processing logic" in prompt_text:
                     return {"text": json.dumps({"processing_steps": []}), "model": "test-model", "usage": None}
                 for chunk_name, text in chunk_outputs.items():
@@ -99,8 +103,18 @@ class CreateAbapFlowTest(unittest.TestCase):
                         return {"text": text, "model": "test-model", "usage": None}
                 return {"text": "", "model": "test-model", "usage": None}
 
+            class MetadataProvider:
+                def get_tables(self, _names, progress_callback=None):
+                    return ddic_metadata or {"tables": {}}
+
             with patch("services.create_abap.generate_abap", side_effect=generator):
-                run_create_abap(job_id, input_path, jobs_folder, prompt_path)
+                run_create_abap(
+                    job_id,
+                    input_path,
+                    jobs_folder,
+                    prompt_path,
+                    ddic_metadata_provider=MetadataProvider() if ddic_metadata is not None else None,
+                )
 
             return (jobs_folder / job_id / "generated.abap").read_text(encoding="utf-8")
         finally:
@@ -234,7 +248,10 @@ class CreateAbapFlowTest(unittest.TestCase):
 
                 upload = client.post(
                     "/upload",
-                    data={"abap_file": (BytesIO(b"Create a test report."), "request.txt")},
+                    data={
+                        "job_title": "Processing plan review",
+                        "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
+                    },
                     content_type="multipart/form-data",
                     follow_redirects=False,
                 )
@@ -246,8 +263,8 @@ class CreateAbapFlowTest(unittest.TestCase):
                 self.assertFalse((jobs_folder / job_id / "abap_generation_chunks.json").exists())
                 review = client.get(f"/processing-plan/{job_id}")
                 self.assertEqual(review.status_code, 200)
-                self.assertIn(b"Readable Summary", review.data)
-                self.assertIn(b"Structured JSON", review.data)
+                self.assertIn(b"Processing Plan", review.data)
+                self.assertIn(b"Technical JSON", review.data)
                 self.assertIn(b"Validation Errors", review.data) if b"Validation Errors" in review.data else None
 
                 approve = client.post(f"/processing-plan/{job_id}", data={"action": "approve"}, follow_redirects=False)
@@ -320,6 +337,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/upload",
                     data={
+                        "job_title": "Functional spec preparation",
                         "prepare_functional_specification": "1",
                         "abap_file": (BytesIO(b"Legacy source spec text."), "source_spec.txt"),
                     },
@@ -512,8 +530,9 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertIn('<details class="validation-panel">\n          <summary>Variables To Define</summary>', html)
             self.assertIn("<summary>Used But Not Defined</summary>", html)
             self.assertIn('<details class="code-panel">\n          <summary>LLM Prompt</summary>', html)
-            self.assertIn('<details class="code-panel">\n          <summary>Readable Summary</summary>', html)
-            self.assertIn('<details class="code-panel">\n            <summary>Structured JSON</summary>', html)
+            self.assertIn('<section class="code-panel processing-plan-panel">', html)
+            self.assertIn("<h2>Processing Plan</h2>", html)
+            self.assertIn('<details class="code-panel">\n            <summary>Technical JSON</summary>', html)
             self.assertIn('<textarea id="structured_json" name="structured_json" rows="22">', html)
             self.assertIn("You can still approve the saved proposal", html)
             self.assertIn('<button type="submit" name="action" value="approve">Approve</button>', html)
@@ -523,11 +542,168 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertIn("Extract business-processing logic.", html)
             self.assertIn("[user]", html)
             self.assertIn("Uploaded spec text.", html)
-            self.assertLess(html.index("<summary>LLM Prompt</summary>"), html.index("<summary>Readable Summary</summary>"))
-            self.assertLess(html.index("<summary>Readable Summary</summary>"), html.index("<summary>Structured JSON</summary>"))
+            self.assertLess(html.index("<summary>LLM Prompt</summary>"), html.index("<h2>Processing Plan</h2>"))
+            self.assertLess(html.index("<h2>Processing Plan</h2>"), html.index("<summary>Technical JSON</summary>"))
             self.assertNotIn("variable-contract-alert", html)
             self.assertNotIn('<details class="validation-panel" open', html)
             self.assertNotIn('<details class="code-panel" open', html)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_processing_plan_review_shows_user_friendly_nested_steps(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            app = create_app({"TESTING": True, "JOBS_FOLDER": str(jobs_folder)})
+            job_id = create_job(jobs_folder)
+            job_folder = jobs_folder / job_id
+            plan = {
+                "processing_steps": [
+                    {
+                        "operation": "LOOP",
+                        "source": "t_customers",
+                        "into": "w_customer",
+                        "steps": [
+                            {
+                                "operation": "SELECT",
+                                "table": "KNA1",
+                                "fields": ["KUNNR", "NAME1"],
+                                "into": "st_kna1",
+                                "conditions": [{"left": "kunnr", "operator": "=", "right": "w_customer-kunnr"}],
+                            },
+                            {"operation": "MOVE", "source": "st_kna1-NAME1", "target": "w_output-NAME1"},
+                            {"operation": "CLEAR", "target": "w_status"},
+                            {"operation": "APPEND", "source": "w_output", "target": "t_output"},
+                        ],
+                    },
+                    {
+                        "operation": "CALL_FUNCTION",
+                        "name": "BAPI_CUSTOMER_GETDETAIL",
+                        "input_parameters": {"CUSTOMERNO": "w_customer-kunnr"},
+                        "output_parameters": {"RETURN": "w_return"},
+                    },
+                    {
+                        "operation": "CALL_METHOD",
+                        "class": "zcl_customer",
+                        "method": "format",
+                        "input_parameters": {"IV_NAME": "w_output-NAME1"},
+                    },
+                ]
+            }
+            (job_folder / PROCESSING_PLAN_PROPOSAL_ARTIFACT).write_text(
+                json.dumps(
+                    {
+                        "summary": "- LOOP: source=t_customers",
+                        "plan": plan,
+                        "structured_json": json.dumps(plan, indent=2),
+                        "validation_errors": [],
+                        "validation_warnings": [],
+                        "variable_contract": {
+                            "variables_to_define": [
+                                {
+                                    "name": "ty_output",
+                                    "kind": "Type",
+                                    "declaration": "TYPES ty_output.",
+                                    "source": "Output structure contract",
+                                }
+                            ],
+                            "used_but_not_defined": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(f"/processing-plan/{job_id}")
+            html = response.data.decode("utf-8")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Loop through t_customers into w_customer", html)
+            self.assertIn("Read KUNNR, NAME1 from KNA1 into st_kna1 where kunnr = w_customer-kunnr", html)
+            self.assertIn("Set w_output-NAME1 from st_kna1-NAME1", html)
+            self.assertIn("Clear w_status", html)
+            self.assertIn("Add w_output to t_output", html)
+            self.assertIn("Call function BAPI_CUSTOMER_GETDETAIL with CUSTOMERNO from w_customer-kunnr; return RETURN from w_return", html)
+            self.assertIn("Call method zcl_customer=>format with IV_NAME from w_output-NAME1", html)
+            self.assertIn("nested-processing-plan-steps", html)
+            self.assertIn("<summary>Technical JSON</summary>", html)
+            self.assertIn("&#34;operation&#34;: &#34;LOOP&#34;", html)
+            self.assertNotIn("<summary>Structured JSON</summary>", html)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_processing_plan_review_adds_display_only_output_plan_from_context(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            app = create_app({"TESTING": True, "JOBS_FOLDER": str(jobs_folder), "UPLOAD_FOLDER": str(uploads_folder)})
+            job_id = create_job(jobs_folder)
+            job_folder = jobs_folder / job_id
+            upload_folder = uploads_folder / job_id
+            upload_folder.mkdir(parents=True, exist_ok=True)
+            input_path = upload_folder / "pasted_specification.txt"
+            input_path.write_text(
+                "Read MARA-MATNR. Display the selected material numbers in an ALV report. Export the output as CSV.",
+                encoding="utf-8",
+            )
+            plan = {
+                "processing_steps": [
+                    {
+                        "operation": "LOOP",
+                        "source": "t_mara",
+                        "into": "st_mara",
+                        "steps": [
+                            {"operation": "MOVE", "source": "st_mara-matnr", "target": "w_output-matnr"},
+                            {"operation": "APPEND", "source": "w_output", "target": "t_output"},
+                        ],
+                    }
+                ]
+            }
+            (job_folder / PROCESSING_PLAN_CONTEXT_ARTIFACT).write_text(
+                json.dumps(
+                    {
+                        "input_path": str(input_path),
+                        "prompt_text": "Shared generation contract:\nExact callable identities: REUSE_ALV_GRID_DISPLAY",
+                        "declaration_requirements": {
+                            "requirements": {
+                                "output_structure_fields": [
+                                    {"name": "MARA-MATNR", "type_or_like": "TYPE MARA-MATNR", "heading": "Article"}
+                                ]
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (job_folder / PROCESSING_PLAN_PROPOSAL_ARTIFACT).write_text(
+                json.dumps(
+                    {
+                        "summary": "- LOOP: source=t_mara",
+                        "plan": plan,
+                        "structured_json": json.dumps(plan, indent=2),
+                        "validation_errors": [],
+                        "validation_warnings": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(f"/processing-plan/{job_id}")
+            html = response.data.decode("utf-8")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("<h3>Output</h3>", html)
+            self.assertIn("Display the output using ALV.", html)
+            self.assertIn("Create the requested CSV file output.", html)
+            self.assertIn("Show MARA-MATNR with heading Article.", html)
+            self.assertIn('<table class="metrics-table variable-contract-table">', html)
+            self.assertIn("TYPES ty_output.", html)
+            self.assertIn("MATNR TYPE MARA-MATNR", html)
+            self.assertIn("<summary>Technical JSON</summary>", html)
+            self.assertNotIn('"output_plan"', html)
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -797,10 +973,18 @@ class CreateAbapFlowTest(unittest.TestCase):
 
         variable_names = [item["name"] for item in payload["variable_contract"]["variables_to_define"]]
         undefined_names = [item["name"] for item in payload["variable_contract"]["used_but_not_defined"]]
+        variables_by_name = {
+            item["name"]: item
+            for item in payload["variable_contract"]["variables_to_define"]
+        }
 
         self.assertIn("t_output", variable_names)
         self.assertIn("w_output", variable_names)
         self.assertIn("t_fieldcat", variable_names)
+        self.assertEqual(
+            [{"name": "DOCNUM", "definition": "DOCNUM TYPE edidc-docnum"}],
+            variables_by_name["ty_output"]["fields"],
+        )
         self.assertEqual(sorted(variable_names, key=str.lower), variable_names)
         self.assertIn("t_outtab", undefined_names)
 
@@ -1246,7 +1430,10 @@ class CreateAbapFlowTest(unittest.TestCase):
             with patch("app.start_create_abap_job"):
                 response = app.test_client().post(
                     "/upload",
-                    data={"abap_file": (BytesIO(b"Create a test report."), "request.txt")},
+                    data={
+                        "job_title": "Absence upload",
+                        "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
+                    },
                     content_type="multipart/form-data",
                     follow_redirects=False,
                 )
@@ -1254,6 +1441,7 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertEqual(response.status_code, 302)
             job_id = response.headers["Location"].rsplit("/", 1)[-1]
             options = json.loads((jobs_folder / job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertEqual("Absence upload", options["job_title"])
             self.assertEqual("app", options["final_assembly_mode"])
             self.assertEqual("economy", options["model_settings"]["preset"])
             self.assertEqual(
@@ -1284,6 +1472,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 response = app.test_client().post(
                     "/upload",
                     data={
+                        "job_title": "Claude model job",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "model_preset": "claude",
                     },
@@ -1317,7 +1506,10 @@ class CreateAbapFlowTest(unittest.TestCase):
             with patch("app.start_create_abap_job") as start_job:
                 response = app.test_client().post(
                     "/upload",
-                    data={"specification_text": "Create a pasted specification report."},
+                    data={
+                        "job_title": "Pasted specification job",
+                        "specification_text": "Create a pasted specification report.",
+                    },
                     follow_redirects=False,
                 )
 
@@ -1326,6 +1518,29 @@ class CreateAbapFlowTest(unittest.TestCase):
             input_path = uploads_folder / job_id / "pasted_specification.txt"
             self.assertEqual(input_path.read_text(encoding="utf-8"), "Create a pasted specification report.")
             self.assertEqual(start_job.call_args.kwargs["input_path"], input_path)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_upload_requires_job_title(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            response = app.test_client().post(
+                "/upload",
+                data={"specification_text": "Create a pasted specification report."},
+                follow_redirects=False,
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Enter a job title.", response.data.decode("utf-8"))
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -1345,6 +1560,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 response = app.test_client().post(
                     "/upload",
                     data={
+                        "job_title": "LLM assembly job",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "final_assembly_mode": "llm",
                     },
@@ -1375,6 +1591,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 response = app.test_client().post(
                     "/upload",
                     data={
+                        "job_title": "Advanced model job",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "model_preset": "advanced",
                         "OPENAI_MODEL": "gpt-5-mini",
@@ -1423,7 +1640,10 @@ class CreateAbapFlowTest(unittest.TestCase):
                     "estimated_total_cost": 0.123456,
                     "model_settings": {"preset": "balanced", "preset_label": "Balanced"},
                 },
-                options={"model_settings": {"preset": "balanced", "preset_label": "Balanced", "models": {}}},
+                options={
+                    "job_title": "Old customer report",
+                    "model_settings": {"preset": "balanced", "preset_label": "Balanced", "models": {}},
+                },
             )
             self.write_job_fixture(
                 jobs_folder,
@@ -1436,7 +1656,10 @@ class CreateAbapFlowTest(unittest.TestCase):
                 upload_name="new_spec.txt",
                 generated=False,
                 metrics=None,
-                options={"model_settings": {"preset": "economy", "preset_label": "Economy", "models": {}}},
+                options={
+                    "job_title": "New absence load",
+                    "model_settings": {"preset": "economy", "preset_label": "Economy", "models": {}},
+                },
             )
             app = create_app({
                 "TESTING": True,
@@ -1449,20 +1672,34 @@ class CreateAbapFlowTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             html = response.data.decode("utf-8")
             self.assertIn("style.css?v=", html)
+            self.assertIn("jobs-filter-bar", html)
+            self.assertIn('id="job-filter-date"', html)
+            self.assertIn('id="job-filter-title"', html)
+            self.assertIn('class="job-mode-filter" type="checkbox" value="create_abap" checked', html)
+            self.assertIn('class="job-mode-filter" type="checkbox" value="enhance_existing_abap" checked', html)
+            self.assertIn('id="clear-job-filters"', html)
+            self.assertIn('id="jobs-no-filter-results"', html)
             self.assertIn("jobs-date-col", html)
+            self.assertIn("jobs-title-col", html)
             self.assertIn('href="/jobs"', html)
             self.assertLess(html.index(failed_job), html.index(completed_job))
+            self.assertLess(html.index("<th>Title</th>"), html.index("<th>Specification/file name</th>"))
             self.assertIn("07-08-2026 10:00:00", html)
             self.assertIn("06-08-2026 11:00:00", html)
             self.assertNotIn("<th>Job ID</th>", html)
             self.assertNotIn(f"<code>{failed_job}</code>", html)
             self.assertNotIn(f"<code>{completed_job}</code>", html)
+            self.assertIn("New absence load", html)
+            self.assertIn("Old customer report", html)
             self.assertIn("new_spec.txt", html)
             self.assertIn("old_spec.txt", html)
             self.assertIn("Error", html)
             self.assertIn("Complete", html)
             self.assertIn("Economy", html)
             self.assertIn("Balanced", html)
+            self.assertIn('data-job-date="07-08-2026 10:00:00"', html)
+            self.assertIn('data-job-title="new absence load"', html)
+            self.assertIn('data-job-mode="create_abap"', html)
             self.assertIn("12.50s", html)
             self.assertIn("$0.123456", html)
             self.assertIn(f'href="/progress/{failed_job}"', html)
@@ -1558,7 +1795,7 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
-    def test_jobs_rerun_creates_new_job_from_accepted_specification(self):
+    def test_jobs_rerun_opens_new_program_screen_with_saved_values_before_processing(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
         temp_path.mkdir()
         try:
@@ -1577,13 +1814,20 @@ class CreateAbapFlowTest(unittest.TestCase):
                 generated=True,
                 metrics={"job_mode": "create_abap", "duration_seconds": 5.0},
                 options={
+                    "job_title": "Accepted spec rerun",
                     "run_sap_syntax_check": True,
                     "sap_syntax_check_attempts": 3,
+                    "final_assembly_mode": "llm",
                     "model_settings": {"preset": "economy", "preset_label": "Economy", "models": {}},
                 },
             )
             accepted_path = jobs_folder / source_job_id / ACCEPTED_FUNCTIONAL_SPEC_ARTIFACT
             accepted_path.write_text("Accepted functional specification.", encoding="utf-8")
+            original_source_path = uploads_folder / source_job_id / "original_spec.txt"
+            (jobs_folder / source_job_id / "functional_specification_context.json").write_text(
+                json.dumps({"source_path": str(original_source_path)}),
+                encoding="utf-8",
+            )
             app = create_app({
                 "TESTING": True,
                 "UPLOAD_FOLDER": str(uploads_folder),
@@ -1595,21 +1839,195 @@ class CreateAbapFlowTest(unittest.TestCase):
                 response = client.post(f"/jobs/{source_job_id}/rerun", follow_redirects=False)
 
             self.assertEqual(response.status_code, 302)
-            new_job_id = response.headers["Location"].rsplit("/", 1)[-1]
-            self.assertNotEqual(new_job_id, source_job_id)
-            start_job.assert_called_once()
-            rerun_input_path = start_job.call_args.kwargs["input_path"]
-            self.assertEqual(Path(rerun_input_path).read_text(encoding="utf-8"), "Accepted functional specification.")
-            rerun_metadata = json.loads((jobs_folder / new_job_id / "rerun.json").read_text(encoding="utf-8"))
-            self.assertEqual(rerun_metadata["source_job_id"], source_job_id)
-            options = json.loads((jobs_folder / new_job_id / "options.json").read_text(encoding="utf-8"))
-            self.assertTrue(options["run_sap_syntax_check"])
-            self.assertEqual(options["sap_syntax_check_attempts"], 3)
-            self.assertEqual(options["rerun_of"], source_job_id)
+            self.assertEqual(response.headers["Location"], f"/?rerun_source_job_id={source_job_id}")
+            start_job.assert_not_called()
+            self.assertEqual(sorted(path.name for path in jobs_folder.iterdir()), [source_job_id])
+
+            review = client.get(f"/?rerun_source_job_id={source_job_id}")
+            self.assertEqual(review.status_code, 200)
+            html = review.data.decode("utf-8")
+            self.assertIn("Re-run New Program", html)
+            self.assertIn(f'name="rerun_source_job_id" value="{source_job_id}"', html)
+            self.assertIn('value="Accepted spec rerun"', html)
+            self.assertIn("Create a test report.", html)
+            self.assertNotIn("Accepted functional specification.", html)
+            self.assertIn("Saved specification: original_spec.txt", html)
+            self.assertIn('name="run_sap_syntax_check" type="checkbox" value="1" checked', html)
+            self.assertIn('id="sap_syntax_check_attempts"', html)
+            self.assertIn('value="3"', html)
+            self.assertIn('name="final_assembly_mode" type="radio" value="llm" checked', html)
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
-    def test_jobs_rerun_creates_new_enhancement_job_from_saved_inputs(self):
+    def test_new_program_rerun_submits_adjusted_values_from_first_screen(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            source_job_id = "source_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                source_job_id,
+                status="Complete",
+                stage="Complete",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at="2026-08-07T09:00:05+00:00",
+                upload_name="original_spec.txt",
+                generated=True,
+                metrics={"job_mode": "create_abap", "duration_seconds": 5.0},
+                options={
+                    "job_title": "Original title",
+                    "run_sap_syntax_check": True,
+                    "sap_syntax_check_attempts": 3,
+                    "final_assembly_mode": "app",
+                    "model_settings": {"preset": "economy", "preset_label": "Economy", "models": {}},
+                },
+            )
+            (jobs_folder / source_job_id / ACCEPTED_FUNCTIONAL_SPEC_ARTIFACT).write_text(
+                "Accepted functional specification.",
+                encoding="utf-8",
+            )
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+            client = app.test_client()
+            rerun = client.post(f"/jobs/{source_job_id}/rerun", follow_redirects=False)
+            self.assertEqual(rerun.headers["Location"], f"/?rerun_source_job_id={source_job_id}")
+
+            with patch("app.start_create_abap_job") as start_job:
+                response = client.post(
+                    "/upload",
+                    data={
+                        "rerun_source_job_id": source_job_id,
+                        "job_title": "Adjusted title",
+                        "specification_text": "Adjusted specification.",
+                        "sap_syntax_check_attempts": "4",
+                        "final_assembly_mode": "llm",
+                        "model_preset": "balanced",
+                    },
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            new_job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            self.assertNotEqual(new_job_id, source_job_id)
+            self.assertEqual(response.headers["Location"], f"/progress/{new_job_id}")
+            start_job.assert_called_once()
+            rerun_input_path = Path(start_job.call_args.kwargs["input_path"])
+            self.assertEqual(rerun_input_path.read_text(encoding="utf-8"), "Adjusted specification.")
+            options = json.loads((jobs_folder / new_job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertEqual(options["job_title"], "Adjusted title")
+            self.assertFalse(options["run_sap_syntax_check"])
+            self.assertEqual(options["sap_syntax_check_attempts"], 4)
+            self.assertEqual(options["final_assembly_mode"], "llm")
+            self.assertEqual(options["model_settings"]["preset"], "balanced")
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_create_rerun_with_structured_spec_review_opens_proposal_not_index(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            job_id = "rerun_structured_spec"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                job_id,
+                status="Awaiting Review",
+                stage="awaiting_functional_specification_review",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at=None,
+                upload_name="pasted_specification.txt",
+                generated=False,
+                metrics={"job_mode": "create_abap", "duration_seconds": 5.0},
+                options={"job_title": "Structured rerun"},
+            )
+            job_folder = jobs_folder / job_id
+            (job_folder / "rerun.json").write_text(
+                json.dumps({"source_job_id": "source_job", "mode": "create_abap"}),
+                encoding="utf-8",
+            )
+            (job_folder / "functional_specification_proposal.json").write_text(
+                json.dumps({"prepared_specification": "# Functional Specification\n\nStructured result."}),
+                encoding="utf-8",
+            )
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            progress_page = app.test_client().get(f"/progress/{job_id}")
+            self.assertEqual(progress_page.status_code, 200)
+            html = progress_page.data.decode("utf-8")
+            self.assertIn(f'href="/functional-specification/{job_id}"', html)
+            self.assertIn("Review Structured Specification", html)
+            self.assertNotIn(f'href="/?rerun_job_id={job_id}"', html)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_jobs_rerun_opens_enhance_screen_with_saved_values_before_processing(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            source_job_id = "enhance_source_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                source_job_id,
+                status="Complete",
+                stage="Complete",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at="2026-08-07T09:00:05+00:00",
+                upload_name="placeholder.txt",
+                generated=True,
+                metrics={"job_mode": "enhance_existing_abap", "duration_seconds": 5.0},
+                options={
+                    "job_title": "Enhancement rerun",
+                    "run_sap_syntax_check": True,
+                    "sap_syntax_check_attempts": 4,
+                    "model_settings": {"preset": "balanced", "preset_label": "Balanced", "models": {}},
+                },
+            )
+            (jobs_folder / source_job_id / "original_existing.abap").write_text("REPORT zold.", encoding="utf-8")
+            (jobs_folder / source_job_id / "enhancement_specification.txt").write_text("Add a status field.", encoding="utf-8")
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+
+            with patch("app.start_enhance_abap_job") as start_job:
+                response = app.test_client().post(f"/jobs/{source_job_id}/rerun", follow_redirects=False)
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["Location"], f"/?rerun_source_job_id={source_job_id}")
+            start_job.assert_not_called()
+            self.assertEqual(sorted(path.name for path in jobs_folder.iterdir()), [source_job_id])
+
+            review = app.test_client().get(f"/?rerun_source_job_id={source_job_id}")
+            self.assertEqual(review.status_code, 200)
+            html = review.data.decode("utf-8")
+            self.assertIn("Re-run Enhance Existing ABAP", html)
+            self.assertIn(f'name="rerun_source_job_id" value="{source_job_id}"', html)
+            self.assertIn('value="Enhancement rerun"', html)
+            self.assertIn("Add a status field.", html)
+            self.assertIn("Saved existing ABAP: original_existing.abap", html)
+            self.assertIn('name="run_sap_syntax_check" type="checkbox" value="1" checked', html)
+            self.assertIn('id="enhance_sap_syntax_check_attempts"', html)
+            self.assertIn('value="4"', html)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_enhancement_rerun_submits_adjusted_values_from_first_screen(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
         temp_path.mkdir()
         try:
@@ -1635,21 +2053,94 @@ class CreateAbapFlowTest(unittest.TestCase):
                 "UPLOAD_FOLDER": str(uploads_folder),
                 "JOBS_FOLDER": str(jobs_folder),
             })
+            client = app.test_client()
+            rerun = client.post(f"/jobs/{source_job_id}/rerun", follow_redirects=False)
+            self.assertEqual(rerun.headers["Location"], f"/?rerun_source_job_id={source_job_id}")
 
             with patch("app.start_enhance_abap_job") as start_job:
-                response = app.test_client().post(f"/jobs/{source_job_id}/rerun", follow_redirects=False)
+                response = client.post(
+                    "/enhance",
+                    data={
+                        "rerun_source_job_id": source_job_id,
+                        "job_title": "Adjusted enhancement",
+                        "enhancement_specification": "Add a status field and totals.",
+                        "run_sap_syntax_check": "1",
+                        "sap_syntax_check_attempts": "5",
+                        "model_preset": "best_quality",
+                    },
+                    follow_redirects=False,
+                )
 
             self.assertEqual(response.status_code, 302)
             new_job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            self.assertNotEqual(new_job_id, source_job_id)
+            self.assertEqual(response.headers["Location"], f"/progress/{new_job_id}")
             start_job.assert_called_once()
             self.assertEqual(Path(start_job.call_args.kwargs["source_path"]).read_text(encoding="utf-8"), "REPORT zold.")
             self.assertEqual(
                 Path(start_job.call_args.kwargs["specification_path"]).read_text(encoding="utf-8"),
-                "Add a status field.",
+                "Add a status field and totals.",
             )
-            rerun_metadata = json.loads((jobs_folder / new_job_id / "rerun.json").read_text(encoding="utf-8"))
-            self.assertEqual(rerun_metadata["source_job_id"], source_job_id)
-            self.assertEqual(rerun_metadata["mode"], "enhance_existing_abap")
+            options = json.loads((jobs_folder / new_job_id / "options.json").read_text(encoding="utf-8"))
+            self.assertEqual(options["job_title"], "Adjusted enhancement")
+            self.assertTrue(options["run_sap_syntax_check"])
+            self.assertEqual(options["sap_syntax_check_attempts"], 5)
+            self.assertEqual(options["model_settings"]["preset"], "best_quality")
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_enhancement_rerun_review_normalizes_repeated_windows_blank_lines(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            source_job_id = "enhance_source_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                source_job_id,
+                status="Complete",
+                stage="Complete",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at="2026-08-07T09:00:05+00:00",
+                upload_name="placeholder.txt",
+                generated=True,
+                metrics={"job_mode": "enhance_existing_abap", "duration_seconds": 5.0},
+            )
+            (jobs_folder / source_job_id / "original_existing.abap").write_text("REPORT zold.", encoding="utf-8")
+            (jobs_folder / source_job_id / "enhancement_specification.txt").write_bytes(
+                b"First line.\r\r\n\r\r\n\r\r\nSecond line."
+            )
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+            client = app.test_client()
+            rerun = client.post(f"/jobs/{source_job_id}/rerun", follow_redirects=False)
+            self.assertEqual(rerun.headers["Location"], f"/?rerun_source_job_id={source_job_id}")
+
+            review = client.get(f"/?rerun_source_job_id={source_job_id}")
+            self.assertEqual(review.status_code, 200)
+            self.assertIn(b"First line.\n\nSecond line.", review.data)
+            self.assertNotIn(b"\r\r\n", review.data)
+
+            with patch("app.start_enhance_abap_job"):
+                response = client.post(
+                    "/enhance",
+                    data={
+                        "rerun_source_job_id": source_job_id,
+                        "job_title": "Enhancement rerun",
+                        "enhancement_specification": "First line.\r\n\r\n\r\nSecond line.",
+                    },
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            new_job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            spec_bytes = (uploads_folder / new_job_id / "enhancement_specification.txt").read_bytes()
+            self.assertEqual(spec_bytes, b"First line.\n\nSecond line.")
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -2083,7 +2574,7 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
-    def test_production_pipeline_preserves_selection_screen_chained_declarations(self):
+    def test_production_pipeline_generates_selection_screen_from_contract_not_llm_order(self):
         declaration_block = "\n".join(
             [
                 "SELECT-OPTIONS: s_id01 FOR zmd_mpe0001-identifier,",
@@ -2099,14 +2590,41 @@ class CreateAbapFlowTest(unittest.TestCase):
             ]
         )
 
-        final_source = self.run_pipeline_with_declaration_block(declaration_block)
+        final_source = self.run_pipeline_with_declaration_block(
+            declaration_block,
+            extracted_requirements={
+                "report_name": "ztest",
+                "parameters": [
+                    {"name": "p_zmdid", "type_or_like": "TYPE zmdid"},
+                    {"name": "p_idoc", "as_checkbox": True},
+                    {"name": "p_alv", "radiobutton_group": "rad1", "default": "'X'"},
+                    {"name": "p_file", "radiobutton_group": "rad1"},
+                ],
+                "select_options": [
+                    {"name": "s_id01", "for_field": "ZMD_MPE0001-IDENTIFIER"},
+                    {"name": "s_id06", "for_field": "ZMD_MPE0006-IDENTIFIER"},
+                    {"name": "s_credat", "for_field": "EDIDC-CREDAT"},
+                    {"name": "s_mestyp", "for_field": "EDIDC-MESTYP"},
+                    {"name": "s_status", "for_field": "EDIDC-STATUS"},
+                ],
+            },
+            ddic_metadata={
+                "tables": {
+                    "ZMD_MPE0001": {"fields": {"IDENTIFIER": {}}},
+                    "ZMD_MPE0006": {"fields": {"IDENTIFIER": {}}},
+                    "EDIDC": {"fields": {"CREDAT": {}, "MESTYP": {}, "STATUS": {}}},
+                }
+            },
+        )
 
-        self.assertIn(declaration_block, final_source)
-        self.assertLess(final_source.index("SELECT-OPTIONS: s_id01"), final_source.index("PARAMETERS: p_zmdid"))
-        self.assertLess(final_source.index("SELECT-OPTIONS: s_id01"), final_source.index("                s_id06"))
-        self.assertLess(final_source.index("PARAMETERS: p_zmdid"), final_source.index("            p_idoc"))
+        self.assertNotIn(declaration_block, final_source)
+        self.assertIn("PARAMETERS p_zmdid TYPE zmdid.", final_source)
+        self.assertIn("PARAMETERS p_idoc AS CHECKBOX.", final_source)
+        self.assertIn("PARAMETERS p_alv RADIOBUTTON GROUP rad1 DEFAULT 'X'.", final_source)
+        self.assertIn("SELECT-OPTIONS s_id01 FOR zmd_mpe0001-identifier.", final_source)
+        self.assertLess(final_source.index("PARAMETERS p_zmdid"), final_source.index("SELECT-OPTIONS s_id01"))
 
-    def test_production_pipeline_preserves_parameters_then_select_options_chained_declarations(self):
+    def test_production_pipeline_replaces_llm_selection_screen_even_when_order_matches_contract(self):
         declaration_block = "\n".join(
             [
                 "PARAMETERS: p_zmdid TYPE zmdid,",
@@ -2122,12 +2640,21 @@ class CreateAbapFlowTest(unittest.TestCase):
             ]
         )
 
-        final_source = self.run_pipeline_with_declaration_block(declaration_block)
+        final_source = self.run_pipeline_with_declaration_block(
+            declaration_block,
+            extracted_requirements={
+                "report_name": "ztest",
+                "parameters": [{"name": "p_zmdid", "type_or_like": "TYPE zmdid"}],
+                "select_options": [{"name": "s_status", "for_field": "EDIDC-STATUS"}],
+            },
+            ddic_metadata={"tables": {"EDIDC": {"fields": {"STATUS": {}}}}},
+        )
 
-        self.assertIn(declaration_block, final_source)
-        self.assertLess(final_source.index("PARAMETERS: p_zmdid"), final_source.index("SELECT-OPTIONS: s_id01"))
-        self.assertLess(final_source.index("PARAMETERS: p_zmdid"), final_source.index("            p_idoc"))
-        self.assertLess(final_source.index("SELECT-OPTIONS: s_id01"), final_source.index("                s_id06"))
+        self.assertNotIn(declaration_block, final_source)
+        self.assertIn("PARAMETERS p_zmdid TYPE zmdid.", final_source)
+        self.assertIn("SELECT-OPTIONS s_status FOR edidc-status.", final_source)
+        self.assertNotIn("p_idoc", final_source)
+        self.assertNotIn("s_id01", final_source)
 
     def test_production_pipeline_preserves_generic_chained_declarations(self):
         blocks = {
@@ -2199,7 +2726,10 @@ class CreateAbapFlowTest(unittest.TestCase):
 
                 upload = client.post(
                     "/upload",
-                    data={"abap_file": (BytesIO(b"Create a test report."), "request.txt")},
+                    data={
+                        "job_title": "Active LLM upload",
+                        "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
+                    },
                     content_type="multipart/form-data",
                     follow_redirects=False,
                 )
@@ -2280,6 +2810,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/upload",
                     data={
+                        "job_title": "Syntax repair upload",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "run_sap_syntax_check": "1",
                     },
@@ -2505,6 +3036,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/upload",
                     data={
+                        "job_title": "Syntax form repair",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "run_sap_syntax_check": "1",
                     },
@@ -2522,6 +3054,115 @@ class CreateAbapFlowTest(unittest.TestCase):
                     (jobs_folder / job_id / "generated.abap").read_text(encoding="utf-8"),
                     repaired_source,
                 )
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
+    def test_sap_syntax_repair_preserves_unrelated_select_endselect_blocks(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            job_id = create_job(jobs_folder)
+            job_folder = jobs_folder / job_id
+            (job_folder / "options.json").write_text(
+                json.dumps({"run_sap_syntax_check": True, "sap_syntax_check_attempts": 2}),
+                encoding="utf-8",
+            )
+            original_select = "\n".join(
+                [
+                    "    SELECT low UP TO 1 ROWS",
+                    "           INTO w_zzcolleague_location",
+                    "           FROM hrv1222a",
+                    "           WHERE endda  EQ st_pa0001-endda",
+                    "             AND otype  EQ 'S'",
+                    "             AND objid  EQ st_pa0001-plans",
+                    "             AND attrib EQ 'ZCOLL_LOCN'.",
+                    "    ENDSELECT.",
+                ]
+            )
+            generated_source = "\n".join(
+                [
+                    "REPORT zforms.",
+                    "FORM determine_branch.",
+                    original_select,
+                    "  WRITE bad.",
+                    "ENDFORM.",
+                ]
+            )
+            repaired_form = "\n".join(
+                [
+                    "FORM determine_branch.",
+                    "    SELECT low UP TO 1 ROWS FROM hrv1222a INTO w_zzcolleague_location WHERE endda EQ st_pa0001-endda AND otype EQ 'S' AND objid EQ st_pa0001-plans AND attrib EQ 'ZCOLL_LOCN'.",
+                    "    SELECT low UP TO 1 ROWS FROM hrv1222a INTO w_zzcolleague_location WHERE endda EQ st_pa0001-endda AND otype EQ 'S' AND objid EQ st_pa0001-plans AND attrib EQ 'ZCOLL_LOCN'.",
+                    "    ENDSELECT.",
+                    "  WRITE: / 'fixed'.",
+                    "ENDFORM.",
+                ]
+            )
+            repaired_source = "\n".join(
+                [
+                    "REPORT zforms.",
+                    "FORM determine_branch.",
+                    original_select,
+                    "  WRITE: / 'fixed'.",
+                    "ENDFORM.",
+                ]
+            )
+            syntax_checker = RecordingSyntaxChecker(
+                [
+                    {
+                        "requested": True,
+                        "status": "failed",
+                        "passed": False,
+                        "errors": [
+                            {
+                                "line": 11,
+                                "column": None,
+                                "severity": "E",
+                                "message": "Syntax issue outside the existing SELECT block.",
+                                "word": "BAD",
+                                "source_line": "  WRITE bad.",
+                            }
+                        ],
+                        "raw_response": "<sap>first</sap>",
+                        "technical_message": "",
+                    },
+                    {
+                        "requested": True,
+                        "status": "passed",
+                        "passed": True,
+                        "errors": [],
+                        "raw_response": "<sap>second</sap>",
+                        "technical_message": "",
+                    },
+                ]
+            )
+            repairer = RecordingCodeReviewRepairer(repaired_form)
+
+            final_abap = maybe_run_sap_syntax_check(
+                job_folder,
+                jobs_folder,
+                job_id,
+                generated_source,
+                syntax_checker,
+                code_review_repairer=repairer,
+            )
+
+            self.assertEqual(final_abap, repaired_source)
+            self.assertEqual(syntax_checker.sources, [generated_source, repaired_source])
+            self.assertEqual(repairer.sources, [generated_source.split("\n", 1)[1]])
+            diagnostic = (job_folder / "diagnostic_syntax_repair_flow.txt").read_text(encoding="utf-8")
+            self.assertIn("Unrelated SELECT blocks restored after repair:", diagnostic)
+            self.assertIn("TABLE=HRV1222A", diagnostic)
+            saved = json.loads((job_folder / "sap_syntax_check.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                saved["repair"]["repaired_abap"],
+                repaired_source,
+            )
+            self.assertNotIn(
+                "SELECT low UP TO 1 ROWS FROM hrv1222a INTO w_zzcolleague_location",
+                saved["repair"]["repaired_abap"],
+            )
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -2585,6 +3226,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/upload",
                     data={
+                        "job_title": "Invalid form repair",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "run_sap_syntax_check": "1",
                     },
@@ -2648,6 +3290,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/upload",
                     data={
+                        "job_title": "Three syntax attempts",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "run_sap_syntax_check": "1",
                         "sap_syntax_check_attempts": "3",
@@ -2771,6 +3414,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/upload",
                     data={
+                        "job_title": "Remaining syntax errors",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "run_sap_syntax_check": "1",
                     },
@@ -2880,7 +3524,10 @@ class CreateAbapFlowTest(unittest.TestCase):
                 client = app.test_client()
                 upload = client.post(
                     "/upload",
-                    data={"abap_file": (BytesIO(b"Create a test report."), "request.txt")},
+                    data={
+                        "job_title": "No syntax check",
+                        "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
+                    },
                     content_type="multipart/form-data",
                     follow_redirects=False,
                 )
@@ -2928,6 +3575,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/upload",
                     data={
+                        "job_title": "Syntax cap",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "sap_syntax_check_attempts": "99",
                     },
@@ -2967,7 +3615,10 @@ class CreateAbapFlowTest(unittest.TestCase):
 
                 upload = client.post(
                     "/upload",
-                    data={"abap_file": (BytesIO(b"Create a test report."), "request.txt")},
+                    data={
+                        "job_title": "Error redirect",
+                        "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
+                    },
                     content_type="multipart/form-data",
                     follow_redirects=False,
                 )
@@ -3085,6 +3736,61 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
+    def test_failed_job_with_assembled_abap_diagnostic_exposes_result_and_error(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_failed_chunk_result_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            uploads_folder = temp_path / "uploads"
+            jobs_folder = temp_path / "jobs"
+            job_id = "failed_with_chunk_abap"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                job_id,
+                status="Error",
+                stage="Error",
+                started_at="2026-09-06T16:00:15+00:00",
+                completed_at="2026-09-06T16:10:02+00:00",
+                upload_name="request.txt",
+                generated=False,
+                metrics={"job_mode": "create_abap", "duration_seconds": 587.0},
+            )
+            job_folder = jobs_folder / job_id
+            status_payload = json.loads((job_folder / "status.json").read_text(encoding="utf-8"))
+            status_payload["message"] = "Processing contract validation failed: duplicate declaration rejected: t_output"
+            status_payload["stage_message"] = status_payload["message"]
+            (job_folder / "status.json").write_text(json.dumps(status_payload), encoding="utf-8")
+            (job_folder / "abap_generation_chunks.json").write_text(
+                json.dumps({"assembled_abap": "REPORT zpartial.\nWRITE 'saved'."}),
+                encoding="utf-8",
+            )
+
+            app = create_app(
+                {
+                    "TESTING": True,
+                    "UPLOAD_FOLDER": str(uploads_folder),
+                    "JOBS_FOLDER": str(jobs_folder),
+                }
+            )
+            client = app.test_client()
+
+            progress_status = client.get(f"/progress/{job_id}/status").get_json()
+            self.assertTrue(progress_status["has_result"])
+
+            result = client.get(f"/result/{job_id}")
+            self.assertEqual(result.status_code, 200)
+            self.assertIn(b"Job Error", result.data)
+            self.assertIn(b"duplicate declaration rejected: t_output", result.data)
+            self.assertIn(b'<code id="generated-abap">REPORT zpartial.', result.data)
+            self.assertIn(b"Source: assembled ABAP diagnostic", result.data)
+
+            download = client.get(f"/download/{job_id}")
+            self.assertEqual(download.status_code, 200)
+            self.assertEqual(download.data, b"REPORT zpartial.\nWRITE 'saved'.")
+            download.close()
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def test_running_job_with_saved_abap_does_not_expose_result_yet(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_running_result_{uuid4().hex}"
         temp_path.mkdir()
@@ -3160,6 +3866,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 upload = client.post(
                     "/upload",
                     data={
+                        "job_title": "Ignored callable metadata",
                         "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
                         "callable_metadata": json.dumps(callable_metadata()),
                     },
@@ -3925,6 +4632,78 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertNotIn("read_edidc", contract["form_names"])
         self.assertNotIn("display_alv", contract["form_names"])
 
+    def test_generation_contract_keeps_runtime_aliases_for_existing_record_checks(self):
+        contract = build_generation_contract(
+            (
+                "Check ZABSENCE_LOG to determine whether a record already exists. "
+                "Read the relevant existing ZABSENCE_LOG records in bulk where possible."
+            ),
+            {
+                "ddic_objects": [
+                    {"name": "ZABSENCE_LOG", "structure": "st_zabsence_log", "table": "t_zabsence_log"},
+                ],
+                "callables": [],
+            },
+            {
+                "ZABSENCE_LOG": {
+                    "fields": {
+                        "PERNR": {"name": "PERNR"},
+                        "WORKDATE": {"name": "WORKDATE"},
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(contract["internal_tables"], ["t_zabsence_log"])
+        self.assertEqual(contract["work_areas"], ["st_zabsence_log"])
+        self.assertEqual(contract["ddic_metadata_objects"], ["ZABSENCE_LOG"])
+        self.assertEqual([item["name"] for item in contract["ddic_objects"]], ["ZABSENCE_LOG"])
+        self.assertIn("read_zabsence_log", contract["form_names"])
+
+    def test_generation_contract_does_not_declare_type_only_ddic_dependencies(self):
+        contract = build_generation_contract(
+            (
+                "Read EDIDC-DOCNUM and call BAPI_MESSAGE_GETDETAIL. "
+                "Define ERROR_MESSAGE using BAPIRET2-MESSAGE."
+            ),
+            {
+                "ddic_objects": [
+                    {"name": "EDIDC", "structure": "st_edidc", "table": "t_edidc"},
+                    {"name": "BAPIRET2", "structure": "st_bapiret2", "table": "t_bapiret2"},
+                ],
+                "callables": ["BAPI_MESSAGE_GETDETAIL"],
+            },
+            {
+                "tables": {
+                    "EDIDC": {"fields": {"DOCNUM": {"name": "DOCNUM"}}},
+                    "BAPIRET2": {"fields": {"MESSAGE": {"name": "MESSAGE"}}},
+                }
+            },
+            {
+                "callable_signatures": {
+                    "BAPI_MESSAGE_GETDETAIL": {
+                        "parameters": {
+                            "MESSAGE": {"direction": "EXPORTING", "abap_type": "BAPIRET2", "field": "MESSAGE"}
+                        }
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(contract["internal_tables"], ["t_edidc"])
+        self.assertEqual(contract["work_areas"], ["st_edidc"])
+        self.assertEqual(contract["ddic_metadata_objects"], ["EDIDC", "BAPIRET2"])
+        self.assertEqual([item["name"] for item in contract["ddic_objects"]], ["EDIDC"])
+        self.assertIn("read_edidc", contract["form_names"])
+        self.assertNotIn("read_bapiret2", contract["form_names"])
+        self.assertNotIn("t_bapiret2", contract["internal_tables"])
+        self.assertNotIn("st_bapiret2", contract["work_areas"])
+        prompt = append_generation_contract("Base prompt.", contract)
+        self.assertIn("Exact FORM names: read_edidc, process_data", prompt)
+        self.assertNotIn("read_bapiret2", prompt)
+        self.assertNotIn("- BAPIRET2: structure st_bapiret2", prompt)
+        self.assertIn("Exact DDIC metadata dependencies: EDIDC, BAPIRET2", prompt)
+
     def test_generation_contract_includes_simple_global_form_routine_rule(self):
         prompt = append_generation_contract(
             "Base prompt.",
@@ -3934,6 +4713,7 @@ class CreateAbapFlowTest(unittest.TestCase):
                 "output_structure_fields": ["VBELN"],
                 "form_names": ["read_vbak", "process_data"],
                 "callable_identities": [],
+                "ddic_metadata_objects": ["VBAK", "BAPIRET2"],
             },
         )
 
@@ -3955,6 +4735,7 @@ class CreateAbapFlowTest(unittest.TestCase):
         self.assertIn("- Do not invent local names such as lt_*, ls_*, lv_*, wa_*, gt_*, gs_*, or gv_*.", prompt)
         self.assertIn("- Do not generate USING, CHANGING or TABLES parameters for FORM routines.", prompt)
         self.assertIn("- Do not generate USING, CHANGING or TABLES additions on PERFORM statements.", prompt)
+        self.assertIn("Exact DDIC metadata dependencies: VBAK, BAPIRET2", prompt)
         self.assertIn(
             "- Only generate FORM parameters if the functional specification explicitly requires data to be passed between forms.",
             prompt,
@@ -5032,7 +5813,10 @@ class CreateAbapFlowTest(unittest.TestCase):
 
                 upload = client.post(
                     "/upload",
-                    data={"abap_file": (BytesIO(source_text.encode("utf-8")), "request.txt")},
+                    data={
+                        "job_title": "Metrics job",
+                        "abap_file": (BytesIO(source_text.encode("utf-8")), "request.txt"),
+                    },
                     content_type="multipart/form-data",
                     follow_redirects=False,
                 )
@@ -5164,7 +5948,10 @@ class CreateAbapFlowTest(unittest.TestCase):
                 client = app.test_client()
                 upload = client.post(
                     "/upload",
-                    data={"abap_file": (BytesIO(b"Create a test report."), "request.txt")},
+                    data={
+                        "job_title": "Missing token usage",
+                        "abap_file": (BytesIO(b"Create a test report."), "request.txt"),
+                    },
                     content_type="multipart/form-data",
                     follow_redirects=False,
                 )

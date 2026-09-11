@@ -19,10 +19,33 @@
         </div>
 
         {% if jobs %}
+          <div class="jobs-filter-bar" aria-label="Job filters">
+            <label class="jobs-filter-field" for="job-filter-date">
+              <span>Date</span>
+              <input id="job-filter-date" type="search" placeholder="Filter date/time" autocomplete="off">
+            </label>
+            <label class="jobs-filter-field" for="job-filter-title">
+              <span>Title</span>
+              <input id="job-filter-title" type="search" placeholder="Filter title" autocomplete="off">
+            </label>
+            <fieldset class="jobs-filter-modes">
+              <legend>Job mode</legend>
+              <label class="checkbox-option">
+                <input class="job-mode-filter" type="checkbox" value="create_abap" checked>
+                New program
+              </label>
+              <label class="checkbox-option">
+                <input class="job-mode-filter" type="checkbox" value="enhance_existing_abap" checked>
+                Enhancement
+              </label>
+            </fieldset>
+            <button id="clear-job-filters" class="secondary-button compact-button" type="button">Clear</button>
+          </div>
           <div class="jobs-table-wrap">
             <table class="jobs-table">
               <colgroup>
                 <col class="jobs-date-col">
+                <col class="jobs-title-col">
                 <col class="jobs-file-col">
                 <col class="jobs-mode-col">
                 <col class="jobs-preset-col">
@@ -34,6 +57,7 @@
               <thead>
                 <tr>
                   <th>Date/time</th>
+                  <th>Title</th>
                   <th>Specification/file name</th>
                   <th>Job mode</th>
                   <th>OpenAI model preset</th>
@@ -45,8 +69,9 @@
               </thead>
               <tbody>
                 {% for job in jobs %}
-                  <tr>
+                  <tr data-job-date="{{ job.started_at_display|lower }}" data-job-title="{{ job.job_title|lower }}" data-job-mode="{{ job.job_mode }}">
                     <td>{{ job.started_at_display }}</td>
+                    <td>{{ job.job_title }}</td>
                     <td>{{ job.specification_name }}</td>
                     <td>
                       <div>{{ job.job_mode_display }}</div>
@@ -75,6 +100,9 @@
                     </td>
                   </tr>
                 {% endfor %}
+                <tr id="jobs-no-filter-results" class="hidden">
+                  <td colspan="9">No jobs match the current filters.</td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -83,5 +111,53 @@
         {% endif %}
       </section>
     </main>
+    <script>
+      const jobFilterDate = document.getElementById("job-filter-date");
+      const jobFilterTitle = document.getElementById("job-filter-title");
+      const jobModeFilters = Array.from(document.querySelectorAll(".job-mode-filter"));
+      const clearJobFilters = document.getElementById("clear-job-filters");
+      const jobRows = Array.from(document.querySelectorAll(".jobs-table tbody tr[data-job-mode]"));
+      const noFilterResultsRow = document.getElementById("jobs-no-filter-results");
+
+      function filterJobs() {
+        const dateQuery = (jobFilterDate?.value || "").trim().toLowerCase();
+        const titleQuery = (jobFilterTitle?.value || "").trim().toLowerCase();
+        const selectedModes = new Set(jobModeFilters.filter((control) => control.checked).map((control) => control.value));
+        let visibleRows = 0;
+
+        jobRows.forEach((row) => {
+          const matchesDate = !dateQuery || row.dataset.jobDate.includes(dateQuery);
+          const matchesTitle = !titleQuery || row.dataset.jobTitle.includes(titleQuery);
+          const matchesMode = selectedModes.has(row.dataset.jobMode);
+          const visible = matchesDate && matchesTitle && matchesMode;
+          row.classList.toggle("hidden", !visible);
+          if (visible) {
+            visibleRows += 1;
+          }
+        });
+
+        if (noFilterResultsRow) {
+          noFilterResultsRow.classList.toggle("hidden", visibleRows !== 0);
+        }
+      }
+
+      [jobFilterDate, jobFilterTitle, ...jobModeFilters].forEach((control) => {
+        control?.addEventListener("input", filterJobs);
+        control?.addEventListener("change", filterJobs);
+      });
+
+      clearJobFilters?.addEventListener("click", () => {
+        if (jobFilterDate) {
+          jobFilterDate.value = "";
+        }
+        if (jobFilterTitle) {
+          jobFilterTitle.value = "";
+        }
+        jobModeFilters.forEach((control) => {
+          control.checked = true;
+        });
+        filterJobs();
+      });
+    </script>
   </body>
 </html>

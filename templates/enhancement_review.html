@@ -30,8 +30,28 @@
           <dd>{{ proposal.summary }}</dd>
         </dl>
 
-        <details class="code-panel" open>
-          <summary>Proposed Diff</summary>
+        <section class="proposed-changes-panel" aria-labelledby="proposed-changes-title">
+          <h2 id="proposed-changes-title">Proposed Changes</h2>
+          {% if proposal.proposed_changes %}
+            <div class="proposed-change-groups">
+              {% for group in proposal.proposed_changes %}
+                <section class="proposed-change-group">
+                  <h3>{{ group.category }}</h3>
+                  <ul>
+                    {% for description in group.descriptions %}
+                      <li>{{ description }}</li>
+                    {% endfor %}
+                  </ul>
+                </section>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p>No text differences detected.</p>
+          {% endif %}
+        </section>
+
+        <details class="code-panel">
+          <summary>Technical Diff</summary>
           <pre><code>{{ proposal.diff if proposal.diff else "No text differences detected." }}</code></pre>
         </details>
 

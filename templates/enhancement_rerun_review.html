@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Enhancement Re-run - SAP AI Assistant Next</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
+  </head>
+  <body>
+    <nav class="app-nav" aria-label="Main navigation">
+      <a href="{{ url_for('home') }}">New</a>
+      <a href="{{ url_for('jobs') }}">Jobs</a>
+    </nav>
+    <main class="page">
+      <section class="panel wide">
+        <div class="result-header">
+          <h1>Enhancement Re-run</h1>
+          <div class="button-row">
+            <a class="button-link" href="{{ url_for('home') }}">New</a>
+            <a class="button-link" href="{{ url_for('jobs') }}">Jobs</a>
+          </div>
+        </div>
+
+        {% if error %}
+          <div class="status-callout error-callout" role="alert">{{ error }}</div>
+        {% else %}
+          <div class="status-callout warning-callout" role="status">
+            Review and edit the saved functional specification before re-running the enhancement.
+          </div>
+        {% endif %}
+
+        <dl class="review-summary">
+          <dt>Job title</dt>
+          <dd>{{ context.job_title or "-" }}</dd>
+          <dt>Re-run of</dt>
+          <dd>{{ context.source_job_short_id or context.source_job_id or "Unavailable" }}</dd>
+          <dt>Existing ABAP file</dt>
+          <dd>{{ context.source_name }}</dd>
+        </dl>
+
+        <details class="code-panel">
+          <summary>Existing ABAP</summary>
+          <pre><code>{{ context.source_text }}</code></pre>
+        </details>
+
+        <form method="post">
+          <label for="enhancement_specification">Functional Specification</label>
+          <textarea id="enhancement_specification" name="enhancement_specification" rows="22" required>{{ context.enhancement_specification }}</textarea>
+          <div class="button-row">
+            <button type="submit" name="action" value="start">Re-run enhancement</button>
+            <button type="submit" name="action" value="cancel" class="secondary-button">Cancel</button>
+          </div>
+        </form>
+
+        <p class="job-id">Job ID: {{ job_id }}</p>
+      </section>
+    </main>
+  </body>
+</html>

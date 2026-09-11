@@ -17,7 +17,7 @@
         <div class="model-preset-grid">
           {% for preset in model_settings.presets %}
             <label class="radio-option model-preset-option">
-              <input name="model_preset" form="new-program-form" type="radio" value="{{ preset.name }}" {% if preset.name == model_settings.default_preset %}checked{% endif %}>
+              <input name="model_preset" form="new-program-form" type="radio" value="{{ preset.name }}" {% if preset.name == model_preset_default %}checked{% endif %}>
               <span class="model-preset-copy">
                 <span class="model-preset-title">{{ preset.label }}</span>
                 <span class="model-preset-summary">General: {{ model_settings.model_display_names[preset.models.general] }}</span>
@@ -26,7 +26,7 @@
                 <span class="model-preset-summary">Review: {{ model_settings.model_display_names[preset.models.code_review] }}</span>
               </span>
             </label>
-            <input class="enhance-model-control" name="model_preset" form="enhance-program-form" type="radio" value="{{ preset.name }}" {% if preset.name == model_settings.default_preset %}checked{% endif %}>
+            <input class="enhance-model-control" name="model_preset" form="enhance-program-form" type="radio" value="{{ preset.name }}" {% if preset.name == model_preset_default %}checked{% endif %}>
           {% endfor %}
           <label class="radio-option model-preset-option">
             <input class="advanced-radio" name="model_preset" form="new-program-form" type="radio" value="advanced">
@@ -81,53 +81,83 @@
           <label class="tab-label" for="tab-settings">Settings</label>
 
           <section class="tab-panel tab-panel-new">
-            <h2>Generate New Program</h2>
+            <h2>{% if rerun_context.mode == "create_abap" %}Re-run New Program{% else %}Generate New Program{% endif %}</h2>
             <form id="new-program-form" action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+              {% if rerun_context.mode == "create_abap" %}
+                {% if rerun_context.rerun_job_id %}
+                  <input type="hidden" name="rerun_job_id" value="{{ rerun_context.rerun_job_id }}">
+                {% else %}
+                  <input type="hidden" name="rerun_source_job_id" value="{{ rerun_context.source_job_id }}">
+                {% endif %}
+                <div class="status-callout warning-callout" role="status">
+                  Review and adjust the saved generation details before re-running.
+                </div>
+              {% endif %}
+              <label for="job_title">Job Title</label>
+              <input id="job_title" name="job_title" type="text" maxlength="120" required value="{{ rerun_context.job_title if rerun_context.mode == 'create_abap' else '' }}">
               <label for="abap_file">Specification File</label>
               <input id="abap_file" name="abap_file" type="file" accept=".abap,.txt">
+              {% if rerun_context.mode == "create_abap" and rerun_context.input_name %}
+                <p class="job-id">Saved specification: {{ rerun_context.input_name }}</p>
+              {% endif %}
               <label for="specification_text">Specification Text</label>
-              <textarea id="specification_text" name="specification_text" rows="10"></textarea>
+              <textarea id="specification_text" name="specification_text" rows="10">{{ rerun_context.specification_text if rerun_context.mode == "create_abap" else "" }}</textarea>
               <label class="checkbox-option">
-                <input name="prepare_functional_specification" type="checkbox" value="1">
-                Prepare Functional Specification
+                <input name="prepare_functional_specification" type="checkbox" value="1" {% if rerun_context.mode == "create_abap" and rerun_context.prepare_functional_specification %}checked{% endif %}>
+                Structure Functional Specification
               </label>
               <div class="syntax-check-row">
                 <label class="checkbox-option">
-                  <input name="run_sap_syntax_check" type="checkbox" value="1">
+                  <input name="run_sap_syntax_check" type="checkbox" value="1" {% if rerun_context.mode == "create_abap" and rerun_context.run_sap_syntax_check %}checked{% endif %}>
                   Run SAP Syntax
                 </label>
-                <input id="sap_syntax_check_attempts" class="syntax-attempts-input" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2" aria-label="SAP syntax API calls">
+                <input id="sap_syntax_check_attempts" class="syntax-attempts-input" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="{{ rerun_context.sap_syntax_check_attempts if rerun_context.mode == 'create_abap' else 2 }}" aria-label="SAP syntax API calls">
               </div>
               <fieldset class="final-assembly-settings">
                 <legend>Final ABAP Assembly</legend>
                 <label class="radio-option">
-                  <input name="final_assembly_mode" type="radio" value="app" checked>
+                  <input name="final_assembly_mode" type="radio" value="app" {% if rerun_context.mode != "create_abap" or rerun_context.final_assembly_mode != "llm" %}checked{% endif %}>
                   Application assembler
                 </label>
                 <label class="radio-option">
-                  <input name="final_assembly_mode" type="radio" value="llm">
+                  <input name="final_assembly_mode" type="radio" value="llm" {% if rerun_context.mode == "create_abap" and rerun_context.final_assembly_mode == "llm" %}checked{% endif %}>
                   LLM assembler
                 </label>
               </fieldset>
-              <button type="submit">Generate</button>
+              <button type="submit">{% if rerun_context.mode == "create_abap" %}Re-run Generate{% else %}Generate{% endif %}</button>
             </form>
           </section>
 
           <section class="tab-panel tab-panel-enhance">
-            <h2>Enhance Existing ABAP</h2>
+            <h2>{% if rerun_context.mode == "enhance_existing_abap" %}Re-run Enhance Existing ABAP{% else %}Enhance Existing ABAP{% endif %}</h2>
             <form id="enhance-program-form" action="{{ url_for('enhance_file') }}" method="post" enctype="multipart/form-data">
+              {% if rerun_context.mode == "enhance_existing_abap" %}
+                {% if rerun_context.rerun_job_id %}
+                  <input type="hidden" name="rerun_job_id" value="{{ rerun_context.rerun_job_id }}">
+                {% else %}
+                  <input type="hidden" name="rerun_source_job_id" value="{{ rerun_context.source_job_id }}">
+                {% endif %}
+                <div class="status-callout warning-callout" role="status">
+                  Review and adjust the saved enhancement details before re-running.
+                </div>
+              {% endif %}
+              <label for="enhance_job_title">Job Title</label>
+              <input id="enhance_job_title" name="job_title" type="text" maxlength="120" required value="{{ rerun_context.job_title if rerun_context.mode == 'enhance_existing_abap' else '' }}">
               <label for="existing_abap_file">Upload Existing ABAP</label>
-              <input id="existing_abap_file" name="existing_abap_file" type="file" accept=".abap,.txt" required>
+              <input id="existing_abap_file" name="existing_abap_file" type="file" accept=".abap,.txt" {% if rerun_context.mode != "enhance_existing_abap" %}required{% endif %}>
+              {% if rerun_context.mode == "enhance_existing_abap" and rerun_context.source_name %}
+                <p class="job-id">Saved existing ABAP: {{ rerun_context.source_name }}</p>
+              {% endif %}
               <label for="enhancement_specification">Functional Specification</label>
-              <textarea id="enhancement_specification" name="enhancement_specification" rows="8" required></textarea>
+              <textarea id="enhancement_specification" name="enhancement_specification" rows="8" required>{{ rerun_context.enhancement_specification if rerun_context.mode == "enhance_existing_abap" else "" }}</textarea>
               <div class="syntax-check-row">
                 <label class="checkbox-option">
-                  <input name="run_sap_syntax_check" type="checkbox" value="1">
+                  <input name="run_sap_syntax_check" type="checkbox" value="1" {% if rerun_context.mode == "enhance_existing_abap" and rerun_context.run_sap_syntax_check %}checked{% endif %}>
                   Run SAP Syntax
                 </label>
-                <input id="enhance_sap_syntax_check_attempts" class="syntax-attempts-input" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="2" aria-label="SAP syntax API calls">
+                <input id="enhance_sap_syntax_check_attempts" class="syntax-attempts-input" name="sap_syntax_check_attempts" type="number" min="1" max="10" value="{{ rerun_context.sap_syntax_check_attempts if rerun_context.mode == 'enhance_existing_abap' else 2 }}" aria-label="SAP syntax API calls">
               </div>
-              <button type="submit">Enhance</button>
+              <button type="submit">{% if rerun_context.mode == "enhance_existing_abap" %}Re-run Enhance{% else %}Enhance{% endif %}</button>
             </form>
           </section>
 

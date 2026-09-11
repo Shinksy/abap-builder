@@ -7,6 +7,70 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
   </head>
   <body>
+    {% macro condition_text(conditions) -%}
+      {%- for condition in conditions or [] -%}
+        {%- if loop.index0 %} and {% endif -%}
+        {%- if condition is mapping -%}
+          {{ condition.left }} {{ condition.operator }} {{ condition.right }}
+        {%- else -%}
+          {{ condition }}
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endmacro %}
+
+    {% macro parameter_text(parameters) -%}
+      {%- for name, value in (parameters or {}).items() -%}
+        {%- if loop.index0 %}, {% endif -%}
+        {{ name }} from {{ value }}
+      {%- endfor -%}
+    {%- endmacro %}
+
+    {% macro step_description(step) -%}
+      {%- set operation = (step.operation or "")|upper -%}
+      {%- if operation == "LOOP" -%}
+        Loop through {{ step.source or "the source data" }}{% if step.into %} into {{ step.into }}{% endif %}
+      {%- elif operation in ["MOVE", "ASSIGN"] -%}
+        Set {{ step.target or "the target value" }} from {{ step.source or "the source value" }}
+      {%- elif operation == "CLEAR" -%}
+        Clear {{ step.target or step.source or "the working value" }}
+      {%- elif operation == "APPEND" -%}
+        Add {{ step.source or step.into or "the row" }}{% if step.target %} to {{ step.target }}{% endif %}
+      {%- elif operation in ["SELECT", "READ"] -%}
+        Read {{ step.fields|join(", ") if step.fields else "data" }} from {{ step.table or step.source or step.get("from") or "the source table" }}{% if step.into %} into {{ step.into }}{% elif step.target %} into {{ step.target }}{% endif %}{% if step.conditions %} where {{ condition_text(step.conditions) }}{% endif %}
+      {%- elif operation == "CALL_FUNCTION" -%}
+        Call function {{ step.name or step.function or "the function module" }}{% if step.input_parameters %} with {{ parameter_text(step.input_parameters) }}{% endif %}{% if step.output_parameters %}; return {{ parameter_text(step.output_parameters) }}{% endif %}
+      {%- elif operation in ["CALL_METHOD", "CALL_STATIC_METHOD"] -%}
+        Call method {% if step.class %}{{ step.class }}=>{% endif %}{{ step.method or step.name or "the method" }}{% if step.input_parameters %} with {{ parameter_text(step.input_parameters) }}{% endif %}{% if step.output_parameters %}; return {{ parameter_text(step.output_parameters) }}{% endif %}
+      {%- elif operation == "IF" -%}
+        If {{ condition_text(step.conditions) or "the condition is met" }}
+      {%- else -%}
+        {{ operation|replace("_", " ")|title if operation else "Processing step" }}{% if step.source %} using {{ step.source }}{% endif %}{% if step.target %} for {{ step.target }}{% endif %}
+      {%- endif -%}
+    {%- endmacro %}
+
+    {% macro render_steps(steps, nested=false) -%}
+      <ol class="processing-plan-steps{% if nested %} nested-processing-plan-steps{% endif %}">
+        {% for step in steps or [] %}
+          {% if step is mapping %}
+            <li>
+              <div class="processing-plan-step-text">{{ step_description(step) }}</div>
+              {% if step.steps %}
+                {{ render_steps(step.steps, true) }}
+              {% endif %}
+              {% if step.then %}
+                <div class="processing-plan-branch-label">Then</div>
+                {{ render_steps(step.then, true) }}
+              {% endif %}
+              {% if step.else %}
+                <div class="processing-plan-branch-label">Else</div>
+                {{ render_steps(step.else, true) }}
+              {% endif %}
+            </li>
+          {% endif %}
+        {% endfor %}
+      </ol>
+    {%- endmacro %}
+
     <nav class="app-nav" aria-label="Main navigation">
       <a href="{{ url_for('home') }}">New</a>
       <a href="{{ url_for('jobs') }}">Jobs</a>
@@ -63,7 +127,7 @@
           <summary>Variables To Define</summary>
           {% if variable_contract.get("variables_to_define") %}
             <div class="metrics-table-wrap">
-              <table class="metrics-table">
+              <table class="metrics-table variable-contract-table">
                 <thead>
                   <tr>
                     <th>Name</th>
@@ -77,7 +141,16 @@
                     <tr>
                       <td>{{ variable.name }}</td>
                       <td>{{ variable.kind }}</td>
-                      <td>{{ variable.declaration or "Derived by generator" }}</td>
+                      <td>
+                        <div class="variable-declaration">{{ variable.declaration or "Derived by generator" }}</div>
+                        {% if variable.kind == "Type" and variable.fields %}
+                          <ul class="type-field-list">
+                            {% for field in variable.fields %}
+                              <li>{{ field.definition }}</li>
+                            {% endfor %}
+                          </ul>
+                        {% endif %}
+                      </td>
                       <td>{{ variable.source }}</td>
                     </tr>
                   {% endfor %}
@@ -107,14 +180,29 @@
           <pre><code>{{ proposal.llm_request if proposal.llm_request else "Unavailable" }}</code></pre>
         </details>
 
-        <details class="code-panel">
-          <summary>Readable Summary</summary>
-          <pre><code>{{ proposal.summary }}</code></pre>
-        </details>
+        <section class="code-panel processing-plan-panel">
+          <h2>Processing Plan</h2>
+          {% set processing_steps = proposal.plan.get("processing_steps") if proposal.plan else [] %}
+          {% if processing_steps %}
+            {{ render_steps(processing_steps) }}
+          {% else %}
+            <p>No business-processing steps were extracted.</p>
+          {% endif %}
+          {% if proposal.output_plan %}
+            <h3>Output</h3>
+            <ol class="processing-plan-steps nested-processing-plan-steps">
+              {% for output_step in proposal.output_plan %}
+                <li>
+                  <div class="processing-plan-step-text">{{ output_step.description }}</div>
+                </li>
+              {% endfor %}
+            </ol>
+          {% endif %}
+        </section>
 
         <form method="post">
           <details class="code-panel">
-            <summary>Structured JSON</summary>
+            <summary>Technical JSON</summary>
             <textarea id="structured_json" name="structured_json" rows="22">{{ proposal.structured_json }}</textarea>
           </details>
           <div class="button-row">

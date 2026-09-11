@@ -4,13 +4,12 @@ Generate only classical SAP ECC ABAP declarations needed by this report.
 Allowed output statements:
 - REPORT
 - TABLES
-- TYPES
-- DATA
 - CONSTANTS
-- PARAMETERS
-- SELECT-OPTIONS
 
-Return only those declaration statements.
+Do not generate TYPES, DATA, PARAMETERS or SELECT-OPTIONS.
+The application inserts DDIC-backed TYPES, DATA and selection-screen declarations deterministically from the approved structured generation contract.
+
+Return only the allowed declaration statements.
 
 Field-selection rules:
 - Include only fields explicitly required to be read or returned in declared structures.

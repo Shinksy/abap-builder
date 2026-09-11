@@ -23,6 +23,7 @@ from services.create_abap import (
     record_callable_signature_diagnostics,
     record_post_generation_ddic_diagnostics,
     record_post_generation_stage,
+    restore_unrelated_select_endselect_blocks,
     save_ddic_metadata,
     save_dependency_analysis,
     save_fix_summary,
@@ -57,15 +58,23 @@ ENHANCEMENT_STOPWORDS = {
     "attached",
     "change",
     "code",
+    "data",
+    "date",
     "do",
     "does",
     "existing",
+    "extract",
+    "extracted",
     "field",
     "fields",
     "for",
     "from",
     "logic",
     "new",
+    "only",
+    "other",
+    "output",
+    "placed",
     "program",
     "read",
     "report",
@@ -73,6 +82,7 @@ ENHANCEMENT_STOPWORDS = {
     "routine",
     "routines",
     "source",
+    "sql",
     "table",
     "the",
     "this",
@@ -367,6 +377,29 @@ def run_enhance_abap(
         final_abap = fix_result["fixed_source"]
         for stage in fixer_diagnostic_stages(fix_result):
             record_post_generation_stage(post_generation_diagnostics, stage["stage"], stage["source"])
+        preserved_final_abap = preserve_authoritative_existing_lines(enhanced_abap, final_abap, enhancement_specification)
+        if preserved_final_abap != final_abap:
+            final_abap = preserved_final_abap
+            fix_result["fixed_source"] = final_abap
+            fix_result["final_issues"] = validate_abap(
+                final_abap,
+                callable_signatures=(callable_metadata or {}).get("callable_signatures")
+                or (callable_metadata or {}).get("callables"),
+            )
+            fix_result.setdefault("diagnostics", {})["source_after_enhancement_preservation"] = final_abap
+            record_post_generation_stage(post_generation_diagnostics, "after_enhancement_fixer_preservation", final_abap)
+        restored_final_abap, restored_select_blocks = restore_unrelated_select_endselect_blocks(enhanced_abap, final_abap, None)
+        if restored_select_blocks:
+            final_abap = restored_final_abap
+            fix_result["fixed_source"] = final_abap
+            fix_result["final_issues"] = validate_abap(
+                final_abap,
+                callable_signatures=(callable_metadata or {}).get("callable_signatures")
+                or (callable_metadata or {}).get("callables"),
+            )
+            fix_result.setdefault("diagnostics", {})["enhancement_restored_unrelated_select_blocks"] = restored_select_blocks
+            fix_result.setdefault("diagnostics", {})["source_after_enhancement_select_preservation"] = final_abap
+            record_post_generation_stage(post_generation_diagnostics, "after_enhancement_select_preservation", final_abap)
         cleaned_final_abap = remove_redundant_new_wrapper_forms(existing_abap, final_abap)
         if cleaned_final_abap != final_abap:
             final_abap = cleaned_final_abap
@@ -581,6 +614,8 @@ def identify_affected_chunks(chunks, enhancement_specification):
             continue
         if any(keyword in haystack for keyword in keywords):
             affected.append(chunk)
+    if alv_only_output_request(enhancement_specification):
+        affected = [chunk for chunk in affected if not unrelated_to_alv_only_output(chunk)]
     if affected:
         return affected
     return chunks[:1]
@@ -603,6 +638,28 @@ def enhancement_explicit_identifiers(text):
         if "_" in token and token not in ENHANCEMENT_STOPWORDS:
             identifiers.add(token)
     return identifiers
+
+
+def alv_only_output_request(text):
+    tokens = search_tokens(text)
+    return "alv" in tokens and "only" in tokens
+
+
+def unrelated_to_alv_only_output(chunk):
+    if chunk.get("type") == "GLOBAL":
+        return False
+    name = str(chunk.get("name") or chunk.get("id") or "").lower()
+    haystack = search_tokens(name + "\n" + str(chunk.get("text") or ""))
+    if (
+        "fieldcat" in haystack
+        or "field_catalog" in name
+        or "reuse_alv_grid_display" in haystack
+        or name in {"output_report", "display_alv", "display_report"}
+    ):
+        return False
+    if name.startswith("read_") and re.search(r"\bFROM\s+PA0002\b", str(chunk.get("text") or ""), re.IGNORECASE):
+        return False
+    return True
 
 
 def normalized_search_text(text):
@@ -2388,6 +2445,7 @@ def enhancement_review_payload(
 ):
     return {
         "summary": enhancement_diff_summary(original_abap, proposed_abap),
+        "proposed_changes": enhancement_proposed_changes_summary(original_abap, proposed_abap),
         "diff": enhancement_unified_diff(original_abap, proposed_abap),
         "original_abap": original_abap or "",
         "proposed_abap": proposed_abap or "",
@@ -2406,6 +2464,461 @@ def enhancement_diff_summary(original_abap, proposed_abap):
     added = len([line for line in diff_lines if line.startswith("+") and not line.startswith("+++")])
     removed = len([line for line in diff_lines if line.startswith("-") and not line.startswith("---")])
     return f"{added} added line(s), {removed} removed line(s)."
+
+
+def enhancement_proposed_changes_summary(original_abap, proposed_abap):
+    categories = []
+    for block in changed_line_blocks(original_abap, proposed_abap):
+        category = enhancement_change_category(block)
+        descriptions = enhancement_change_descriptions(category, block)
+        if not descriptions:
+            descriptions = ["Updated existing code."]
+        add_change_descriptions(categories, category, descriptions)
+    return categories
+
+
+def changed_line_blocks(original_abap, proposed_abap):
+    original_lines = str(original_abap or "").splitlines()
+    proposed_lines = str(proposed_abap or "").splitlines()
+    matcher = SequenceMatcher(a=original_lines, b=proposed_lines, autojunk=False)
+    blocks = []
+    for tag, original_start, original_end, proposed_start, proposed_end in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "insert":
+            for offset, line in enumerate(proposed_lines[proposed_start:proposed_end]):
+                blocks.append(changed_line_block(tag, original_start, original_end, proposed_start + offset, proposed_start + offset + 1, [], [line], original_lines, proposed_lines))
+            continue
+        if tag == "delete":
+            for offset, line in enumerate(original_lines[original_start:original_end]):
+                blocks.append(changed_line_block(tag, original_start + offset, original_start + offset + 1, proposed_start, proposed_end, [line], [], original_lines, proposed_lines))
+            continue
+        blocks.append(
+            changed_line_block(
+                tag,
+                original_start,
+                original_end,
+                proposed_start,
+                proposed_end,
+                original_lines[original_start:original_end],
+                proposed_lines[proposed_start:proposed_end],
+                original_lines,
+                proposed_lines,
+            )
+        )
+    return blocks
+
+
+def changed_line_block(tag, original_start, original_end, proposed_start, proposed_end, removed, added, original_lines, proposed_lines):
+    context = (
+        original_lines[max(0, original_start - 3) : min(len(original_lines), original_end + 3)]
+        + proposed_lines[max(0, proposed_start - 3) : min(len(proposed_lines), proposed_end + 3)]
+    )
+    return {
+        "tag": tag,
+        "original_start": original_start,
+        "original_end": original_end,
+        "proposed_start": proposed_start,
+        "proposed_end": proposed_end,
+        "removed": removed,
+        "added": added,
+        "context": context,
+        "original_lines": original_lines,
+        "proposed_lines": proposed_lines,
+        "text": "\n".join(removed + added + context),
+    }
+
+
+def enhancement_change_category(block):
+    changed_text = "\n".join((block.get("added") or []) + (block.get("removed") or []))
+    if re.search(r"\bSELECTION-SCREEN\b|\bSELECT-OPTIONS\b|\bPARAMETERS?\b", changed_text, re.IGNORECASE):
+        return "Selection Screen"
+    if re.search(r"\b(?:DATA|CONSTANTS|FIELD-SYMBOLS|RANGES|TABLES|INFOTYPES)\b", changed_text, re.IGNORECASE):
+        return "Declarations"
+    if re.search(r"\bTYPES?\b|\bBEGIN\s+OF\b|\bEND\s+OF\b", changed_text, re.IGNORECASE) or structure_component_change(block):
+        return "Data Structures"
+    if re.search(r"\bSELECT\b|\bENDSELECT\b|\bFOR\s+ALL\s+ENTRIES\b|\bWHERE\b", changed_text, re.IGNORECASE) or (
+        changed_select_fields(block) and select_table_from_block(block)
+    ):
+        return "Database Reads"
+    if re.search(r"\b(?:GUI_DOWNLOAD|OPEN\s+DATASET|CLOSE\s+DATASET|TRANSFER|READ\s+DATASET)\b|\b(?:file|dataset|download|upload|path|filename)\b", changed_text, re.IGNORECASE):
+        return "File Handling"
+    if re.search(r"\bCALL\s+(?:FUNCTION|METHOD)\b|(?:=>|->)\s*[A-Za-z_]\w*", changed_text, re.IGNORECASE):
+        return "Function/Method Calls"
+    if re.search(r"\b(?:ALV|FIELDCAT|REUSE_ALV|WRITE\b|LIST|OUTPUT)\b", changed_text, re.IGNORECASE):
+        return "Output / ALV"
+    if re.search(r"\b(?:IF|ELSE|ENDIF|LOOP|ENDLOOP|CASE|WHEN|ENDCASE|READ\s+TABLE|APPEND|MODIFY|DELETE|SORT|CLEAR|MOVE|PERFORM|FORM|ENDFORM|CHECK|EXIT|CONTINUE)\b", changed_text, re.IGNORECASE):
+        return "Processing Logic"
+    if strip_abap_comment(changed_text).strip() and enclosing_form_name(block):
+        return "Processing Logic"
+    return "Other Changes"
+
+
+def structure_component_change(block):
+    component_pattern = r"^\s*[A-Za-z_][A-Za-z0-9_]*\s+(?:TYPE|LIKE)\b"
+    return any(
+        re.search(component_pattern, line, re.IGNORECASE)
+        for line in (block.get("added") or []) + (block.get("removed") or [])
+    ) and re.search(r"\b(?:BEGIN\s+OF|END\s+OF|TYPES?)\b", "\n".join(block.get("context") or []), re.IGNORECASE)
+
+
+def enhancement_change_descriptions(category, block):
+    added = [line for line in block.get("added") or [] if strip_abap_comment(line).strip()]
+    removed = [line for line in block.get("removed") or [] if strip_abap_comment(line).strip()]
+    changed = bool(added and removed)
+    if category == "Selection Screen":
+        return selection_screen_change_descriptions(block, added, removed, changed)
+    if category == "Declarations":
+        return declaration_change_descriptions(block, added, removed, changed)
+    if category == "Data Structures":
+        return data_structure_change_descriptions(block, added, removed, changed)
+    if category == "Database Reads":
+        return database_read_change_descriptions(block, added, removed, changed)
+    if category == "Function/Method Calls":
+        return callable_change_descriptions(block, added, removed, changed)
+    if category == "Output / ALV":
+        return output_change_descriptions(block, added, removed, changed)
+    if category == "File Handling":
+        return file_handling_change_descriptions(block, added, removed, changed)
+    if category == "Processing Logic":
+        form_name = enclosing_form_name(block)
+        if form_name:
+            return [f"Updated FORM {form_name}."]
+        return [change_description("processing logic", added, removed, changed)]
+    return [change_description("code", added, removed, changed)]
+
+
+def selection_screen_change_descriptions(block, added, removed, changed):
+    descriptions = []
+    for line in added:
+        item = selection_screen_item(line)
+        if item:
+            descriptions.append(f"Added {item['kind']} {item['name']}.")
+    for line in removed:
+        item = selection_screen_item(line)
+        if item:
+            descriptions.append(f"Removed {item['kind']} {item['name']}.")
+    if descriptions:
+        return descriptions
+    return [change_description("selection-screen definition", added, removed, changed)]
+
+
+def declaration_change_descriptions(block, added, removed, changed):
+    descriptions = []
+    for line in added:
+        declaration = declaration_item(line)
+        if declaration:
+            descriptions.append(f"Added {declaration['kind']} {declaration['name']}.")
+    for line in removed:
+        declaration = declaration_item(line)
+        if declaration:
+            descriptions.append(f"Removed {declaration['kind']} {declaration['name']}.")
+    if descriptions:
+        return descriptions
+    return [change_description("declaration", added, removed, changed)]
+
+
+def data_structure_change_descriptions(block, added, removed, changed):
+    descriptions = []
+    structure = enclosing_structure_name(block)
+    if structure and structure_component_change(block):
+        for line in added:
+            field = structure_field_name(line)
+            if field:
+                descriptions.append(f"Added field {field} to structure {structure}.")
+        for line in removed:
+            field = structure_field_name(line)
+            if field:
+                descriptions.append(f"Removed field {field} from structure {structure}.")
+    if descriptions:
+        return descriptions
+    structure_definition = changed_structure_definition_name(added + removed)
+    if structure_definition:
+        action = changed_action(added, removed, changed)
+        return [f"{action} data structure {structure_definition}."]
+    return [change_description("data structure definition", added, removed, changed)]
+
+
+def database_read_change_descriptions(block, added, removed, changed):
+    table = select_table_from_block(block)
+    fields = changed_select_fields(block)
+    descriptions = []
+    if table and added and not removed and fields:
+        descriptions.extend([f"Added field {field} to SELECT from table {table}." for field in fields])
+    elif table and removed and not added and fields:
+        descriptions.extend([f"Removed field {field} from SELECT from table {table}." for field in fields])
+    elif table:
+        descriptions.append(f"Updated SELECT from table {table}.")
+    if descriptions:
+        return descriptions
+    if added and not removed and not any(re.search(r"\bSELECT\b", strip_abap_comment(line), re.IGNORECASE) for line in added):
+        return ["Updated a database read to include an additional field."]
+    return [change_description("database read", added, removed, changed)]
+
+
+def callable_change_descriptions(block, added, removed, changed):
+    descriptions = []
+    for line in added:
+        descriptions.extend([f"Added function module call {name}." for name in function_modules_from_line(line)])
+        descriptions.extend([f"Added method call {item['class']}=>{item['method']}." for item in method_calls_from_line(line)])
+    for line in removed:
+        descriptions.extend([f"Removed function module call {name}." for name in function_modules_from_line(line)])
+        descriptions.extend([f"Removed method call {item['class']}=>{item['method']}." for item in method_calls_from_line(line)])
+    if descriptions:
+        return descriptions
+    form_name = enclosing_form_name(block)
+    if form_name:
+        return [f"Updated function or method call logic in FORM {form_name}."]
+    return [change_description("function or method call", added, removed, changed)]
+
+
+def output_change_descriptions(block, added, removed, changed):
+    descriptions = []
+    for line in added:
+        field = output_field_name(line)
+        if field:
+            descriptions.append(f"Added output field {field}.")
+    for line in removed:
+        field = output_field_name(line)
+        if field:
+            descriptions.append(f"Removed output field {field}.")
+    if descriptions:
+        return descriptions
+    form_name = enclosing_form_name(block)
+    if form_name:
+        return [f"Updated output logic in FORM {form_name}."]
+    return [change_description("output logic", added, removed, changed)]
+
+
+def file_handling_change_descriptions(block, added, removed, changed):
+    objects = sorted({item for line in added + removed for item in file_handling_objects(line)})
+    if objects and added and not removed:
+        return [f"Updated file handling for {item}." for item in objects]
+    if objects and removed and not added:
+        return [f"Removed file handling for {item}." for item in objects]
+    if objects:
+        return [f"Updated file handling for {item}." for item in objects]
+    form_name = enclosing_form_name(block)
+    if form_name:
+        return [f"Updated file handling logic in FORM {form_name}."]
+    return [change_description("file handling", added, removed, changed)]
+
+
+def change_description(subject, added, removed, changed):
+    if added and not removed:
+        return f"Added {article_for(subject)} {subject}."
+    if removed and not added:
+        return f"Removed {article_for(subject)} {subject}."
+    if changed:
+        return f"Updated existing {subject}."
+    return ""
+
+
+def changed_action(added, removed, changed):
+    if added and not removed:
+        return "Added"
+    if removed and not added:
+        return "Removed"
+    if changed:
+        return "Updated"
+    return "Updated"
+
+
+def selection_screen_item(line):
+    code = strip_abap_comment(line).strip()
+    match = re.match(r"^SELECT-OPTIONS:?\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+    if match:
+        return {"kind": "select-option", "name": match.group(1).upper()}
+    match = re.match(r"^PARAMETERS?:?\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+    if match:
+        return {"kind": "parameter", "name": match.group(1).upper()}
+    return None
+
+
+def declaration_item(line):
+    code = strip_abap_comment(line).strip().rstrip(",.")
+    match = re.match(r"^(?:DATA|TABLES|CONSTANTS|FIELD-SYMBOLS|RANGES|INFOTYPES):?\s+<?([A-Za-z_]\w*)>?", code, re.IGNORECASE)
+    if not match:
+        return None
+    name = match.group(1).upper()
+    if re.search(r"\b(?:STANDARD|SORTED|HASHED)\s+TABLE\b|\bTABLE\s+OF\b", code, re.IGNORECASE):
+        kind = "internal table"
+    elif re.match(r"^(?:TABLES|INFOTYPES)\b", code, re.IGNORECASE):
+        kind = "declaration"
+    elif name.lower().startswith(("st_", "w_", "wa_")):
+        kind = "work area"
+    else:
+        kind = "declaration"
+    return {"kind": kind, "name": name}
+
+
+def structure_field_name(line):
+    code = strip_abap_comment(line).strip().rstrip(",.")
+    match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+(?:TYPE|LIKE)\b", code, re.IGNORECASE)
+    return match.group(1).upper() if match else ""
+
+
+def enclosing_structure_name(block):
+    for line in reversed(lines_before_change(block, preferred="proposed")):
+        code = strip_abap_comment(line).strip()
+        match = re.match(r"^TYPES\s*:?\s*BEGIN\s+OF\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+        if re.match(r"^END\s+OF\b", code, re.IGNORECASE):
+            break
+    for line in block.get("context") or []:
+        code = strip_abap_comment(line).strip()
+        match = re.match(r"^TYPES\s*:?\s*BEGIN\s+OF\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+    return ""
+
+
+def changed_structure_definition_name(lines):
+    for line in lines:
+        code = strip_abap_comment(line).strip()
+        match = re.match(r"^TYPES\s*:?\s*BEGIN\s+OF\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+    return ""
+
+
+def select_table_from_block(block):
+    statements = select_statements_near_change(block)
+    for statement in statements:
+        match = re.search(r"\bFROM\s+([A-Za-z0-9_/]+)\b", statement, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+    return ""
+
+
+def changed_select_fields(block):
+    fields = []
+    for line in (block.get("added") or []) + (block.get("removed") or []):
+        code = strip_abap_comment(line).strip().rstrip(",.")
+        if not code or re.search(r"\b(?:SELECT|FROM|INTO|WHERE|UP\s+TO|FOR\s+ALL\s+ENTRIES|ENDSELECT)\b", code, re.IGNORECASE):
+            continue
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_~/-]*$", code):
+            fields.append(code.split("~")[-1].split("-")[-1].upper())
+    return dedupe_review_values(fields)
+
+
+def select_statements_near_change(block):
+    proposed_lines = block.get("proposed_lines") or []
+    start = block.get("proposed_start") or 0
+    statements = []
+    select_start = None
+    for index in range(max(0, start - 20), min(len(proposed_lines), start + 40)):
+        code = strip_abap_comment(proposed_lines[index]).strip()
+        if re.match(r"^SELECT\b", code, re.IGNORECASE):
+            select_start = index
+        if select_start is not None and ("." in code or re.match(r"^ENDSELECT\b", code, re.IGNORECASE)):
+            statements.append(" ".join(strip_abap_comment(line).strip() for line in proposed_lines[select_start : index + 1]))
+            select_start = None
+    if not statements:
+        text = enhancement_change_text(block)
+        match = re.search(r"\bSELECT\b[\s\S]{0,600}?(?:\.|\bENDSELECT\b)", text, re.IGNORECASE)
+        if match:
+            statements.append(match.group(0))
+    return statements
+
+
+def function_modules_from_line(line):
+    code = strip_abap_comment(line)
+    return [
+        match.group(1).upper()
+        for match in re.finditer(r"\bCALL\s+FUNCTION\s+'?([A-Za-z0-9_/]+)'?", code, re.IGNORECASE)
+    ]
+
+
+def method_calls_from_line(line):
+    code = strip_abap_comment(line)
+    methods = []
+    for match in re.finditer(r"\bCALL\s+METHOD\s+([A-Za-z_]\w*)=>\s*([A-Za-z_]\w*)", code, re.IGNORECASE):
+        methods.append({"class": match.group(1).upper(), "method": match.group(2).upper()})
+    for match in re.finditer(r"\b([A-Za-z_]\w*)=>\s*([A-Za-z_]\w*)\s*\(", code, re.IGNORECASE):
+        methods.append({"class": match.group(1).upper(), "method": match.group(2).upper()})
+    return methods
+
+
+def output_field_name(line):
+    code = strip_abap_comment(line)
+    match = re.search(r"\bfieldname\s*=\s*'([^']+)'", code, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    match = re.search(r"\bWRITE\b.*?\b([A-Za-z_]\w*(?:-[A-Za-z_]\w*)?)\b", code, re.IGNORECASE)
+    if match:
+        return match.group(1).split("-")[-1].upper()
+    return ""
+
+
+def file_handling_objects(line):
+    code = strip_abap_comment(line)
+    objects = []
+    for pattern in (
+        r"\b(?:OPEN|READ|CLOSE)\s+DATASET\s+([A-Za-z_]\w*)",
+        r"\bTRANSFER\s+.+?\s+TO\s+([A-Za-z_]\w*)",
+        r"\bfilename\s*=\s*([A-Za-z_]\w*)",
+    ):
+        for match in re.finditer(pattern, code, re.IGNORECASE):
+            objects.append(match.group(1).upper())
+    return objects
+
+
+def enclosing_form_name(block):
+    for line in reversed(lines_before_change(block, preferred="proposed")):
+        code = strip_abap_comment(line).strip()
+        match = re.match(r"^FORM\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+        if re.match(r"^ENDFORM\b", code, re.IGNORECASE):
+            break
+    for line in block.get("context") or []:
+        code = strip_abap_comment(line).strip()
+        match = re.match(r"^FORM\s+([A-Za-z_]\w*)\b", code, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+    return ""
+
+
+def lines_before_change(block, preferred="proposed"):
+    key = "proposed_lines" if preferred == "proposed" else "original_lines"
+    start_key = "proposed_start" if preferred == "proposed" else "original_start"
+    lines = block.get(key) or []
+    start = block.get(start_key) or 0
+    return lines[:start]
+
+
+def article_for(subject):
+    return "an" if str(subject or "").lower().startswith(("a", "e", "i", "o", "u")) else "a"
+
+
+def add_change_descriptions(categories, category, descriptions):
+    existing = next((item for item in categories if item["category"] == category), None)
+    if not existing:
+        existing = {"category": category, "descriptions": []}
+        categories.append(existing)
+    for description in descriptions:
+        if description and description not in existing["descriptions"]:
+            existing["descriptions"].append(description)
+
+
+def enhancement_change_text(block):
+    return "\n".join(
+        str(line or "")
+        for line in (block.get("added") or []) + (block.get("removed") or []) + (block.get("context") or [])
+    )
+
+
+def dedupe_review_values(values):
+    result = []
+    seen = set()
+    for value in values or []:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def enhancement_unified_diff(original_abap, proposed_abap):
@@ -2472,7 +2985,15 @@ def load_enhancement_proposal(jobs_folder, job_id):
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    if not payload.get("proposed_changes"):
+        payload = dict(payload)
+        payload["proposed_changes"] = enhancement_proposed_changes_summary(
+            payload.get("original_abap"),
+            payload.get("proposed_abap"),
+        )
+    return payload
 
 
 def approve_enhancement_for_job(jobs_folder, job_id, proposal=None):

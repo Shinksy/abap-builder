@@ -6,6 +6,7 @@ from services.model_settings import DEFAULT_MODEL_PRESET, normalize_model_settin
 
 
 DEFAULT_JOB_OPTIONS = {
+    "job_title": "",
     "run_sap_syntax_check": False,
     "sap_syntax_check_attempts": 2,
     "final_assembly_mode": APP_FINAL_ASSEMBLY_MODE,
@@ -38,6 +39,7 @@ def load_job_options(jobs_folder, job_id):
 
 def normalize_job_options(options):
     normalized = {**DEFAULT_JOB_OPTIONS, **(options or {})}
+    normalized["job_title"] = str(normalized.get("job_title") or "").strip()
     normalized["run_sap_syntax_check"] = bool(normalized.get("run_sap_syntax_check"))
     normalized["sap_syntax_check_attempts"] = clamp_sap_syntax_check_attempts(
         normalized.get("sap_syntax_check_attempts")

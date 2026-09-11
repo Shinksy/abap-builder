@@ -53,6 +53,7 @@ def job_summary(jobs_folder, upload_folder, job_id):
         "started_at": started_at,
         "started_at_display": format_datetime(started_at),
         "sort_timestamp": timestamp_for_sort(started_at, job_folder),
+        "job_title": job_title(options),
         "specification_name": specification_name(job_folder, uploads_path / job_id),
         "job_mode": mode,
         "job_mode_display": job_mode_label(mode),
@@ -149,9 +150,11 @@ def prepare_rerun_job(jobs_folder, upload_folder, source_job_id, new_job_id):
 
 
 def create_job_specification_path(job_folder, upload_job_folder):
-    accepted = Path(job_folder) / "accepted_functional_specification.txt"
-    if accepted.exists():
-        return accepted
+    functional_spec_context = read_json(Path(job_folder) / "functional_specification_context.json")
+    functional_spec_source_path = functional_spec_context.get("source_path")
+    functional_spec_source = Path(functional_spec_source_path) if functional_spec_source_path else None
+    if functional_spec_source and functional_spec_source.exists() and functional_spec_source.is_file():
+        return functional_spec_source
     context = read_json(Path(job_folder) / "processing_plan_context.json")
     context_input_path = context.get("input_path")
     context_path = Path(context_input_path) if context_input_path else None
@@ -161,6 +164,9 @@ def create_job_specification_path(job_folder, upload_job_folder):
         path = first_input_file(folder)
         if path:
             return path
+    accepted = Path(job_folder) / "accepted_functional_specification.txt"
+    if accepted.exists():
+        return accepted
     return None
 
 
@@ -265,6 +271,11 @@ def specification_name(job_folder, upload_job_folder):
     if input_path:
         return Path(input_path).name
     return "Unavailable"
+
+
+def job_title(options):
+    title = str((options or {}).get("job_title") or "").strip()
+    return title if title else "-"
 
 
 def inferred_job_mode(job_folder, upload_job_folder):

@@ -3,16 +3,58 @@ import re
 from pathlib import Path
 from time import perf_counter
 
-from services.abap_source import split_code_and_comment, split_string_segments, statement_ends
+from services.abap_source import (
+    abap_statement_units,
+    first_statement_code_line,
+    insert_declaration_statements,
+    is_selection_screen_line,
+    join_lines,
+    normalize_abap_blank_lines,
+    split_code_and_comment,
+    split_string_segments,
+    statement_ends,
+)
+from services.callable_generator import apply_deterministic_callable_interfaces
 from services.callable_signature_provider import normalize_provider_signatures
+from services.declaration_generator import apply_deterministic_declarations, deterministic_declaration_lines
 from services.ddic_metadata_context import field_detail, normalized_fields, normalized_tables
+from services.field_catalog_generator import apply_deterministic_alv_field_catalogue
 from services.final_assembler import (
     APP_FINAL_ASSEMBLY_MODE,
     LLM_FINAL_ASSEMBLY_MODE,
     assemble_final_abap_from_chunks,
     normalize_final_assembly_mode,
 )
+from services.generation_contract import (
+    build_structured_generation_contract,
+    validate_generation_contract,
+)
 from services.llm import generate_abap
+from services.processing_plan_normalizer import (
+    GLOBAL_STYLE_PREFIXES,
+    append_processing_plan_trace,
+    canonical_processing_step_input,
+    format_processing_plan_path,
+    is_placeholder_condition,
+    is_plan_literal,
+    normalize_abap_class_identifier,
+    normalize_abap_method_identifier,
+    normalize_callable_step_name,
+    normalize_plan_identifier,
+    normalize_plan_reference,
+    normalize_plan_reference_list,
+    normalize_processing_plan as normalize_processing_plan_from_context,
+    normalize_processing_plan_with_diagnostics as normalize_processing_plan_with_context,
+    processing_plan_diagnostic_snapshot,
+    processing_plan_extraction_trace,
+    processing_plan_payload,
+    processing_plan_strings,
+    processing_plan_text_blob,
+    record_empty_normalized_branch,
+    record_processing_step_rejection,
+    resolve_instance_method_callable_identity,
+)
+from services.selection_screen_generator import apply_deterministic_selection_screen_declarations
 from services.validator import parse_callable_invocations
 CHUNK_DIAGNOSTIC = "abap_generation_chunks.json"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +62,7 @@ ALV_FIELDCAT_TABLE_NAME = "t_fieldcat"
 ALV_FIELDCAT_WORK_AREA_NAME = "w_fieldcat"
 ALV_FIELDCAT_TABLE_TYPE = "slis_t_fieldcat_alv"
 ALV_FIELDCAT_WORK_AREA_TYPE = "slis_fieldcat_alv"
+DIRECT_TABLE_PARAMETER_TYPES = {ALV_FIELDCAT_TABLE_TYPE.upper()}
 CHUNK_PROMPT_PATHS = {
     "declarations": PROJECT_ROOT / "prompts" / "declarations_chunk.txt",
     "database_read_forms": PROJECT_ROOT / "prompts" / "database_read_forms_chunk.txt",
@@ -37,7 +80,8 @@ ABAP_CHUNKS = [
     {
         "name": "declarations",
         "instruction": (
-            "Generate only REPORT, TABLES, TYPES, DATA, constants, PARAMETERS, and SELECT-OPTIONS."
+            "Generate only REPORT, TABLES, TYPES, DATA, and constants. "
+            "Do not generate PARAMETERS or SELECT-OPTIONS; Python inserts selection-screen declarations from the approved contract."
         ),
     },
     {
@@ -70,7 +114,6 @@ ABAP_CHUNKS = [
     },
 ]
 FORM_GENERATING_CHUNKS = {"database_read_forms", "processing_form", "output_forms"}
-GLOBAL_STYLE_PREFIXES = ("t_", "st_", "w_", "gt_", "gs_", "gv_", "it_", "lt_", "ls_", "lv_", "wa_", "ct_")
 ABAP_HYPHEN_KEYWORDS = {
     "LIST-PROCESSING",
     "START-OF-SELECTION",
@@ -103,6 +146,10 @@ class ProcessingContractValidationError(Exception):
         errors = (diagnostics or {}).get("validation_errors") or []
         super().__init__("Processing contract validation failed: " + "; ".join(errors))
         self.diagnostics = diagnostics
+
+
+class StructuredGenerationContractValidationError(ProcessingContractValidationError):
+    pass
 
 
 def generate_chunked_abap_program(
@@ -153,6 +200,24 @@ def generate_chunked_abap_program(
         processing_plan,
     )
     declaration_requirements_text = declaration_requirements_for_prompt(declaration_requirements)
+    structured_generation_contract = build_structured_generation_contract(
+        declaration_requirements,
+        processing_plan,
+        ddic_metadata=ddic_metadata,
+        callable_metadata=callable_metadata,
+    )
+    structured_contract_validation = validate_generation_contract(
+        structured_generation_contract,
+        ddic_metadata=ddic_metadata,
+        callable_metadata=callable_metadata,
+    )
+    if not structured_contract_validation.get("valid", True):
+        raise StructuredGenerationContractValidationError(
+            {
+                "validation_errors": structured_contract_validation.get("errors") or [],
+                "structured_generation_contract": structured_generation_contract,
+            }
+        )
     processing_plan_text = processing_plan_for_prompt(processing_plan)
     chunks = []
     chunks_to_generate = abap_chunks_for_processing_plan(
@@ -224,6 +289,11 @@ def generate_chunked_abap_program(
                     ddic_metadata=ddic_metadata,
                 )
                 text = group_declaration_statements_by_prefix(text)
+                text = apply_deterministic_declarations(
+                    text,
+                    structured_generation_contract,
+                    ddic_metadata=ddic_metadata,
+                )
             elif chunk_name in FORM_GENERATING_CHUNKS:
                 ensure_form_chunk_uses_declared_globals(
                     text,
@@ -232,6 +302,18 @@ def generate_chunked_abap_program(
                     source_text=source_text,
                     declaration_requirements=declaration_requirements_text,
                 )
+                if chunk_name == "processing_form":
+                    text = apply_deterministic_callable_interfaces(
+                        text,
+                        structured_generation_contract_for_chunk(
+                            structured_generation_contract,
+                            chunk,
+                            declaration_requirements,
+                            callable_metadata=callable_metadata,
+                            ddic_metadata=ddic_metadata,
+                        ),
+                        callable_metadata=callable_metadata,
+                    )
             post_processing_diagnostics = (
                 declaration_post_processing_diagnostics(raw_text, text)
                 if chunk_name == "declarations"
@@ -306,6 +388,14 @@ def generate_chunked_abap_program(
             "duration_seconds": None,
         }
     final_text = ensure_callable_parameter_declarations(final_text, callable_metadata)
+    final_text = apply_deterministic_alv_field_catalogue(
+        final_text,
+        generation_contract=structured_generation_contract,
+        declaration_requirements=declaration_requirements_text,
+        ddic_metadata=ddic_metadata,
+        source_text=source_text,
+    )
+    final_text = apply_deterministic_file_input_support(final_text, source_text)
     if final_assembly_result is not None:
         final_assembly_result["text"] = final_text
     return {
@@ -321,6 +411,7 @@ def generate_chunked_abap_program(
         ),
         "declaration_requirements": declaration_requirements,
         "processing_plan": processing_plan,
+        "structured_generation_contract": structured_generation_contract,
         "post_generation_source_stages": post_generation_source_stages(chunks, final_text),
     }
 
@@ -1020,63 +1111,21 @@ def processing_plan_for_prompt(diagnostics):
 
 
 def normalize_processing_plan(value, base_prompt=None, declaration_requirements=None, callable_metadata=None):
-    return normalize_processing_plan_with_diagnostics(
-        value,
-        base_prompt=base_prompt,
-        declaration_requirements=declaration_requirements,
-        callable_metadata=callable_metadata,
-    )["plan"]
-
-
-def normalize_processing_plan_with_diagnostics(value, base_prompt=None, declaration_requirements=None, callable_metadata=None):
-    diagnostics = {"rejected_steps": [], "modified_steps": [], "transformation_trace": []}
-    append_processing_plan_trace(diagnostics, "normalize_processing_plan.input", value)
-    if not isinstance(value, dict):
-        record_processing_step_rejection(diagnostics, [], value, "processing plan root is not an object", "normalize_processing_plan")
-        append_processing_plan_trace(diagnostics, "normalize_processing_plan.output", {"processing_steps": []})
-        return {"plan": {"processing_steps": []}, "diagnostics": diagnostics}
-    steps = normalize_processing_step_collection(value.get("processing_steps"))
-    append_processing_plan_trace(diagnostics, "normalize_processing_step_collection.root", {"processing_steps": steps})
-    if steps is None:
-        record_processing_step_rejection(diagnostics, ["processing_steps"], steps, "processing_steps is not an array", "normalize_processing_plan")
-        append_processing_plan_trace(diagnostics, "normalize_processing_plan.output", {"processing_steps": []})
-        return {"plan": {"processing_steps": []}, "diagnostics": diagnostics}
     context = processing_plan_normalization_context(
         base_prompt=base_prompt,
         declaration_requirements=declaration_requirements,
         callable_metadata=callable_metadata,
-        diagnostics=diagnostics,
     )
-    normalized = normalize_processing_steps(steps, context, path=["processing_steps"])
-    append_processing_plan_trace(diagnostics, "normalize_processing_steps.root", {"processing_steps": normalized})
-    normalized = prune_unused_read_steps(normalized, diagnostics, path=["processing_steps"])
-    append_processing_plan_trace(diagnostics, "prune_unused_read_steps.root", {"processing_steps": normalized})
-    plan = {"processing_steps": renumber_processing_steps(normalized)}
-    append_processing_plan_trace(diagnostics, "renumber_processing_steps.root", plan)
-    append_processing_plan_trace(diagnostics, "normalize_processing_plan.output", plan)
-    return {"plan": plan, "diagnostics": diagnostics}
+    return normalize_processing_plan_from_context(value, context=context)
 
 
-SUPPORTED_PROCESSING_PLAN_OPERATIONS = {
-    "APPEND",
-    "CALL_FUNCTION",
-    "CALL_METHOD",
-    "CALL_STATIC_METHOD",
-    "AGGREGATE",
-    "AVERAGE",
-    "CALCULATE",
-    "CLEAR",
-    "CONCATENATE",
-    "DELETE",
-    "DERIVE",
-    "IF",
-    "LOOP",
-    "MOVE",
-    "PERCENTAGE",
-    "READ",
-    "SORT",
-    "TRANSFORM",
-}
+def normalize_processing_plan_with_diagnostics(value, base_prompt=None, declaration_requirements=None, callable_metadata=None):
+    context = processing_plan_normalization_context(
+        base_prompt=base_prompt,
+        declaration_requirements=declaration_requirements,
+        callable_metadata=callable_metadata,
+    )
+    return normalize_processing_plan_with_context(value, context=context)
 
 
 def processing_plan_normalization_context(base_prompt=None, declaration_requirements=None, callable_metadata=None, diagnostics=None):
@@ -1092,408 +1141,11 @@ def processing_plan_normalization_context(base_prompt=None, declaration_requirem
     }
 
 
-def normalize_processing_steps(steps, context, path=None):
-    steps = normalize_processing_step_collection(steps)
-    if steps is None:
-        record_processing_step_rejection(context.get("diagnostics"), path, steps, "steps branch is not an array", "normalize_processing_steps")
-        return []
-    normalized = []
-    current_loop = None
-    for index, item in enumerate(steps or [], start=1):
-        item_path = list(path or []) + [index - 1]
-        step = normalize_processing_step(item, index, context, item_path)
-        if not step:
-            continue
-        if step.get("operation") == "LOOP":
-            normalized.append(step)
-            current_loop = step if not processing_step_has_child_steps(item) else None
-            continue
-        if current_loop is not None:
-            current_loop.setdefault("steps", []).append(step)
-        else:
-            normalized.append(step)
-    return normalized
-
-
-def normalize_processing_step_collection(steps):
-    if isinstance(steps, list):
-        return steps
-    if isinstance(steps, dict):
-        def sort_key(item):
-            key, _value = item
-            text = str(key or "").strip()
-            return (0, int(text)) if text.isdigit() else (1, text)
-
-        return [value for _key, value in sorted(steps.items(), key=sort_key)]
-    return None
-
-
-def processing_step_has_child_steps(item):
-    if not isinstance(item, dict):
-        return False
-    item = canonical_processing_step_input(item)
-    for key in ("steps", "child_steps", "children", "body", "then", "then_steps", "else", "else_steps"):
-        if normalize_processing_step_collection(item.get(key)):
-            return True
-    return False
-
-
-def normalize_processing_step(item, index, context, path=None):
-    if not isinstance(item, dict):
-        record_processing_step_rejection(context.get("diagnostics"), path, item, "step is not an object", "normalize_processing_step")
-        return None
-    item = canonical_processing_step_input(item)
-    operation = str(item.get("operation") or "").strip().upper()
-    if operation == "CALL_METHOD" and not (item.get("object") or item.get("object_name")) and "=>" in str(item.get("name") or item.get("callable") or ""):
-        operation = "CALL_STATIC_METHOD"
-    if operation not in SUPPORTED_PROCESSING_PLAN_OPERATIONS:
-        record_processing_step_rejection(context.get("diagnostics"), path, item, "unsupported or missing operation", "normalize_processing_step")
-        return None
-    step = {"step": item.get("step") if isinstance(item.get("step"), int) else index, "operation": operation}
-    if operation == "LOOP":
-        source = normalize_plan_identifier(item.get("source"))
-        if source:
-            step["source"] = source
-        into = normalize_plan_identifier(item.get("into")) or work_area_for_table(source, context)
-        if into:
-            step["into"] = into
-        raw_children = item.get("steps") or item.get("child_steps") or item.get("children") or item.get("body") or []
-        children = normalize_processing_steps(raw_children, context, path=list(path or []) + ["steps"])
-        record_empty_normalized_branch(context.get("diagnostics"), list(path or []) + ["steps"], raw_children, children, "LOOP steps branch")
-        step["steps"] = children
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            "normalized LOOP fields and child branch",
-            "normalize_processing_step",
-        )
-        return step
-    if operation == "READ":
-        source = normalize_plan_identifier(item.get("source"))
-        into = normalize_plan_identifier(item.get("into")) or work_area_for_table(source, context)
-        conditions = normalize_read_lookup_conditions(source, into, normalize_read_conditions(item, context), context)
-        if not source or not into or not conditions:
-            reason = "READ step is missing source, into, or valid conditions"
-            record_processing_step_rejection(context.get("diagnostics"), path, item, reason, "normalize_processing_step")
-            return None
-        step.update({"source": source, "into": into, "conditions": conditions})
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            "normalized READ source, work area, and conditions",
-            "normalize_processing_step",
-        )
-        return step
-    if operation == "MOVE":
-        source = normalize_plan_reference(item.get("source"), context, role="source")
-        target = normalize_plan_reference(item.get("target"), context, role="target")
-        if not source or not target:
-            record_processing_step_rejection(context.get("diagnostics"), path, item, "MOVE step is missing source or target", "normalize_processing_step")
-            return None
-        step.update({"source": source, "target": target})
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            "normalized MOVE source and target references",
-            "normalize_processing_step",
-        )
-        return step
-    if operation in {"CALCULATE", "DERIVE"}:
-        target = normalize_plan_reference(item.get("target"), context, role="target")
-        expression = str(item.get("expression") or item.get("formula") or item.get("calculation") or "").strip()
-        sources = normalize_plan_reference_list(item.get("sources") or item.get("source_fields"), context)
-        if not target or not expression:
-            record_processing_step_rejection(context.get("diagnostics"), path, item, f"{operation} step is missing target or expression", "normalize_processing_step")
-            return None
-        step.update({"target": target, "expression": expression, "sources": sources})
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            f"normalized {operation} target, expression, and source references",
-            "normalize_processing_step",
-        )
-        return step
-    if operation == "TRANSFORM":
-        source = normalize_plan_reference(item.get("source"), context, role="source")
-        target = normalize_plan_reference(item.get("target"), context, role="target")
-        transformation = str(item.get("transformation") or item.get("expression") or "").strip()
-        if not source or not target or not transformation:
-            record_processing_step_rejection(context.get("diagnostics"), path, item, "TRANSFORM step is missing source, target, or transformation", "normalize_processing_step")
-            return None
-        step.update({"source": source, "target": target, "transformation": transformation})
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            "normalized TRANSFORM source, target, and transformation",
-            "normalize_processing_step",
-        )
-        return step
-    if operation == "AGGREGATE":
-        source = normalize_plan_identifier(item.get("source"))
-        target = normalize_plan_reference(item.get("target"), context, role="target")
-        function = str(item.get("function") or item.get("aggregate") or "SUM").strip().upper()
-        group_by = normalize_plan_reference_list(item.get("group_by") or item.get("grouping_keys"), context)
-        sources = normalize_plan_reference_list(item.get("sources") or item.get("source_fields"), context)
-        if not source or not target or not function:
-            record_processing_step_rejection(context.get("diagnostics"), path, item, "AGGREGATE step is missing source, target, or function", "normalize_processing_step")
-            return None
-        step.update({"source": source, "target": target, "function": function, "group_by": group_by, "sources": sources})
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            "normalized AGGREGATE source, target, function, grouping, and source references",
-            "normalize_processing_step",
-        )
-        return step
-    if operation == "COUNT":
-        source = normalize_plan_identifier(item.get("source"))
-        target = normalize_plan_reference(item.get("target"), context, role="target")
-        group_by = normalize_plan_reference_list(item.get("group_by") or item.get("grouping_keys"), context)
-        distinct = normalize_plan_reference(item.get("distinct") or item.get("distinct_by"), context, role="source") if item.get("distinct") or item.get("distinct_by") else None
-        if not source or not target:
-            record_processing_step_rejection(context.get("diagnostics"), path, item, "COUNT step is missing source or target", "normalize_processing_step")
-            return None
-        step.update({"source": source, "target": target, "group_by": group_by, "distinct": distinct})
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            "normalized COUNT source, target, grouping, and distinct reference",
-            "normalize_processing_step",
-        )
-        return step
-    if operation in {"AVERAGE", "PERCENTAGE"}:
-        numerator = normalize_plan_reference(item.get("numerator"), context, role="source")
-        denominator = normalize_plan_reference(item.get("denominator"), context, role="source")
-        target = normalize_plan_reference(item.get("target"), context, role="target")
-        group_by = normalize_plan_reference_list(item.get("group_by") or item.get("grouping_keys"), context)
-        if not numerator or not denominator or not target:
-            record_processing_step_rejection(context.get("diagnostics"), path, item, f"{operation} step is missing numerator, denominator, or target", "normalize_processing_step")
-            return None
-        step.update({"numerator": numerator, "denominator": denominator, "target": target, "group_by": group_by})
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            f"normalized {operation} numerator, denominator, target, and grouping",
-            "normalize_processing_step",
-        )
-        return step
-    if operation in {"CALL_FUNCTION", "CALL_METHOD", "CALL_STATIC_METHOD"}:
-        name = normalize_callable_step_name(item, operation=operation, context=context)
-        if not name:
-            record_processing_step_rejection(context.get("diagnostics"), path, item, f"{operation} step is missing callable identity", "normalize_processing_step")
-            return None
-        apply_callable_step_identity(step, item, operation, name, context)
-        mappings = normalize_callable_mappings(item, name, context)
-        step["input_parameters"] = mappings["input_parameters"]
-        step["output_parameters"] = mappings["output_parameters"]
-        returned_value_key, returned_value = normalize_callable_returned_value(item, context)
-        if returned_value:
-            step[returned_value_key] = returned_value
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            f"normalized {operation} name and parameter mappings",
-            "normalize_processing_step",
-        )
-        return step
-    if operation == "IF":
-        condition = normalize_if_condition(item, context)
-        if not condition:
-            record_processing_step_rejection(context.get("diagnostics"), path, item, "IF step is missing a valid condition", "normalize_processing_step")
-            return None
-        step.update(condition)
-        raw_then = item.get("then") or item.get("then_steps") or item.get("steps") or item.get("children") or []
-        raw_else = item.get("else") or item.get("else_steps") or []
-        step["then"] = normalize_processing_steps(raw_then, context, path=list(path or []) + ["then"])
-        step["else"] = normalize_processing_steps(raw_else, context, path=list(path or []) + ["else"])
-        record_empty_normalized_branch(context.get("diagnostics"), list(path or []) + ["then"], raw_then, step["then"], "IF then branch")
-        record_empty_normalized_branch(context.get("diagnostics"), list(path or []) + ["else"], raw_else, step["else"], "IF else branch")
-        record_processing_step_modification(
-            context.get("diagnostics"),
-            path,
-            item,
-            step,
-            "normalized IF condition and child branches",
-            "normalize_processing_step",
-        )
-        return step
-    for key in ("source", "target", "condition", "into"):
-        value = item.get(key)
-        if value:
-            step[key] = normalize_plan_reference(value, context) if key in {"source", "target", "into"} else str(value).strip()
-    record_processing_step_modification(
-        context.get("diagnostics"),
-        path,
-        item,
-        step,
-        f"normalized {operation} scalar fields",
-        "normalize_processing_step",
-    )
-    return step
-
-
-def normalize_callable_step_name(item, operation=None, context=None):
-    operation = str(operation or (item or {}).get("operation") or "").strip().upper()
-    raw = str((item or {}).get("name") or (item or {}).get("callable") or "").strip()
-    class_name = str((item or {}).get("class") or (item or {}).get("class_name") or "").strip()
-    method_name = str((item or {}).get("method") or (item or {}).get("method_name") or "").strip()
-    object_name = str((item or {}).get("object") or (item or {}).get("object_name") or "").strip()
-    if operation == "CALL_STATIC_METHOD" and class_name and method_name:
-        raw = f"{class_name}=>{method_name}"
-    elif operation == "CALL_METHOD" and object_name and method_name:
-        raw = resolve_instance_method_callable_identity(object_name, method_name, context) or raw
-    elif class_name and method_name:
-        raw = f"{class_name}=>{method_name}"
-    elif method_name and not raw:
-        raw = method_name
-    name = raw.upper().replace("~", "=>").replace("->", "=>")
-    return name if re.fullmatch(r"[A-Z][A-Z0-9_]{1,29}(?:(?:=>)[A-Z][A-Z0-9_]{1,29})?", name) else ""
-
-
-def normalize_callable_returned_value(item, context=None):
-    for key in ("receiving_parameter", "returning_parameter", "receiving", "returned_value", "return_value", "result"):
-        value = normalize_plan_reference((item or {}).get(key), context, role="target")
-        if value:
-            return ("returning_parameter" if key == "returning_parameter" else "receiving_parameter"), value
-    return "receiving_parameter", ""
-
-
-def apply_callable_step_identity(step, item, operation, callable_name, context):
-    if operation == "CALL_FUNCTION":
-        step["name"] = callable_name
-        return
-    class_name = str((item or {}).get("class") or (item or {}).get("class_name") or "").strip()
-    method_name = str((item or {}).get("method") or (item or {}).get("method_name") or "").strip()
-    object_name = str((item or {}).get("object") or (item or {}).get("object_name") or "").strip()
-    if operation == "CALL_STATIC_METHOD":
-        if not class_name and "=>" in callable_name:
-            class_name, method_name = callable_name.split("=>", 1)
-        step["class"] = normalize_abap_class_identifier(class_name)
-        step["method"] = normalize_abap_method_identifier(method_name)
-        step["name"] = callable_name
-        return
-    if not method_name and "=>" in callable_name:
-        _class_name, method_name = callable_name.split("=>", 1)
-    step["object"] = normalize_plan_identifier(object_name)
-    step["method"] = normalize_abap_method_identifier(method_name)
-    step["name"] = callable_name
-
-
-def resolve_instance_method_callable_identity(object_name, method_name, context=None):
-    method = normalize_abap_method_identifier(method_name)
-    if not method:
-        return ""
-    suffix = f"=>{method}"
-    candidates = [
-        identity
-        for identity in sorted((context or {}).get("callable_identities") or [])
-        if str(identity or "").upper().endswith(suffix)
-    ]
-    return candidates[0] if len(candidates) == 1 else ""
-
-
 def processing_contract_callable_identities(base_prompt=None, callable_metadata=None):
     names = set(callable_identities_from_prompt(base_prompt))
     names.update(str(name or "").strip().upper() for name in normalize_provider_signatures(callable_metadata))
     names.update(callable_catalogue_parameter_index(base_prompt))
     return {name for name in names if name}
-
-
-def normalize_abap_class_identifier(value):
-    text = str(value or "").strip().upper().replace("~", "=>").replace("->", "=>")
-    return text if re.fullmatch(r"[A-Z][A-Z0-9_]{1,29}", text) else ""
-
-
-def normalize_abap_method_identifier(value):
-    text = str(value or "").strip().upper()
-    return text if re.fullmatch(r"[A-Z][A-Z0-9_]{1,29}", text) else ""
-
-
-def canonical_processing_step_input(item):
-    if not isinstance(item, dict) or item.get("operation"):
-        return item
-    operation_keys = [
-        str(key or "").strip().upper()
-        for key in item
-        if str(key or "").strip().upper() in SUPPORTED_PROCESSING_PLAN_OPERATIONS
-    ]
-    if len(operation_keys) != 1 or len(item) != 1:
-        return item
-    operation = operation_keys[0]
-    nested = item.get(next(key for key in item if str(key or "").strip().upper() == operation))
-    if isinstance(nested, dict):
-        canonical = dict(nested)
-    else:
-        canonical = {}
-    canonical["operation"] = operation
-    return canonical
-
-
-def renumber_processing_steps(steps, start=1):
-    renumber_processing_steps_from(steps, start)
-    return steps
-
-
-def prune_unused_read_steps(steps, diagnostics=None, path=None):
-    pruned = []
-    for index, step in enumerate(steps or []):
-        item = dict(step)
-        for key in ("steps", "then", "else"):
-            if isinstance(item.get(key), list):
-                raw_children = item.get(key)
-                item[key] = prune_unused_read_steps(item.get(key), diagnostics, path=list(path or []) + [index, key])
-                record_empty_normalized_branch(
-                    diagnostics,
-                    list(path or []) + [index, key],
-                    raw_children,
-                    item[key],
-                    f"{item.get('operation')} {key} branch",
-                    function_name="prune_unused_read_steps",
-                )
-        if item.get("operation") == "READ":
-            into = normalize_plan_identifier(item.get("into"))
-            later_text = processing_plan_text_blob({"processing_steps": steps[index + 1 :]})
-            if into and not re.search(rf"\b{re.escape(into)}\b", later_text, re.IGNORECASE):
-                record_processing_step_rejection(
-                    diagnostics,
-                    list(path or []) + [index],
-                    step,
-                    f"READ result work area {into} is not referenced by any later step in the same branch",
-                    "prune_unused_read_steps",
-                )
-                continue
-        pruned.append(item)
-    return pruned
-
-
-def renumber_processing_steps_from(steps, start=1):
-    number = start
-    for step in steps or []:
-        step["step"] = number
-        number += 1
-        for key in ("steps", "then", "else"):
-            children = step.get(key)
-            if isinstance(children, list):
-                number = renumber_processing_steps_from(children, number)
-    return number
 
 
 def table_to_work_area_contracts(base_prompt=None):
@@ -1504,239 +1156,6 @@ def table_to_work_area_contracts(base_prompt=None):
         if table and work_area:
             result[table] = work_area
     return result
-
-
-def work_area_for_table(table_name, context):
-    name = normalize_plan_identifier(table_name)
-    if not name:
-        return ""
-    mapped = (context or {}).get("table_to_work_area", {}).get(name)
-    if mapped:
-        return mapped
-    if name.startswith("t_") and len(name) > 2:
-        return "st_" + name[2:]
-    return ""
-
-
-def normalize_read_conditions(item, context):
-    candidates = []
-    if isinstance(item.get("conditions"), list):
-        candidates.extend(item.get("conditions"))
-    elif isinstance(item.get("conditions"), dict):
-        candidates.append(item.get("conditions"))
-    elif isinstance(item.get("condition"), dict):
-        candidates.append(item.get("condition"))
-    elif isinstance(item.get("match"), dict):
-        candidates.append(item.get("match"))
-    for key in ("match", "condition"):
-        value = item.get(key)
-        if isinstance(value, str):
-            candidates.extend(parse_read_condition_string(value))
-    normalized = []
-    for candidate in candidates:
-        condition = normalize_read_condition(candidate, context)
-        if condition:
-            normalized.append(condition)
-    return normalized
-
-
-def normalize_read_lookup_conditions(source, into, conditions, context):
-    qualified = [
-        normalize_read_lookup_condition(source, into, condition, context)
-        for condition in conditions or []
-    ]
-    return [
-        condition
-        for condition in qualified
-        if is_read_lookup_condition(source, into, condition, context)
-    ]
-
-
-def normalize_read_lookup_condition(source, into, condition, context):
-    if not isinstance(condition, dict):
-        return condition
-    normalized = dict(condition)
-    for side, other_side in (("left", "right"), ("right", "left")):
-        value = normalized.get(side)
-        other = normalized.get(other_side)
-        if read_condition_side_is_bare_lookup_field(value, context) and not read_condition_side_is_sql_filter_value(other, context):
-            normalized[side] = f"{normalize_plan_identifier(into)}-{normalize_plan_identifier(value)}"
-    return normalized
-
-
-def is_read_lookup_condition(source, into, condition, context):
-    if not isinstance(condition, dict):
-        return False
-    operator = str(condition.get("operator") or "").strip().upper()
-    if operator != "=":
-        return False
-    left = condition.get("left")
-    right = condition.get("right")
-    if not left or not right:
-        return False
-    if read_condition_side_is_sql_filter_value(left, context) or read_condition_side_is_sql_filter_value(right, context):
-        return False
-    return (
-        read_condition_side_targets_read_row(left, source, into)
-        or read_condition_side_targets_read_row(right, source, into)
-    )
-
-
-def read_condition_side_targets_read_row(value, source, into):
-    prefix = plan_reference_prefix(value)
-    return bool(prefix and prefix in {normalize_plan_identifier(source), normalize_plan_identifier(into)})
-
-
-def read_condition_side_is_bare_lookup_field(value, context):
-    identifier = normalize_plan_identifier(value)
-    if not identifier:
-        return False
-    if identifier in (context or {}).get("selection_parameters", set()):
-        return False
-    return not identifier.startswith(GLOBAL_STYLE_PREFIXES)
-
-
-def read_condition_side_is_sql_filter_value(value, context):
-    text = str(value or "").strip()
-    if not text:
-        return True
-    if is_plan_literal(text):
-        return True
-    identifier = normalize_plan_identifier(text)
-    if identifier:
-        if identifier in (context or {}).get("selection_parameters", set()):
-            return True
-        if not identifier.startswith(GLOBAL_STYLE_PREFIXES):
-            return True
-    return False
-
-
-def plan_reference_prefix(value):
-    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_]{0,29})[-.]([A-Za-z][A-Za-z0-9_]{0,29})", str(value or "").strip())
-    return match.group(1).lower() if match else ""
-
-
-def parse_read_condition_string(value):
-    text = str(value or "").strip()
-    if not text or is_placeholder_condition(text):
-        return []
-    parts = re.split(r"\s+\bAND\b\s+|&&", text, flags=re.IGNORECASE)
-    conditions = []
-    for part in parts:
-        match = re.match(r"(.+?)\s*(=|<>|NE|EQ)\s*(.+)", part.strip(), re.IGNORECASE)
-        if match:
-            conditions.append({"left": match.group(1).strip(), "operator": match.group(2).strip(), "right": match.group(3).strip()})
-    return conditions
-
-
-def normalize_read_condition(condition, context):
-    if not isinstance(condition, dict):
-        return None
-    left = normalize_plan_reference(condition.get("left") or condition.get("source"), context)
-    operator = str(condition.get("operator") or "=").strip().upper()
-    if operator == "EQ":
-        operator = "="
-    if operator == "NE":
-        operator = "<>"
-    if operator in {"IS INITIAL", "IS NOT INITIAL"}:
-        if not left or is_placeholder_condition(f"{left} {operator}"):
-            return None
-        return {"left": left, "operator": operator}
-    if operator == "CONTAINS ERROR":
-        if not left or is_placeholder_condition(f"{left} {operator}"):
-            return None
-        return {"left": left, "operator": operator}
-    right = normalize_plan_reference(condition.get("right") or condition.get("target"), context)
-    if not right and operator in {"<>", "="}:
-        unary_operator = "IS NOT INITIAL" if operator == "<>" else "IS INITIAL"
-        if not left or is_placeholder_condition(f"{left} {unary_operator}"):
-            return None
-        return {"left": left, "operator": unary_operator}
-    if not left or not right or is_placeholder_condition(f"{left} {operator} {right}"):
-        return None
-    return {"left": left, "operator": operator, "right": right}
-
-
-def normalize_if_condition(item, context):
-    if isinstance(item.get("conditions"), list):
-        conditions = []
-        for condition in item.get("conditions") or []:
-            normalized = normalize_read_condition(condition, context)
-            if normalized:
-                conditions.append(normalized)
-        if conditions:
-            return {"conditions": conditions}
-    if isinstance(item.get("conditions"), dict):
-        normalized = normalize_read_condition(item.get("conditions"), context)
-        return {"conditions": [normalized]} if normalized else {}
-    if isinstance(item.get("condition"), dict):
-        normalized = normalize_read_condition(item.get("condition"), context)
-        return {"conditions": [normalized]} if normalized else {}
-    condition = str(item.get("condition") or "").strip()
-    if condition and not is_placeholder_condition(condition):
-        return {"condition": condition}
-    return {}
-
-
-def normalize_callable_mappings(item, callable_name, context):
-    input_parameters = {}
-    output_parameters = {}
-    for key, value in callable_mapping_items(item):
-        parameter = str(key or "").strip().upper()
-        target = normalize_plan_reference(value, context)
-        if not parameter or not target:
-            continue
-        direction = callable_parameter_direction(callable_name, parameter, context)
-        if direction == "exporting":
-            if is_ddic_input_work_area_reference(target, context):
-                record_processing_step_rejection(
-                    context.get("diagnostics"),
-                    ["CALL_FUNCTION", callable_name, parameter],
-                    {parameter: target},
-                    "CALL_FUNCTION exporting parameter maps into a DDIC input work area",
-                    "normalize_callable_mappings",
-                )
-                continue
-            output_parameters[parameter] = target
-        else:
-            input_parameters[parameter] = target
-    return {"input_parameters": input_parameters, "output_parameters": output_parameters}
-
-
-def callable_mapping_items(item):
-    pairs = []
-    for section in ("input_parameters", "output_parameters", "importing", "exporting", "changing", "tables"):
-        value = item.get(section)
-        if isinstance(value, dict):
-            pairs.extend(value.items())
-        elif isinstance(value, list):
-            pairs.extend(callable_mapping_list_items(value))
-    for key in ("parameters", "parameter_mappings"):
-        value = item.get(key)
-        if isinstance(value, dict):
-            pairs.extend(value.items())
-        elif isinstance(value, list):
-            pairs.extend(callable_mapping_list_items(value))
-    return pairs
-
-
-def callable_mapping_list_items(value):
-    pairs = []
-    for entry in value or []:
-        if isinstance(entry, dict):
-            name = entry.get("name") or entry.get("parameter")
-            target = entry.get("target") or entry.get("value") or entry.get("source")
-            pairs.append((name, target))
-    return pairs
-
-
-def callable_parameter_direction(callable_name, parameter_name, context):
-    directions = (context or {}).get("callable_directions") or {}
-    direction = directions.get((str(callable_name or "").upper(), str(parameter_name or "").upper()))
-    if direction in {"importing", "exporting"}:
-        return direction
-    parameter = str(parameter_name or "").upper()
-    return "exporting" if parameter.startswith(("E_", "EV_", "RETURN", "RESULT", "MESSAGE")) else "importing"
 
 
 def callable_parameter_directions(metadata_context=None, callable_metadata=None):
@@ -1769,38 +1188,6 @@ def callable_parameter_directions(metadata_context=None, callable_metadata=None)
     return directions
 
 
-def normalize_plan_identifier(value):
-    name = str(value or "").strip()
-    return name.lower() if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,29}", name) else ""
-
-
-def normalize_plan_reference(value, context, role=None):
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_]{0,29})[-.]([A-Za-z][A-Za-z0-9_]{0,29})", text)
-    if match:
-        return f"{match.group(1).lower()}-{match.group(2).lower()}"
-    identifier = normalize_plan_identifier(text)
-    if identifier and role == "target":
-        output_fields = (context or {}).get("output_fields") or set()
-        if identifier.upper() in output_fields:
-            return f"w_output-{identifier}"
-    return identifier or text
-
-
-def normalize_plan_reference_list(value, context):
-    if value is None:
-        return []
-    raw_values = value if isinstance(value, list) else [value]
-    normalized = []
-    for item in raw_values:
-        reference = normalize_plan_reference(item, context, role="source")
-        if reference and reference not in normalized:
-            normalized.append(reference)
-    return normalized
-
-
 def output_field_names_from_requirements(declaration_requirements=None):
     requirements = parse_declaration_requirements_text(declaration_requirements)
     fields = requirements.get("output_structure_fields") if isinstance(requirements, dict) else []
@@ -1826,8 +1213,6 @@ def output_field_type_map_from_requirements(declaration_requirements=None):
         if name:
             result[name] = normalize_type_keyword(type_or_like) if type_or_like else ""
     return result
-
-
 def validate_processing_plan(
     processing_plan,
     base_prompt=None,
@@ -2384,107 +1769,18 @@ def normalize_type_for_comparison(value):
     return re.sub(r"^(TYPE|LIKE)\s+", "", text)
 
 
-def is_plan_literal(value):
-    text = str(value or "").strip()
-    return bool(re.fullmatch(r"'.*'|`.*`|\d+(?:\.\d+)?", text))
 
 
-def format_processing_plan_path(path):
-    if not path:
-        return "processing_plan"
-    return "processing_plan." + ".".join(str(item) for item in path)
 
 
-def is_placeholder_condition(value):
-    condition = re.sub(r"\s+", "", str(value or "").strip().lower())
-    return condition in {"1=0", "0=1", "true=false", "false=true"}
 
 
-def is_ddic_input_work_area_reference(value, context):
-    object_prefix = str(value or "").partition("-")[0].lower()
-    work_areas = set(((context or {}).get("table_to_work_area") or {}).values())
-    return object_prefix in work_areas
 
 
-def record_processing_step_rejection(diagnostics, path, step, reason, function_name):
-    if diagnostics is None:
-        return
-    code_location = f"services/orchestrator.py:{function_name}"
-    diagnostics.setdefault("rejected_steps", []).append(
-        {
-            "path": list(path or []),
-            "step": step,
-            "original_step": step,
-            "resulting_step": None,
-            "reason": reason,
-            "function": function_name,
-            "code_location": code_location,
-        }
-    )
-    diagnostics.setdefault("modified_steps", []).append(
-        {
-            "path": list(path or []),
-            "original_step": step,
-            "resulting_step": None,
-            "reason": reason,
-            "function": function_name,
-            "code_location": code_location,
-        }
-    )
 
 
-def record_processing_step_modification(diagnostics, path, original_step, resulting_step, reason, function_name):
-    if diagnostics is None:
-        return
-    original = processing_plan_diagnostic_snapshot(original_step)
-    resulting = processing_plan_diagnostic_snapshot(resulting_step)
-    if original == resulting:
-        return
-    diagnostics.setdefault("modified_steps", []).append(
-        {
-            "path": list(path or []),
-            "original_step": original,
-            "resulting_step": resulting,
-            "reason": reason,
-            "function": function_name,
-            "code_location": f"services/orchestrator.py:{function_name}",
-        }
-    )
 
 
-def append_processing_plan_trace(diagnostics, stage, plan):
-    if diagnostics is None:
-        return
-    diagnostics.setdefault("transformation_trace", []).append(
-        {
-            "stage": stage,
-            "plan": processing_plan_diagnostic_snapshot(plan),
-        }
-    )
-
-
-def processing_plan_extraction_trace(parsed_plan, normalized, validation_input=None):
-    trace = [
-        {
-            "stage": "parse_json_response.deserialized",
-            "plan": processing_plan_diagnostic_snapshot(parsed_plan),
-        }
-    ]
-    trace.extend(((normalized or {}).get("diagnostics") or {}).get("transformation_trace") or [])
-    trace.append(
-        {
-            "stage": "validate_processing_plan.input",
-            "plan": processing_plan_diagnostic_snapshot(validation_input),
-        }
-    )
-    return trace
-
-
-def processing_plan_diagnostic_snapshot(value):
-    try:
-        return json.loads(json.dumps(value))
-    except (TypeError, ValueError):
-        return str(value)
 
 
 def raw_response_json(result):
@@ -2495,15 +1791,6 @@ def raw_response_json(result):
     return processing_plan_diagnostic_snapshot(result)
 
 
-def record_empty_normalized_branch(diagnostics, path, raw_children, normalized_children, branch_name, function_name="normalize_processing_step"):
-    if raw_children and not normalized_children:
-        record_processing_step_rejection(
-            diagnostics,
-            path,
-            raw_children,
-            f"{branch_name} contained child steps but none remained after normalization",
-            function_name,
-        )
 
 
 def load_declaration_requirements_prompt(path=DECLARATION_REQUIREMENTS_PROMPT_PATH):
@@ -2546,6 +1833,7 @@ def processing_plan_extraction_prompt(metadata_context=None, callable_metadata=N
 def build_processing_contract(metadata_context=None, callable_metadata=None, declaration_requirements=None, processing_rules_text=None, ddic_metadata=None):
     ddic_catalogue = processing_contract_ddic_catalogue(metadata_context, ddic_metadata)
     object_contracts = ddic_object_contracts_from_prompt(metadata_context)
+    ddic_metadata_dependencies = ddic_metadata_dependencies_from_prompt(metadata_context)
     callable_identities = callable_identities_from_prompt(metadata_context)
     output_contract = filtered_output_contract_from_requirements(declaration_requirements)
     discovered_dependencies = discover_processing_rule_dependencies(
@@ -2577,7 +1865,11 @@ def build_processing_contract(metadata_context=None, callable_metadata=None, dec
         extract_callable_catalogue(metadata_context),
     )
     contract = {
-        "ddic_objects": {name: object_contracts[name] for name in object_contracts if name in required_ddic_objects},
+        "ddic_objects": {
+            name: object_contracts.get(name, {})
+            for name in required_ddic_objects
+            if name in object_contracts or name in ddic_metadata_dependencies
+        },
         "metadata": filtered_metadata,
         "callables": filtered_callables,
         "output": output_contract,
@@ -3351,6 +2643,14 @@ def callable_identities_from_prompt(base_prompt):
     return []
 
 
+def ddic_metadata_dependencies_from_prompt(base_prompt):
+    contract = prompt_block(base_prompt, "Shared generation contract:", ())
+    for line in str(contract or "").splitlines():
+        if line.strip().lower().startswith("exact ddic metadata dependencies:"):
+            return {name.upper() for name in comma_values(line)}
+    return set(ddic_object_contracts_from_prompt(base_prompt))
+
+
 def parse_json_response(text):
     cleaned = clean_json_response(text)
     try:
@@ -3775,6 +3075,13 @@ def normalize_output_structure_field(item, ddic_fields, callable_index):
         parameter_name = str(item.get("parameter") or item.get("parameter_name") or "").strip()
         type_or_like = str(item.get("type_or_like") or "").strip()
         include_when = str(item.get("include_when") or "").strip()
+        heading = first_non_empty(
+            item.get("heading"),
+            item.get("description"),
+            item.get("label"),
+            item.get("column_heading"),
+            item.get("seltext_l"),
+        )
     else:
         name = str(item or "").strip()
         source_field = ""
@@ -3783,6 +3090,7 @@ def normalize_output_structure_field(item, ddic_fields, callable_index):
         parameter_name = ""
         type_or_like = ""
         include_when = ""
+        heading = ""
 
     normalized_type, source_mapping = normalize_output_field_type(
         name,
@@ -3801,7 +3109,17 @@ def normalize_output_structure_field(item, ddic_fields, callable_index):
     }
     if include_when:
         field["include_when"] = include_when
+    if heading:
+        field["heading"] = heading
     return field
+
+
+def first_non_empty(*values):
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def public_output_structure_field(field):
@@ -3811,6 +3129,8 @@ def public_output_structure_field(field):
     }
     if field.get("include_when"):
         result["include_when"] = field["include_when"]
+    if field.get("heading"):
+        result["heading"] = field["heading"]
     return result
 
 
@@ -4322,6 +3642,23 @@ def ensure_callable_parameter_declarations(source, callable_metadata=None):
     return remove_unreferenced_local_type_declarations(fixed, replaced_type_names)
 
 
+def structured_generation_contract_for_chunk(
+    structured_generation_contract,
+    chunk,
+    declaration_requirements=None,
+    callable_metadata=None,
+    ddic_metadata=None,
+):
+    if (chunk or {}).get("name") != "processing_form" or not (chunk or {}).get("processing_plan"):
+        return structured_generation_contract
+    return build_structured_generation_contract(
+        declaration_requirements,
+        processing_plan_payload((chunk or {}).get("processing_plan")),
+        ddic_metadata=ddic_metadata,
+        callable_metadata=callable_metadata,
+    )
+
+
 def callable_parameter_declaration_requirements(source, callable_metadata=None):
     signatures = normalize_provider_signatures(callable_metadata)
     if not signatures:
@@ -4375,6 +3712,8 @@ def callable_parameter_expected_declaration_type(parameter, actual_section):
     row_type = callable_parameter_row_type(parameter)
     if not row_type:
         return ""
+    if row_type.upper() in DIRECT_TABLE_PARAMETER_TYPES:
+        return f"TYPE {row_type}"
     if is_table_like_callable_section(actual_section, parameter):
         return f"TYPE STANDARD TABLE OF {row_type}"
     return f"TYPE {row_type}"
@@ -4788,23 +4127,6 @@ def group_declaration_statements_by_prefix(source):
     return normalize_abap_blank_lines("\n".join(before_lines + declaration_lines + after_lines))
 
 
-def normalize_abap_blank_lines(source, max_blank_lines=1):
-    lines = str(source or "").splitlines()
-    normalized = []
-    blank_count = 0
-    for line in lines:
-        if not line.strip():
-            blank_count += 1
-            if blank_count <= max_blank_lines:
-                normalized.append("")
-            continue
-        blank_count = 0
-        normalized.append(line)
-    while normalized and not normalized[-1].strip():
-        normalized.pop()
-    return "\n".join(normalized)
-
-
 def formatted_declaration_section_lines(grouped):
     sections = [
         ("*Types", grouped["types"], True),
@@ -5032,27 +4354,6 @@ def identifiers_declared_by_statement(statement):
         if name_match:
             append_unique(names, name_match.group(1).lower())
     return names
-
-
-def insert_declaration_statements(source, statements):
-    units = abap_statement_units(source)
-    if not units:
-        return "\n".join(statements)
-    insert_at = 0
-    for index, unit in enumerate(units):
-        first_code = first_statement_code_line(unit)
-        if re.match(r"^(REPORT|TABLES|TYPES|CONSTANTS|DATA|FIELD-SYMBOLS|RANGES)\b", first_code, re.IGNORECASE):
-            insert_at = index + 1
-            continue
-        break
-    assembled_units = []
-    for index, unit in enumerate(units):
-        if index == insert_at:
-            assembled_units.append(list(statements))
-        assembled_units.append(unit)
-    if insert_at >= len(units):
-        assembled_units.append(list(statements))
-    return "\n".join(line for unit in assembled_units for line in unit)
 
 
 def ensure_form_chunk_uses_declared_globals(
@@ -6221,38 +5522,6 @@ def ddic_object_contract_line_name(line):
     return match.group(1).upper() if match else ""
 
 
-def processing_plan_payload(processing_plan=None):
-    if isinstance(processing_plan, dict):
-        return processing_plan
-    text = str(processing_plan or "").strip()
-    if not text or text.lower() == "none":
-        return {"processing_steps": []}
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return {"processing_steps": []}
-    return parsed if isinstance(parsed, dict) else {"processing_steps": []}
-
-
-def processing_plan_strings(value):
-    strings = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if isinstance(key, str):
-                strings.append(key)
-            strings.extend(processing_plan_strings(item))
-    elif isinstance(value, list):
-        for item in value:
-            strings.extend(processing_plan_strings(item))
-    elif value is not None:
-        strings.append(str(value))
-    return strings
-
-
-def processing_plan_text_blob(processing_plan=None):
-    return "\n".join(processing_plan_strings(processing_plan_payload(processing_plan)))
-
-
 def processing_plan_referenced_identifiers(processing_plan=None):
     identifiers = []
     for match in re.finditer(r"\b([A-Za-z][A-Za-z0-9_]{1,29})\b", processing_plan_text_blob(processing_plan)):
@@ -6533,6 +5802,8 @@ def required_form_global_variables(base_prompt=None, source_text=None, declarati
     for work_area_name in comma_values_from_contract(base_prompt, "Exact work-area names:"):
         add_global_variable_requirement(result, {"name": work_area_name, "declaration": ""})
     for object_name, item in ddic_object_contracts_from_prompt(base_prompt).items():
+        if not ddic_object_contract_requires_runtime_globals(object_name, item, source_text=source_text, base_prompt=base_prompt):
+            continue
         table_name = normalize_abap_identifier(item.get("table"))
         work_area = normalize_abap_identifier(item.get("work_area"))
         row_type = local_database_read_type_name(object_name, item)
@@ -6579,6 +5850,30 @@ def required_form_global_variables(base_prompt=None, source_text=None, declarati
     for item in required_global_variable_declarations(declaration_requirements):
         add_global_variable_requirement(result, item)
     return result
+
+
+def ddic_object_contract_requires_runtime_globals(object_name, item, source_text=None, base_prompt=None):
+    object_name = str(object_name or "").strip().upper()
+    text = "\n".join([str(source_text or ""), prompt_without_shared_generation_contract(base_prompt)])
+    aliases = [
+        str((item or {}).get("structure") or ""),
+        str((item or {}).get("table") or ""),
+        str((item or {}).get("work_area") or ""),
+    ]
+    for alias in aliases:
+        if alias and re.search(rf"\b{re.escape(alias)}\b", text, re.IGNORECASE):
+            return True
+    return bool(
+        re.search(rf"\b(?:read|select|loop|search|join\s+to|from)\s+(?:SAP\s+)?(?:table|structure|view)?\s*{re.escape(object_name)}\b", text, re.IGNORECASE)
+        or re.search(rf"^\s*#+\s*{re.escape(object_name)}\b[\s\S]*?\b(?:read fields|selection fields|join to|selection)\b", text, re.IGNORECASE | re.MULTILINE)
+    )
+
+
+def prompt_without_shared_generation_contract(base_prompt=None):
+    text = str(base_prompt or "")
+    marker = "Shared generation contract:"
+    index = text.find(marker)
+    return text[:index] if index != -1 else text
 
 
 def comma_values_from_contract(base_prompt, label):
@@ -6982,12 +6277,217 @@ def truthy_plan_flag(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "required", "separate", "explicit"}
 
 
+def apply_deterministic_file_input_support(source, source_text=None):
+    if not specification_requests_dual_file_input(source_text):
+        return source
+    updated = ensure_file_input_declarations(source, source_text)
+    updated = ensure_file_input_selection_events(updated)
+    updated = ensure_read_input_file_perform(updated)
+    updated = ensure_read_input_file_form(updated)
+    return normalize_abap_blank_lines(updated)
+
+
+def specification_requests_dual_file_input(source_text):
+    text = str(source_text or "")
+    return bool(
+        re.search(r"\binput\s+file\b|\bread\s+the\s+input\s+file\b|\bfile\s+source\b", text, re.IGNORECASE)
+        and re.search(r"\blocal\s+pc\b|\bpc\b", text, re.IGNORECASE)
+        and re.search(r"\bAL11\b|\bapplication\s+server\b", text, re.IGNORECASE)
+    )
+
+
+def ensure_file_input_declarations(source, source_text=None):
+    declarations = [
+        "PARAMETERS p_pc RADIOBUTTON GROUP src DEFAULT 'X'.",
+        "PARAMETERS p_al11 RADIOBUTTON GROUP src.",
+        "PARAMETERS p_file TYPE string.",
+    ]
+    if re.search(r"\breport\s+mode\b", str(source_text or ""), re.IGNORECASE) and re.search(r"\bupdate\s+mode\b", str(source_text or ""), re.IGNORECASE):
+        declarations.extend(
+            [
+                "PARAMETERS p_rep RADIOBUTTON GROUP mod DEFAULT 'X'.",
+                "PARAMETERS p_upd RADIOBUTTON GROUP mod.",
+            ]
+        )
+    if re.search(r"\bCATS\s+profile\b", str(source_text or ""), re.IGNORECASE):
+        declarations.append("PARAMETERS p_prof TYPE string DEFAULT 'BFG WK_1'.")
+    declarations.extend(
+        [
+            "DATA t_file_lines TYPE STANDARD TABLE OF string.",
+            "DATA w_file_line TYPE string.",
+            "DATA w_file_row TYPE i.",
+        ]
+    )
+    missing = [line for line in declarations if not abap_source_declares_identifier(source, line)]
+    return insert_declaration_statements(source, missing) if missing else source
+
+
+def abap_source_declares_identifier(source, declaration_line):
+    match = re.search(r"\b(PARAMETERS|DATA)\s+([A-Za-z_][A-Za-z0-9_]*)\b", str(declaration_line or ""), re.IGNORECASE)
+    if not match:
+        return True
+    keyword = match.group(1)
+    identifier = match.group(2)
+    for statement in abap_statement_units(source):
+        code = " ".join(
+            split_code_and_comment(line)[0].strip()
+            for line in statement
+            if split_code_and_comment(line)[0].strip()
+        )
+        if re.search(rf"(?i)^{keyword}\s+{re.escape(identifier)}\b", code):
+            return True
+        if re.search(rf"(?i)^{keyword}\s*:\s*.*\b{re.escape(identifier)}\b", code):
+            return True
+    return False
+
+
+def ensure_file_input_selection_events(source):
+    text = str(source or "")
+    blocks = []
+    if not re.search(r"\bAT\s+SELECTION-SCREEN\s+ON\s+VALUE-REQUEST\s+FOR\s+p_file\b", text, re.IGNORECASE):
+        blocks.append(
+            "\n".join(
+                [
+                    "AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.",
+                    "  IF p_pc = 'X'.",
+                    "    CALL FUNCTION 'F4_FILENAME'",
+                    "      IMPORTING",
+                    "        file_name = p_file.",
+                    "  ENDIF.",
+                ]
+            )
+        )
+    if not re.search(r"\bAT\s+SELECTION-SCREEN\.", text, re.IGNORECASE):
+        blocks.append(
+            "\n".join(
+                [
+                    "AT SELECTION-SCREEN.",
+                    "  IF p_pc = 'X' AND sy-batch = 'X'.",
+                    "    MESSAGE 'Local PC upload is only available in foreground' TYPE 'E'.",
+                    "  ENDIF.",
+                    "  IF p_file IS INITIAL.",
+                    "    MESSAGE 'Input file path is required' TYPE 'E'.",
+                    "  ENDIF.",
+                ]
+            )
+        )
+    return insert_event_blocks_before_start(source, blocks) if blocks else source
+
+
+def insert_event_blocks_before_start(source, blocks):
+    if not blocks:
+        return source
+    lines = str(source or "").splitlines()
+    insert_at = len(lines)
+    for index, line in enumerate(lines):
+        code = split_code_and_comment(line)[0].strip()
+        if re.match(r"^(START-OF-SELECTION|FORM)\b", code, re.IGNORECASE):
+            insert_at = index
+            break
+    return "\n".join(lines[:insert_at] + blocks + lines[insert_at:])
+
+
+def ensure_read_input_file_perform(source):
+    if re.search(r"\bPERFORM\s+read_input_file\b", str(source or ""), re.IGNORECASE):
+        return source
+    lines = str(source or "").splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*START-OF-SELECTION\.", split_code_and_comment(line)[0], re.IGNORECASE):
+            lines.insert(index + 1, "  PERFORM read_input_file.")
+            return "\n".join(lines)
+    insert_at = len(lines)
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*FORM\b", split_code_and_comment(line)[0], re.IGNORECASE):
+            insert_at = index
+            break
+    return "\n".join(lines[:insert_at] + ["START-OF-SELECTION.", "  PERFORM read_input_file."] + lines[insert_at:])
+
+
+def ensure_read_input_file_form(source):
+    if re.search(r"\bFORM\s+read_input_file\b", str(source or ""), re.IGNORECASE):
+        return source
+    return str(source or "").rstrip() + "\n" + file_input_form_block(source)
+
+
+def file_input_form_block(source=None):
+    lines = [
+        "FORM read_input_file.",
+        "  REFRESH t_file_lines.",
+        "  CLEAR w_file_row.",
+        "",
+        "  IF p_pc = 'X'.",
+        "    CALL FUNCTION 'GUI_UPLOAD'",
+        "      EXPORTING",
+        "        filename = p_file",
+        "        filetype = 'ASC'",
+        "      TABLES",
+        "        data_tab = t_file_lines",
+        "      EXCEPTIONS",
+        "        file_open_error = 1",
+        "        file_read_error = 2",
+        "        no_batch = 3",
+        "        OTHERS = 4.",
+        "    IF sy-subrc <> 0.",
+        "      MESSAGE 'Unable to read local PC input file' TYPE 'E'.",
+        "    ENDIF.",
+        "  ELSE.",
+        "    OPEN DATASET p_file FOR INPUT IN TEXT MODE ENCODING DEFAULT.",
+        "    IF sy-subrc <> 0.",
+        "      MESSAGE 'Unable to open AL11 input file' TYPE 'E'.",
+        "    ENDIF.",
+        "    DO.",
+        "      READ DATASET p_file INTO w_file_line.",
+        "      IF sy-subrc <> 0.",
+        "        EXIT.",
+        "      ENDIF.",
+        "      APPEND w_file_line TO t_file_lines.",
+        "    ENDDO.",
+        "    CLOSE DATASET p_file.",
+        "  ENDIF.",
+        "",
+        "  LOOP AT t_file_lines INTO w_file_line.",
+        "    w_file_row = w_file_row + 1.",
+        "    IF w_file_row = 1.",
+        "      CONTINUE.",
+        "    ENDIF.",
+        "    CLEAR w_output.",
+    ]
+    if output_structure_declares_field(source, "file_row_number"):
+        lines.append("    w_output-file_row_number = w_file_row.")
+    lines.extend(
+        [
+            "    SPLIT w_file_line AT ',' INTO w_output-pernr",
+            "                                  w_output-date",
+            "                                  w_output-absence_type",
+            "                                  w_output-hours",
+            "                                  w_output-unit.",
+            "    APPEND w_output TO t_output.",
+            "  ENDLOOP.",
+            "ENDFORM.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def output_structure_declares_field(source, field_name):
+    pattern = (
+        r"\bTYPES\s*:\s*BEGIN\s+OF\s+ty_output\b"
+        r"(?P<body>.*?)"
+        r"\bEND\s+OF\s+ty_output\b"
+    )
+    match = re.search(pattern, str(source or ""), re.IGNORECASE | re.DOTALL)
+    if not match:
+        return False
+    return bool(re.search(rf"\b{re.escape(str(field_name or ''))}\b", match.group("body"), re.IGNORECASE))
+
+
 def validate_generated_processing_completeness(source, source_text=None, processing_plan=None, declaration_requirements=None):
     output_names = output_names_for_contract(declaration_requirements)
     output_fields = output_field_names_from_requirements(declaration_requirements)
-    if not output_names or not output_fields:
-        return []
     issues = []
+    issues.extend(validate_generated_spec_functionality_coverage(source, source_text, processing_plan))
+    if not output_names or not output_fields:
+        return dedupe_processing_completeness_issues(issues)
     output_work_area = output_names["work_area"]
     output_table = output_names["table"]
     populated = generated_output_field_populations(source, output_work_area)
@@ -7029,6 +6529,236 @@ def validate_generated_processing_completeness(source, source_text=None, process
                 )
             )
     return dedupe_processing_completeness_issues(issues)
+
+
+def validate_generated_spec_functionality_coverage(source, source_text=None, processing_plan=None):
+    issues = []
+    if specification_requests_dual_file_input(source_text):
+        required_checks = [
+            (
+                "SPEC_FILE_SOURCE_SELECTION_MISSING",
+                generated_has_file_source_selection,
+                "The specification requires Local PC and AL11 file source selection, but the generated ABAP has no file-source selection parameters.",
+                "Add mutually exclusive Local PC and AL11 selection-screen controls.",
+            ),
+            (
+                "SPEC_PC_FILE_READ_MISSING",
+                generated_has_pc_file_read,
+                "The specification requires Local PC file upload, but the generated ABAP has no PC file-read implementation.",
+                "Use foreground-only PC upload logic such as GUI_UPLOAD after file selection.",
+            ),
+            (
+                "SPEC_AL11_FILE_READ_MISSING",
+                generated_has_al11_file_read,
+                "The specification requires AL11/application-server input, but the generated ABAP has no OPEN DATASET/READ DATASET implementation.",
+                "Use OPEN DATASET FOR INPUT and READ DATASET for AL11 files.",
+            ),
+            (
+                "SPEC_PC_FOREGROUND_GUARD_MISSING",
+                generated_has_pc_foreground_guard,
+                "The specification says Local PC upload is foreground-only, but the generated ABAP has no sy-batch guard.",
+                "Reject Local PC upload when sy-batch = 'X'.",
+            ),
+            (
+                "SPEC_INPUT_HEADER_SKIP_MISSING",
+                generated_has_header_skip,
+                "The specification says the first input row is a header, but the generated ABAP does not skip the first file row.",
+                "Skip row 1 before processing uploaded file data.",
+            ),
+            (
+                "SPEC_INPUT_COLUMNS_PARSE_MISSING",
+                generated_has_required_input_column_parse,
+                "The specification defines PERNR, DATE, ABSENCE_TYPE, HOURS, and UNIT input columns, but the generated ABAP does not parse them from the file.",
+                "Parse each input line into PERNR, DATE, ABSENCE_TYPE, HOURS, and UNIT before business validation.",
+            ),
+        ]
+        for rule_id, predicate, message, suggested_fix in required_checks:
+            if not predicate(source):
+                issues.append(
+                    processing_completeness_issue(
+                        rule_id,
+                        processing_form_line_number(source),
+                        message,
+                        processing_form_source_line(source),
+                        suggested_fix,
+                    )
+                )
+    if specification_requests_report_and_update_modes(source_text) and not generated_has_report_update_modes(source):
+        issues.append(
+            processing_completeness_issue(
+                "SPEC_PROCESSING_MODE_SELECTION_MISSING",
+                processing_form_line_number(source),
+                "The specification requires Report Mode and Update Mode selection, but the generated ABAP has no mode selection controls.",
+                processing_form_source_line(source),
+                "Add mutually exclusive Report Mode and Update Mode selection parameters and branch processing accordingly.",
+            )
+        )
+    if specification_requests_cats_profile(source_text) and not generated_has_cats_profile_default(source):
+        issues.append(
+            processing_completeness_issue(
+                "SPEC_CATS_PROFILE_DEFAULT_MISSING",
+                processing_form_line_number(source),
+                "The specification requires a CATS profile default of BFG WK_1, but the generated ABAP does not expose that default.",
+                processing_form_source_line(source),
+                "Add a CATS profile parameter defaulted to BFG WK_1 and pass it to the CATS BAPI where applicable.",
+            )
+        )
+    if specification_rejects_output_file(source_text) and generated_has_output_file_flow(source):
+        issues.append(
+            processing_completeness_issue(
+                "SPEC_UNREQUESTED_OUTPUT_FILE_FLOW",
+                processing_form_line_number(source),
+                "The specification says no output file is required, but the generated ABAP contains output-file/write_csv flow.",
+                processing_form_source_line(source),
+                "Remove generated file-output/download/write_csv logic when the specification only requires input-file processing.",
+            )
+        )
+    if specification_requests_catsdb_duplicate_check(source_text) and not generated_has_catsdb_read(source):
+        issues.append(
+            processing_completeness_issue(
+                "SPEC_CATSDB_READ_MISSING",
+                processing_form_line_number(source),
+                "The specification requires checking existing CATSDB records, but the generated ABAP does not read CATSDB.",
+                processing_form_source_line(source),
+                "Select or read existing CATSDB records before deciding whether an uploaded absence row is insertable.",
+            )
+        )
+    if specification_requests_update_transaction_handling(source_text) and not generated_has_update_transaction_handling(source):
+        issues.append(
+            processing_completeness_issue(
+                "SPEC_UPDATE_TRANSACTION_HANDLING_MISSING",
+                processing_form_line_number(source),
+                "The specification requires update-mode commit/rollback behaviour, but the generated ABAP has no transaction handling.",
+                processing_form_source_line(source),
+                "In Update Mode, commit successful BAPI changes and roll back failed updates.",
+            )
+        )
+    if specification_requests_alv_output(source_text) and not generated_has_alv_output(source):
+        issues.append(
+            processing_completeness_issue(
+                "SPEC_ALV_OUTPUT_MISSING",
+                processing_form_line_number(source),
+                "The specification requires ALV output, but the generated ABAP has no ALV display call.",
+                processing_form_source_line(source),
+                "Display the processed results with REUSE_ALV_GRID_DISPLAY, CL_SALV_TABLE, or CL_GUI_ALV_GRID.",
+            )
+        )
+    return issues
+
+
+def generated_has_file_source_selection(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\bPARAMETERS\s+p_pc\b.+\bRADIOBUTTON\s+GROUP\b", text, re.IGNORECASE)
+        and re.search(r"\bPARAMETERS\s+p_al11\b.+\bRADIOBUTTON\s+GROUP\b", text, re.IGNORECASE)
+        and re.search(r"\bPARAMETERS\s+p_file\b", text, re.IGNORECASE)
+    )
+
+
+def generated_has_pc_file_read(source):
+    return bool(re.search(r"\bGUI_UPLOAD\b|\bCL_GUI_FRONTEND_SERVICES\b", str(source or ""), re.IGNORECASE))
+
+
+def generated_has_al11_file_read(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\bOPEN\s+DATASET\b.+\bFOR\s+INPUT\b", text, re.IGNORECASE | re.DOTALL)
+        and re.search(r"\bREAD\s+DATASET\b", text, re.IGNORECASE)
+        and not re.search(r"\bOPEN\s+DATASET\b.+\bFOR\s+OUTPUT\b", text, re.IGNORECASE | re.DOTALL)
+    )
+
+
+def generated_has_pc_foreground_guard(source):
+    return bool(re.search(r"\bp_pc\b.+\bsy-batch\b|\bsy-batch\b.+\bp_pc\b", str(source or ""), re.IGNORECASE | re.DOTALL))
+
+
+def generated_has_header_skip(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\bw_file_row\s*=\s*w_file_row\s*\+\s*1\b", text, re.IGNORECASE)
+        and re.search(r"\bw_file_row\s*=\s*1\b.+\bCONTINUE\b", text, re.IGNORECASE | re.DOTALL)
+    )
+
+
+def generated_has_required_input_column_parse(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\bSPLIT\b.+\bw_output-pernr\b.+\bw_output-date\b.+\bw_output-absence_type\b.+\bw_output-hours\b.+\bw_output-unit\b", text, re.IGNORECASE | re.DOTALL)
+    )
+
+
+def specification_requests_report_and_update_modes(source_text):
+    text = str(source_text or "")
+    return bool(re.search(r"\breport\s+mode\b", text, re.IGNORECASE) and re.search(r"\bupdate\s+mode\b", text, re.IGNORECASE))
+
+
+def generated_has_report_update_modes(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\bPARAMETERS\s+p_rep\b.+\bRADIOBUTTON\s+GROUP\b", text, re.IGNORECASE)
+        and re.search(r"\bPARAMETERS\s+p_upd\b.+\bRADIOBUTTON\s+GROUP\b", text, re.IGNORECASE)
+    )
+
+
+def specification_requests_cats_profile(source_text):
+    return bool(re.search(r"\bCATS\s+profile\b", str(source_text or ""), re.IGNORECASE))
+
+
+def generated_has_cats_profile_default(source):
+    return bool(re.search(r"\bPARAMETERS\s+p_prof\b.+\bDEFAULT\s+'BFG WK_1'", str(source or ""), re.IGNORECASE))
+
+
+def specification_rejects_output_file(source_text):
+    text = str(source_text or "")
+    return bool(
+        re.search(r"\bno\s+output\s+file\b|\bno\s+(?:separate\s+)?file\s+output\b|\boutput\s+file\s+is\s+not\s+required\b", text, re.IGNORECASE)
+    )
+
+
+def generated_has_output_file_flow(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\bGUI_DOWNLOAD\b", text, re.IGNORECASE)
+        or re.search(r"\bOPEN\s+DATASET\b.+\bFOR\s+OUTPUT\b", text, re.IGNORECASE | re.DOTALL)
+        or re.search(r"\bTRANSFER\b.+\bTO\b", text, re.IGNORECASE)
+        or re.search(r"\bPERFORM\s+write_csv\b|\bFORM\s+write_csv\b", text, re.IGNORECASE)
+    )
+
+
+def specification_requests_catsdb_duplicate_check(source_text):
+    text = str(source_text or "")
+    return bool(
+        re.search(r"\bCATSDB\b", text, re.IGNORECASE)
+        and re.search(r"\bduplicate|existing\s+(?:record|absence|CATS)|already\s+exist|overlap|previously\s+recorded\b", text, re.IGNORECASE)
+    )
+
+
+def generated_has_catsdb_read(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\bSELECT\b.+\bFROM\s+CATSDB\b", text, re.IGNORECASE | re.DOTALL)
+        or re.search(r"\bREAD\s+TABLE\b.+\bCATSDB\b", text, re.IGNORECASE | re.DOTALL)
+    )
+
+
+def specification_requests_update_transaction_handling(source_text):
+    text = str(source_text or "")
+    return bool(
+        re.search(r"\bupdate\s+mode\b", text, re.IGNORECASE)
+        and re.search(r"\bcommit|rollback|BAPI_TRANSACTION_(?:COMMIT|ROLLBACK)\b", text, re.IGNORECASE)
+    )
+
+
+def generated_has_update_transaction_handling(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\bBAPI_TRANSACTION_COMMIT\b|\bCOMMIT\s+WORK\b", text, re.IGNORECASE)
+        and re.search(r"\bBAPI_TRANSACTION_ROLLBACK\b|\bROLLBACK\s+WORK\b", text, re.IGNORECASE)
+    )
+
+
+def generated_has_alv_output(source):
+    return bool(re.search(r"\bREUSE_ALV_GRID_DISPLAY\b|\bCL_SALV_TABLE\b|\bCL_GUI_ALV_GRID\b", str(source or ""), re.IGNORECASE))
 
 
 def generated_output_field_populations(source, output_work_area):
@@ -7290,56 +7020,8 @@ def split_abap_chunk(source):
     return sections
 
 
-def abap_statement_units(source):
-    units = []
-    current = []
-    in_form = False
-    for line in (source or "").splitlines():
-        stripped = line.strip()
-        if not current and not stripped:
-            units.append([line])
-            continue
-        if re.match(r"^FORM\b", stripped, re.IGNORECASE):
-            in_form = True
-        current.append(line)
-        if in_form:
-            if re.match(r"^ENDFORM\b", stripped, re.IGNORECASE):
-                units.append(current)
-                current = []
-                in_form = False
-            continue
-        code = split_code_and_comment(line)[0].strip()
-        if statement_ends(code):
-            units.append(current)
-            current = []
-    if current:
-        units.append(current)
-    return units
-
-
-def first_statement_code_line(statement):
-    for line in statement or []:
-        code = split_code_and_comment(line)[0].strip()
-        if code:
-            return code
-    return ""
-
-
-def is_selection_screen_line(stripped):
-    return bool(re.match(r"^(PARAMETERS|SELECT-OPTIONS|SELECTION-SCREEN)\b", stripped, re.IGNORECASE))
-
-
 def is_main_event_line(stripped):
     return bool(re.match(r"^(START-OF-SELECTION|END-OF-SELECTION|INITIALIZATION|AT\s+SELECTION-SCREEN|PERFORM)\b", stripped, re.IGNORECASE))
-
-
-def join_lines(lines):
-    cleaned = list(lines or [])
-    while cleaned and not str(cleaned[0]).strip():
-        cleaned.pop(0)
-    while cleaned and not str(cleaned[-1]).strip():
-        cleaned.pop()
-    return "\n".join(str(line) for line in cleaned).strip()
 
 
 def dedupe_form_lines(lines):
@@ -7415,6 +7097,7 @@ def save_chunk_diagnostic(job_folder, generation_result):
         "fallback_reason": (generation_result or {}).get("fallback_reason"),
         "declaration_requirements": (generation_result or {}).get("declaration_requirements"),
         "processing_plan": (generation_result or {}).get("processing_plan"),
+        "structured_generation_contract": (generation_result or {}).get("structured_generation_contract"),
     }
     (Path(job_folder) / CHUNK_DIAGNOSTIC).write_text(
         json.dumps(payload, indent=2),

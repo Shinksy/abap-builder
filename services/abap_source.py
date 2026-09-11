@@ -51,6 +51,92 @@ def statement_ends(code):
     return code.rstrip().endswith(".")
 
 
+def abap_statement_units(source):
+    units = []
+    current = []
+    in_form = False
+    for line in str(source or "").splitlines():
+        stripped = line.strip()
+        if not current and not stripped:
+            units.append([line])
+            continue
+        if re.match(r"^FORM\b", stripped, re.IGNORECASE):
+            in_form = True
+        current.append(line)
+        if in_form:
+            if re.match(r"^ENDFORM\b", stripped, re.IGNORECASE):
+                units.append(current)
+                current = []
+                in_form = False
+            continue
+        code = split_code_and_comment(line)[0].strip()
+        if statement_ends(code):
+            units.append(current)
+            current = []
+    if current:
+        units.append(current)
+    return units
+
+
+def first_statement_code_line(statement):
+    for line in statement or []:
+        code = split_code_and_comment(line)[0].strip()
+        if code:
+            return code
+    return ""
+
+
+def normalize_abap_blank_lines(source, max_blank_lines=1):
+    lines = str(source or "").splitlines()
+    normalized = []
+    blank_count = 0
+    for line in lines:
+        if not line.strip():
+            blank_count += 1
+            if blank_count <= max_blank_lines:
+                normalized.append("")
+            continue
+        blank_count = 0
+        normalized.append(line)
+    while normalized and not normalized[-1].strip():
+        normalized.pop()
+    return "\n".join(normalized)
+
+
+def insert_declaration_statements(source, statements):
+    units = abap_statement_units(source)
+    if not units:
+        return "\n".join(statements)
+    insert_at = 0
+    for index, unit in enumerate(units):
+        first_code = first_statement_code_line(unit)
+        if re.match(r"^(REPORT|TABLES|TYPES|CONSTANTS|DATA|FIELD-SYMBOLS|RANGES)\b", first_code, re.IGNORECASE):
+            insert_at = index + 1
+            continue
+        break
+    assembled_units = []
+    for index, unit in enumerate(units):
+        if index == insert_at:
+            assembled_units.append(list(statements))
+        assembled_units.append(unit)
+    if insert_at >= len(units):
+        assembled_units.append(list(statements))
+    return "\n".join(line for unit in assembled_units for line in unit)
+
+
+def is_selection_screen_line(stripped):
+    return bool(re.match(r"^(PARAMETERS|SELECT-OPTIONS|SELECTION-SCREEN)\b", stripped, re.IGNORECASE))
+
+
+def join_lines(lines):
+    cleaned = list(lines or [])
+    while cleaned and not str(cleaned[0]).strip():
+        cleaned.pop(0)
+    while cleaned and not str(cleaned[-1]).strip():
+        cleaned.pop()
+    return "\n".join(str(line) for line in cleaned).strip()
+
+
 def chained_declaration_start(code):
     match = re.match(r"^([A-Za-z-]+)\s*:", code.strip(), re.IGNORECASE)
     if match and match.group(1).upper() in CHAIN_DECLARATION_KEYWORDS:

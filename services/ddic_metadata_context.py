@@ -468,8 +468,9 @@ def extract_typed_table_read_section_headings(text):
 def extract_typed_prose_table_references(text):
     dependencies = []
     patterns = [
-        rf"\bread\s+(?:the\s+)?(?:current\s+)?({OBJECT_PATTERN})\s+records?\b",
-        rf"\bread\s+(?:the\s+)?(?:current\s+)?({OBJECT_PATTERN})(?=\s*(?:[.;:]|$))",
+        rf"\bread\s+(?:the\s+)?(?:(?:current|relevant|existing)\s+)*({OBJECT_PATTERN})\s+records?\b",
+        rf"\bread\s+(?:the\s+)?(?:(?:current|relevant|existing)\s+)*({OBJECT_PATTERN})(?=\s*(?:[.;:]|$))",
+        rf"\bchecks?\s+(?:the\s+)?(?:(?:current|relevant|existing)\s+)*({OBJECT_PATTERN})\s+(?:records?\b|for\b|to\s+(?:determine|identify|find|see)\b)",
         rf"\bbased\s+on\s+({OBJECT_PATTERN})\b",
     ]
     for pattern in patterns:
