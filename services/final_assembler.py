@@ -16,30 +16,115 @@ def normalize_final_assembly_mode(value):
 
 
 def assemble_final_abap_from_chunks(chunks):
+    return assemble_final_abap_from_chunks_with_diagnostics(chunks)["text"]
+
+
+def assemble_final_abap_from_chunks_with_diagnostics(chunks):
     sections = {
         "declarations": [],
+        "other_global": [],
         "main_event": [],
         "forms": [],
     }
+    diagnostics = {
+        "assembler_selected": "Python",
+        "chunks_received": [],
+        "chunks_included": [],
+        "assembly_order": [],
+        "unplaced_chunks": [],
+        "missing_chunks": [],
+        "final_assembled_source_length": 0,
+    }
     for chunk in chunks or []:
-        name = (chunk or {}).get("name")
-        text = (chunk or {}).get("text", "")
+        name = str((chunk or {}).get("name") or "chunk")
+        text = str((chunk or {}).get("text") or "")
+        diagnostics["chunks_received"].append(
+            {
+                "name": name,
+                "source_length": len(text),
+                "has_text": bool(text.strip()),
+            }
+        )
+        if not text.strip():
+            diagnostics["missing_chunks"].append({"name": name, "reason": "empty generated chunk text"})
+            continue
         if name == "declarations":
-            sections["declarations"].extend(declaration_statement_units(text))
+            declaration_units = declaration_statement_units(text)
+            split = split_chunk(text)
+            sections["declarations"].extend(declaration_units)
+            record_included_chunk(
+                diagnostics,
+                name,
+                declarations=len(declaration_units),
+            )
+            record_unplaced_units(diagnostics, name, "main event statements in declarations chunk", split["main_event"])
+            record_unplaced_units(diagnostics, name, "FORM routines in declarations chunk", split["forms"])
             continue
         split = split_chunk(text)
         if name == "main_program_flow":
             sections["main_event"].extend(split["main_event"])
+            record_unplaced_units(diagnostics, name, "FORM routines in main program flow chunk", split["forms"])
         else:
             sections["forms"].extend(split["forms"])
-    return "\n".join(
-        section
-        for section in (
-            join_units(dedupe_global_declarations(sections["declarations"])),
-            join_units(sections["main_event"]),
-            join_units(dedupe_form_units(sections["forms"])),
+            record_unplaced_units(diagnostics, name, "main event statements outside main program flow chunk", split["main_event"])
+        sections["other_global"].extend(split["other"])
+        record_included_chunk(
+            diagnostics,
+            name,
+            global_other=len(split["other"]),
+            main_event=len(split["main_event"]),
+            forms=len(split["forms"]),
         )
+    global_units = dedupe_global_declarations(sections["declarations"] + sections["other_global"])
+    form_units = dedupe_form_units(sections["forms"])
+    assembled_sections = [
+        ("global_declarations", join_units(global_units)),
+        ("main_event", join_units(sections["main_event"])),
+        ("forms", join_units(form_units)),
+    ]
+    source = "\n".join(
+        section
+        for _name, section in assembled_sections
         if section
+    )
+    diagnostics["assembly_order"] = [
+        {"section": name, "source_length": len(section)}
+        for name, section in assembled_sections
+        if section
+    ]
+    diagnostics["final_assembled_source_length"] = len(source)
+    return {"text": source, "diagnostics": diagnostics}
+
+
+def record_included_chunk(diagnostics, name, declarations=0, global_other=0, main_event=0, forms=0):
+    included_counts = {
+        "declarations": declarations,
+        "global_other": global_other,
+        "main_event": main_event,
+        "forms": forms,
+    }
+    total = sum(included_counts.values())
+    if not total:
+        diagnostics["unplaced_chunks"].append({"name": name, "reason": "no placeable ABAP statement units"})
+        return
+    diagnostics["chunks_included"].append(
+        {
+            "name": name,
+            "sections": {key: value for key, value in included_counts.items() if value},
+        }
+    )
+
+
+def record_unplaced_units(diagnostics, chunk_name, reason, units):
+    count = len(units or [])
+    if not count:
+        return
+    diagnostics["unplaced_chunks"].append(
+        {
+            "name": chunk_name,
+            "reason": reason,
+            "statement_units": count,
+        }
     )
 
 

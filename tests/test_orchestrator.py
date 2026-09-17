@@ -1278,12 +1278,38 @@ class OrchestratorTest(unittest.TestCase):
             result["text"],
             "\n".join(
                 [
-                    "REPORT ztest.\n*Variables\n\nDATA w_edidc TYPE edidc.",
+                    "REPORT ztest.",
                     "START-OF-SELECTION.\n  PERFORM read_data.\n  PERFORM process_data.\n  PERFORM display_data.",
                     "FORM read_data.\nENDFORM.\nFORM process_data.\nENDFORM.\nFORM display_data.\nENDFORM.",
                 ]
             ),
         )
+        assembly_diagnostics = result["final_assembly"]["diagnostics"]
+        self.assertEqual("Python", assembly_diagnostics["assembler_selected"])
+        self.assertEqual(
+            ["declarations", "database_read_forms", "processing_form", "output_forms", "main_program_flow"],
+            [chunk["name"] for chunk in assembly_diagnostics["chunks_received"]],
+        )
+        self.assertEqual(
+            ["global_declarations", "main_event", "forms"],
+            [section["section"] for section in assembly_diagnostics["assembly_order"]],
+        )
+        self.assertEqual(
+            [
+                {
+                    "name": "declarations",
+                    "reason": "main event statements in declarations chunk",
+                    "statement_units": 1,
+                },
+                {
+                    "name": "declarations",
+                    "reason": "FORM routines in declarations chunk",
+                    "statement_units": 1,
+                },
+            ],
+            assembly_diagnostics["unplaced_chunks"],
+        )
+        self.assertGreater(assembly_diagnostics["final_assembled_source_length"], 0)
 
     def test_selection_screen_declarations_are_generated_from_structured_contract_not_llm_chunk(self):
         responses = {
@@ -1578,6 +1604,51 @@ class OrchestratorTest(unittest.TestCase):
 
         self.assertEqual(1, assembled.lower().count("begin of t_output"))
         self.assertIn("START-OF-SELECTION.", assembled)
+
+    def test_app_assembly_uses_actual_generated_chunks_without_synthetic_skeleton(self):
+        assembled = assemble_abap_chunks(
+            [
+                {
+                    "name": "declarations",
+                    "text": "\n".join(
+                        [
+                            "REPORT zactual.",
+                            "DATA gt_rows TYPE STANDARD TABLE OF mara.",
+                            "DATA gs_row TYPE mara.",
+                        ]
+                    ),
+                },
+                {
+                    "name": "database_read_forms",
+                    "text": "FORM read_mara.\n  SELECT * FROM mara INTO TABLE gt_rows.\nENDFORM.",
+                },
+                {
+                    "name": "processing_form",
+                    "text": "FORM process_rows.\n  LOOP AT gt_rows INTO gs_row.\n  ENDLOOP.\nENDFORM.",
+                },
+                {
+                    "name": "output_forms",
+                    "text": "FORM output_rows.\n  LOOP AT gt_rows INTO gs_row.\n    WRITE: / gs_row-matnr.\n  ENDLOOP.\nENDFORM.",
+                },
+                {
+                    "name": "main_program_flow",
+                    "text": "START-OF-SELECTION.\n  PERFORM read_mara.\n  PERFORM process_rows.\n  PERFORM output_rows.",
+                },
+            ],
+            final_assembly_mode="app",
+        )
+
+        self.assertIn("REPORT zactual.", assembled)
+        self.assertIn("DATA gt_rows TYPE STANDARD TABLE OF mara.", assembled)
+        self.assertIn("FORM read_mara.", assembled)
+        self.assertIn("FORM process_rows.", assembled)
+        self.assertIn("FORM output_rows.", assembled)
+        self.assertIn("PERFORM read_mara.", assembled)
+        self.assertNotIn("REPORT z_program.", assembled)
+        self.assertNotIn("FORM process_data.\nENDFORM.", assembled)
+        self.assertNotIn("WRITE: / sy-uline.", assembled)
+        self.assertLess(assembled.index("DATA gt_rows"), assembled.index("START-OF-SELECTION."))
+        self.assertLess(assembled.index("START-OF-SELECTION."), assembled.index("FORM read_mara."))
 
     def test_llm_final_assembly_mode_uses_final_model_call(self):
         prompts = []
@@ -4200,6 +4271,73 @@ class OrchestratorTest(unittest.TestCase):
 
         self.assertIn("PROCESSING_DYNAMIC_RUNTIME_ACCESS_MISSING", [issue["rule_id"] for issue in static_issues])
         self.assertNotIn("PROCESSING_DYNAMIC_RUNTIME_ACCESS_MISSING", [issue["rule_id"] for issue in dynamic_issues])
+
+    def test_dynamic_runtime_pseudo_callable_is_normalized_to_descriptive_step(self):
+        plan = {
+            "processing_steps": [
+                {
+                    "operation": "CALL_STATIC_METHOD",
+                    "class": "runtime_type_information",
+                    "method": "discover_structure",
+                    "input_parameters": [{"parameter": "source", "value": "assigned_internal_table"}],
+                    "output_parameters": [{"parameter": "result", "value": "runtime_structure"}],
+                    "receiving_parameter": "runtime_structure",
+                    "data_object": "assigned_internal_table",
+                    "derived_or_modified_value": "runtime_structure",
+                    "dynamic_runtime_operation": "Discover the runtime structure of the dynamically assigned internal table.",
+                }
+            ]
+        }
+
+        normalized = normalize_processing_plan(plan, callable_metadata={"callable_signatures": {}})
+        step = normalized["processing_steps"][0]
+        validation = validate_processing_plan(
+            normalized,
+            callable_metadata={"callable_signatures": {}},
+        )
+
+        self.assertEqual(step["operation"], "DERIVE")
+        self.assertEqual(step["target"], "runtime_structure")
+        self.assertIn("runtime structure", step["expression"].lower())
+        self.assertIn("assigned_internal_table", step["sources"])
+        self.assertTrue(validation["valid"])
+        self.assertEqual([], validation["errors"])
+
+    def test_dynamic_runtime_state_references_do_not_require_ddic_contract(self):
+        plan = {
+            "processing_steps": [
+                {
+                    "operation": "LOOP",
+                    "source": "runtime_components",
+                    "into": "runtime_component",
+                    "iteration_scope": "runtime_structure_components",
+                    "dynamic_runtime_operation": "Iterate over runtime structure components.",
+                    "steps": [
+                        {
+                            "operation": "MOVE",
+                            "source": "runtime_component-name",
+                            "target": "field_name",
+                            "dynamic_runtime_operation": "Use the runtime component name as the column header.",
+                        }
+                    ],
+                },
+                {
+                    "operation": "READ",
+                    "source": "headers",
+                    "into": "header_value",
+                    "conditions": [
+                        {"left": "header_value-column_index", "operator": "=", "right": "runtime_component-index"}
+                    ],
+                    "iteration_scope": "runtime_structure_components",
+                    "dynamic_runtime_operation": "Retrieve the dynamic header aligned with the current runtime component.",
+                },
+            ]
+        }
+
+        validation = validate_processing_plan(plan)
+
+        self.assertTrue(validation["valid"])
+        self.assertEqual([], validation["errors"])
 
     def test_output_requirement_rejects_empty_or_disconnected_output_forms(self):
         source = (

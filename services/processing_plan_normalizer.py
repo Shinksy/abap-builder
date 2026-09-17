@@ -217,6 +217,9 @@ def normalize_processing_step(item, index, context, path=None):
         if not name:
             record_processing_step_rejection(context.get("diagnostics"), path, item, f"{operation} step is missing callable identity", "normalize_processing_step")
             return None
+        pseudo_step = normalize_dynamic_runtime_pseudo_callable(item, operation, name, context, path)
+        if pseudo_step:
+            return pseudo_step
         apply_callable_step_identity(step, item, operation, name, context)
         mappings = normalize_callable_mappings(item, name, context)
         step["input_parameters"] = mappings["input_parameters"]
@@ -246,6 +249,127 @@ def normalize_processing_step(item, index, context, path=None):
             step[key] = normalize_plan_reference(value, context) if key in {"source", "target", "into"} else str(value).strip()
     record_processing_step_modification(context.get("diagnostics"), path, item, step, f"normalized {operation} scalar fields", "normalize_processing_step")
     return step
+
+
+def normalize_dynamic_runtime_pseudo_callable(item, operation, callable_name, context, path=None):
+    if verified_callable_identity_exists(callable_name, context):
+        return None
+    if not step_describes_dynamic_runtime_behavior(item, callable_name):
+        return None
+    target = dynamic_runtime_pseudo_callable_target(item, context)
+    if not target:
+        record_processing_step_rejection(
+            context.get("diagnostics"),
+            path,
+            item,
+            f"{operation} dynamic-runtime pseudo-callable is missing a result target",
+            "normalize_processing_step",
+        )
+        return None
+    expression = dynamic_runtime_pseudo_callable_expression(item, callable_name)
+    sources = dynamic_runtime_pseudo_callable_sources(item, context)
+    step = {
+        "step": item.get("step") if isinstance(item.get("step"), int) else 0,
+        "operation": "DERIVE",
+        "target": target,
+        "expression": expression,
+        "sources": sources,
+    }
+    copy_processing_step_technical_details(step, item)
+    if "dynamic_runtime_operation" not in step:
+        step["dynamic_runtime_operation"] = expression
+    record_processing_step_modification(
+        context.get("diagnostics"),
+        path,
+        item,
+        step,
+        f"converted unverified dynamic-runtime pseudo-callable {callable_name} to descriptive DERIVE step",
+        "normalize_processing_step",
+    )
+    return step
+
+
+def verified_callable_identity_exists(callable_name, context):
+    name = str(callable_name or "").strip().upper()
+    if not name:
+        return False
+    identities = {str(value or "").upper() for value in (context or {}).get("callable_identities") or []}
+    directions = {
+        str(key[0] if isinstance(key, tuple) else key or "").upper()
+        for key in ((context or {}).get("callable_directions") or {})
+    }
+    return name in identities or name in directions
+
+
+def step_describes_dynamic_runtime_behavior(item, callable_name=None):
+    text = " ".join(
+        str(value or "")
+        for value in (
+            callable_name,
+            (item or {}).get("dynamic_runtime_operation"),
+            (item or {}).get("technical_details"),
+            (item or {}).get("data_object"),
+            (item or {}).get("derived_or_modified_value"),
+        )
+    ).lower()
+    return bool(
+        re.search(r"\b(dynamic|runtime|component|structure|field-symbol|assigned internal table)\b", text)
+        and re.search(r"\b(discover|determine|access|assign|component|structure|runtime)\b", text)
+    )
+
+
+def dynamic_runtime_pseudo_callable_target(item, context):
+    returned_key, returned_value = normalize_callable_returned_value(item, context)
+    if returned_value:
+        return returned_value
+    for value in callable_mapping_values((item or {}).get("output_parameters")):
+        target = normalize_plan_reference(value, context, role="target")
+        if target:
+            return target
+    for key in ("target", "into", "derived_or_modified_value", "result"):
+        target = normalize_plan_reference((item or {}).get(key), context, role="target")
+        if target:
+            return target
+    return ""
+
+
+def dynamic_runtime_pseudo_callable_expression(item, callable_name):
+    for key in ("dynamic_runtime_operation", "technical_details", "expression", "derived_or_modified_value"):
+        text = str((item or {}).get(key) or "").strip()
+        if text:
+            return text
+    return str(callable_name or "dynamic runtime operation").replace("=>", " ").replace("_", " ").strip()
+
+
+def dynamic_runtime_pseudo_callable_sources(item, context):
+    values = []
+    values.extend(callable_mapping_values((item or {}).get("input_parameters")))
+    for key in ("sources", "source", "data_object"):
+        value = (item or {}).get(key)
+        if isinstance(value, list):
+            values.extend(value)
+        elif value:
+            values.append(value)
+    normalized = []
+    for value in values:
+        source = normalize_plan_reference(value, context, role="source")
+        if source and source not in normalized:
+            normalized.append(source)
+    return normalized
+
+
+def callable_mapping_values(value):
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            if isinstance(item, dict):
+                result.append(item.get("value") or item.get("target") or item.get("source") or item.get("result"))
+            elif item:
+                result.append(item)
+        return result
+    return []
 
 
 def copy_processing_step_technical_details(step, item):

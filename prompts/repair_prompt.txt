@@ -20,6 +20,20 @@ Return the complete corrected ABAP source only. Do not use Markdown fences.
 - After making the repairs, internally verify that every supplied normalized SAP syntax error has been addressed before returning the complete source.
 </general_repair_rules>
 
+<identifier_repair_rules>
+When SAP reports that a locally generated identifier is invalid because of its length, syntax, or naming restrictions:
+
+- Replace the invalid local identifier with a valid classical SAP ECC identifier.
+- Keep the replacement identifier within the identifier-length limit reported or required by SAP.
+- Preserve the meaning of the original identifier using a concise name consistent with the existing naming convention.
+- Update the declaration and every reference to that same local identifier consistently throughout the complete program.
+- Do not rename unrelated identifiers.
+- Do not change program logic while renaming the identifier.
+- Apply this rule to locally generated variables, internal tables, work areas, field symbols, types, constants, parameters, select-options, and other local identifiers when applicable.
+- Do not shorten, rename, or alter external SAP identifiers such as DDIC objects, DDIC fields, function modules, classes, methods, or other verified SAP objects unless the SAP diagnostic specifically requires that identifier to be changed.
+- Never guess a replacement external SAP identifier.
+</identifier_repair_rules>
+
 <processing_plan_operation_rules>
 Processing-plan operation names such as LOOP, READ, MOVE, CALCULATE, DERIVE, TRANSFORM, AGGREGATE, COUNT, AVERAGE, PERCENTAGE, CLEAR, APPEND, and CONCATENATE are semantic plan operations, not literal ABAP keywords to copy into the repaired source.
 

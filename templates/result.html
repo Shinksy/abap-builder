@@ -373,6 +373,45 @@
           {% endif %}
         </details>
         <details class="validation-panel">
+          <summary>Chunk Processing Data</summary>
+          {% if chunk_processing_panels %}
+            <div class="chunk-diagnostics">
+              {% for panel in chunk_processing_panels %}
+                <details class="chunk-panel">
+                  <summary class="chunk-summary">
+                    <span class="chunk-title-stack">
+                      <span>{{ panel.name }}</span>
+                      {% if panel.subtitle %}
+                        <span class="chunk-subtitle">{{ panel.subtitle }}</span>
+                      {% endif %}
+                    </span>
+                    <span class="chunk-duration">
+                      {% if panel.duration_seconds is number %}
+                        {{ "%.2f"|format(panel.duration_seconds) }}s
+                      {% else %}
+                        Time unavailable
+                      {% endif %}
+                    </span>
+                  </summary>
+                  <dl>
+                    <dt>Chunk prompt instructions</dt>
+                    <dd><pre><code>{{ panel.prompt or "None" }}</code></pre></dd>
+                    <dt>JSON context used for this chunk</dt>
+                    <dd>
+                      <details class="code-panel">
+                        <summary>Structured JSON</summary>
+                        <pre><code>{{ panel.context_json|tojson(indent=2) }}</code></pre>
+                      </details>
+                    </dd>
+                  </dl>
+                </details>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p>No chunk processing data recorded.</p>
+          {% endif %}
+        </details>
+        <details class="validation-panel">
           <summary>Developer Diagnostics</summary>
           {% set diagnostic_model_settings = metrics.get("model_settings") or (abap_generation_diagnostics.get("model_settings") if abap_generation_diagnostics else {}) or {} %}
           {% if diagnostic_model_settings %}
@@ -486,7 +525,7 @@
                         </details>
                       </dd>
                     {% endif %}
-                    {% set ddic_filter = chunk.get("ddic_metadata_filter", {}) %}
+                    {% set ddic_filter = chunk.get("ddic_metadata_filter") or {} %}
                     <dt>Fields extracted from the functional specification</dt>
                     <dd>{{ ddic_filter.get("fields_extracted_from_specification", [])|join(", ") if ddic_filter.get("fields_extracted_from_specification") else "None" }}</dd>
                     <dt>Matched SAP metadata fields</dt>

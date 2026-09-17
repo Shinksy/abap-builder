@@ -37,6 +37,8 @@ STAGE_ALIASES = {
     "processing_plan_approved": ("Extracting processing plan", 34),
     "processing_plan_rejected": ("Extracting processing plan", 34),
     "generating_abap": ("Processing chunks", 35),
+    "awaiting_sap_syntax_decision": ("Running SAP syntax check", 95),
+    "sap_syntax_repair_user_authorized": ("Repairing SAP syntax errors", 93),
 }
 STAGE_PERCENTAGES = dict(PROGRESS_STAGES)
 STAGE_PERCENTAGES.update({alias: percent for alias, (_display_name, percent) in STAGE_ALIASES.items()})

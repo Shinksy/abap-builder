@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SAP Syntax Repair Decision - SAP AI Assistant Next</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version) }}">
+  </head>
+  <body>
+    <nav class="app-nav" aria-label="Main navigation">
+      <a href="{{ url_for('home') }}">New</a>
+      <a href="{{ url_for('jobs') }}">Jobs</a>
+    </nav>
+    <main class="page">
+      <section class="panel">
+        <h1>SAP Syntax Repair Decision</h1>
+        <p>SAP still reports a syntax error after the configured automatic repair attempts.</p>
+
+        {% if decision.warning %}
+          <p class="status-callout warning-callout">{{ decision.warning }}</p>
+        {% endif %}
+
+        <dl class="summary-list">
+          <dt>Total ABAP source line count</dt>
+          <dd>{{ decision.total_source_lines }}</dd>
+
+          <dt>Current SAP syntax error line number</dt>
+          <dd>{{ decision.current_error_line or "Unknown" }}</dd>
+
+          <dt>Error position</dt>
+          <dd>
+            {% if decision.current_error_position_percent is not none %}
+              {{ "%.2f"|format(decision.current_error_position_percent) }}% through source
+            {% else %}
+              Unknown
+            {% endif %}
+          </dd>
+
+          <dt>Current SAP syntax error message</dt>
+          <dd>{{ decision.current_error_message or "SAP returned an empty syntax error message." }}</dd>
+
+          <dt>Total SAP syntax-check attempts performed</dt>
+          <dd>{{ decision.syntax_check_attempts }}</dd>
+
+          {% if decision.previous_error_line %}
+            <dt>Previous SAP syntax error line number</dt>
+            <dd>{{ decision.previous_error_line }}</dd>
+
+            <dt>Previous error position</dt>
+            <dd>{{ "%.2f"|format(decision.previous_error_position_percent) }}% through source</dd>
+          {% endif %}
+        </dl>
+
+        <form method="post" class="button-row">
+          <button type="submit" name="action" value="run_another">Run Another Syntax Repair</button>
+          <button type="submit" name="action" value="continue" class="secondary-button">Continue With Syntax Error</button>
+        </form>
+
+        <p class="job-id">Job ID: {{ job_id }}</p>
+        <p><a href="{{ url_for('progress', job_id=job_id) }}">Back to progress</a></p>
+      </section>
+    </main>
+  </body>
+</html>

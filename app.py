@@ -1,6 +1,7 @@
 import json
 import re
 from pathlib import Path
+from threading import Thread
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
@@ -49,9 +50,12 @@ from services.create_abap import (
     load_processing_plan_context,
     load_processing_plan_proposal,
     load_sap_syntax_check,
+    load_sap_syntax_decision,
     load_validation_issues,
     record_post_generation_stage,
     reject_processing_plan_for_job,
+    continue_with_sap_syntax_error,
+    run_user_authorized_sap_syntax_repair,
     save_post_generation_diagnostics,
     start_create_abap_job,
 )
@@ -446,6 +450,9 @@ def create_app(config_overrides=None):
         if progress_payload.get("status") == "Awaiting Review":
             progress_payload["review_url"] = review_url_for_job(jobs_folder, job_id)
             progress_payload["review_label"] = review_label_for_job(jobs_folder, job_id)
+            if pending_sap_syntax_decision(jobs_folder, job_id):
+                progress_payload["syntax_repair_decision_url"] = url_for("sap_syntax_decision", job_id=job_id)
+                return jsonify(progress_payload)
             if (
                 (jobs_folder / job_id / "functional_specification_proposal.json").exists()
                 and not (jobs_folder / job_id / "accepted_functional_specification.txt").exists()
@@ -454,6 +461,49 @@ def create_app(config_overrides=None):
             elif not (jobs_folder / job_id / "enhancement_proposal.json").exists():
                 progress_payload["processing_plan_review_url"] = url_for("processing_plan_review", job_id=job_id)
         return jsonify(progress_payload)
+
+    @app.get("/syntax-repair-decision/<job_id>")
+    def sap_syntax_decision(job_id):
+        decision = load_sap_syntax_decision(jobs_folder, job_id)
+        if not decision or decision.get("status") != "pending":
+            abort(404)
+        return render_template(
+            "syntax_repair_decision.html",
+            job_id=job_id,
+            decision=decision,
+            progress=get_progress(jobs_folder, job_id),
+        )
+
+    @app.post("/syntax-repair-decision/<job_id>")
+    def sap_syntax_decision_action(job_id):
+        decision = load_sap_syntax_decision(jobs_folder, job_id)
+        if not decision or decision.get("status") != "pending":
+            abort(404)
+        action = request.form.get("action")
+        if action == "run_another":
+            update_progress(
+                jobs_folder,
+                job_id,
+                "Running",
+                "Running user-authorized SAP syntax repair...",
+                stage="sap_syntax_repair_user_authorized",
+            )
+            Thread(
+                target=run_user_authorized_sap_syntax_repair,
+                kwargs={
+                    "jobs_folder": jobs_folder,
+                    "job_id": job_id,
+                    "sap_syntax_checker": app.config.get("SAP_SYNTAX_CHECKER"),
+                    "code_review_repairer": app.config.get("CODE_REVIEW_REPAIRER"),
+                    "callable_metadata": (load_processing_plan_context(jobs_folder, job_id) or {}).get("callable_metadata") or {},
+                },
+                daemon=True,
+            ).start()
+            return redirect(url_for("progress", job_id=job_id))
+        if action == "continue":
+            continue_with_sap_syntax_error(jobs_folder, job_id)
+            return redirect(url_for("result", job_id=job_id))
+        abort(400)
 
     @app.get("/functional-specification/<job_id>")
     def functional_spec_review(job_id):
@@ -691,6 +741,7 @@ def create_app(config_overrides=None):
             sap_syntax_check=load_sap_syntax_check(jobs_folder, job_id, options),
             abap_generation_diagnostics=abap_generation_diagnostics,
             abap_generation_chunks=abap_generation_chunks,
+            chunk_processing_panels=chunk_processing_panels(abap_generation_chunks),
         )
 
     @app.get("/download/<job_id>")
@@ -760,6 +811,8 @@ def is_abap_result_ready(jobs_folder, job_id):
 def review_url_for_job(jobs_folder, job_id):
     job_folder = Path(jobs_folder) / job_id
     rerun_metadata = load_rerun_metadata(job_folder)
+    if pending_sap_syntax_decision(jobs_folder, job_id):
+        return url_for("sap_syntax_decision", job_id=job_id)
     if (
         (job_folder / "functional_specification_proposal.json").exists()
         and not (job_folder / "accepted_functional_specification.txt").exists()
@@ -777,6 +830,8 @@ def review_url_for_job(jobs_folder, job_id):
 def review_label_for_job(jobs_folder, job_id):
     job_folder = Path(jobs_folder) / job_id
     rerun_metadata = load_rerun_metadata(job_folder)
+    if pending_sap_syntax_decision(jobs_folder, job_id):
+        return "Review SAP syntax error"
     if (
         (job_folder / "functional_specification_proposal.json").exists()
         and not (job_folder / "accepted_functional_specification.txt").exists()
@@ -789,6 +844,10 @@ def review_label_for_job(jobs_folder, job_id):
     if rerun_metadata.get("mode") == "create_abap" and not (job_folder / "processing_plan_proposal.json").exists():
         return "Review generation details"
     return "Review processing plan"
+
+
+def pending_sap_syntax_decision(jobs_folder, job_id):
+    return load_sap_syntax_decision(jobs_folder, job_id).get("status") == "pending"
 
 
 def load_enhancement_rerun_context(jobs_folder, job_id):
@@ -987,6 +1046,51 @@ def load_metadata_export_template():
         return path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def chunk_processing_panels(chunks):
+    panels = []
+    for chunk in chunks or []:
+        if not isinstance(chunk, dict):
+            continue
+        context_json = {
+            "chunk_name": chunk.get("name"),
+            "instruction": chunk.get("instruction"),
+            "subtitle": chunk.get("subtitle"),
+            "declaration_requirements": normalized_chunk_declaration_requirements(
+                chunk.get("declaration_requirements")
+            ),
+            "declaration_naming_contract": chunk.get("declaration_naming_contract"),
+            "processing_plan": normalized_chunk_processing_plan(chunk.get("processing_plan")),
+            "ddic_metadata_filter": chunk.get("ddic_metadata_filter"),
+            "filtered_ddic_metadata": chunk.get("filtered_ddic_metadata"),
+        }
+        panels.append(
+            {
+                "name": chunk.get("name") or "Unnamed chunk",
+                "subtitle": chunk.get("subtitle"),
+                "duration_seconds": chunk.get("duration_seconds"),
+                "prompt": chunk.get("prompt") or "",
+                "context_json": context_json,
+            }
+        )
+    return panels
+
+
+def normalized_chunk_declaration_requirements(value):
+    if not isinstance(value, dict):
+        return value
+    if "requirements" in value:
+        return value.get("requirements")
+    return value
+
+
+def normalized_chunk_processing_plan(value):
+    if not isinstance(value, dict):
+        return value
+    if "plan" in value:
+        return value.get("plan")
+    return value
 
 
 def static_asset_version(filename):

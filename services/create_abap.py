@@ -1,4 +1,6 @@
 import json
+import hashlib
+import os
 import re
 import time
 from pathlib import Path
@@ -65,6 +67,7 @@ from services.orchestrator import (
     processing_plan_for_prompt,
     processing_plan_payload,
     required_form_global_variables,
+    processing_plan_requires_dynamic_runtime_access,
     processing_step_subtitle,
     validate_generated_processing_completeness,
 )
@@ -81,6 +84,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPORT_SKELETON_PATH = PROJECT_ROOT / "templates" / "report_skeleton.abap"
 DATABASE_READ_PATTERNS_PATH = PROJECT_ROOT / "templates" / "database_read_patterns.abap"
 SAP_SYNTAX_REPAIR_PROMPT_PATH = PROJECT_ROOT / "prompts" / "repair_prompt.txt"
+SAP_SYNTAX_CURRENT_SOURCE_ARTIFACT = "sap_syntax_current_source.abap"
 POST_GENERATION_INVALID_DDIC_FRAGMENTS = {"END", "LINE", "NON", "START", "SY"}
 POST_GENERATION_PROCESSING_DIAGNOSTIC = "post_generation_processing.json"
 PROCESSING_PLAN_PROPOSAL_ARTIFACT = "processing_plan_proposal.json"
@@ -89,6 +93,11 @@ PROCESSING_PLAN_CONTEXT_ARTIFACT = "processing_plan_context.json"
 PROCESSING_PLAN_FAILURE_ARTIFACT = "processing_plan_extraction_failure.json"
 PROCESSING_PLAN_LLM_SOURCE_ARTIFACT = "processing_plan_llm_source.txt"
 PROCESSING_PLAN_DIAGNOSTICS_ARTIFACT = "processing_plan_diagnostics.json"
+SAP_SYNTAX_DECISION_ARTIFACT = "sap_syntax_decision.json"
+
+
+class SapSyntaxDecisionRequired(RuntimeError):
+    pass
 
 
 def start_create_abap_job(
@@ -452,17 +461,6 @@ def run_create_abap(
         save_ddic_metadata(job_folder, ddic_metadata)
         save_fix_summary(job_folder, fix_result)
         save_validation_issues(job_folder, validation_issues)
-        sap_syntax_started_at = time.monotonic()
-        final_abap = maybe_run_sap_syntax_check(
-            job_folder,
-            jobs_folder,
-            job_id,
-            assembled_abap,
-            sap_syntax_checker,
-            code_review_repairer=code_review_repairer,
-            callable_metadata=callable_metadata,
-            post_generation_diagnostics=post_generation_diagnostics,
-        )
         final_abap = ensure_database_read_declarations(
             final_abap,
             prompt_text,
@@ -487,7 +485,6 @@ def run_create_abap(
         final_abap = apply_deterministic_file_input_support(final_abap, source_text)
         final_abap = apply_final_requirement_repairs(final_abap, source_text)
         final_abap = ensure_standard_report_header(final_abap)
-        add_section_duration(section_durations, "sap_syntax_check", time.monotonic() - sap_syntax_started_at)
         record_post_generation_stage(post_generation_diagnostics, "complete_source_immediately_before_final_save", final_abap)
         (job_folder / "generated.abap").write_text(final_abap, encoding="utf-8")
         validation_issues = merge_validation_issues(
@@ -504,6 +501,20 @@ def run_create_abap(
             ),
         )
         save_validation_issues(job_folder, validation_issues)
+        sap_syntax_started_at = time.monotonic()
+        final_abap = maybe_run_sap_syntax_check(
+            job_folder,
+            jobs_folder,
+            job_id,
+            final_abap,
+            sap_syntax_checker,
+            code_review_repairer=code_review_repairer,
+            callable_metadata=callable_metadata,
+            post_generation_diagnostics=post_generation_diagnostics,
+        )
+        add_section_duration(section_durations, "sap_syntax_check", time.monotonic() - sap_syntax_started_at)
+        record_post_generation_stage(post_generation_diagnostics, "complete_source_after_optional_sap_syntax_check", final_abap)
+        (job_folder / "generated.abap").write_text(final_abap, encoding="utf-8")
         save_post_generation_diagnostics(job_folder, post_generation_diagnostics)
         cost_breakdown = cost_breakdown_from_job_artifacts(job_folder)
         if not cost_breakdown_has_entries(cost_breakdown):
@@ -521,6 +532,8 @@ def run_create_abap(
         )
         save_metrics(job_folder, metrics)
         update_progress(jobs_folder, job_id, "Complete", "ABAP generation complete.", stage="Complete")
+    except SapSyntaxDecisionRequired:
+        pass
     except Exception as exc:
         update_progress(jobs_folder, job_id, "Error", str(exc), stage="Error")
     finally:
@@ -745,6 +758,15 @@ def specification_requests_output_file(source_text):
 def processing_plan_variable_contract(plan, prompt_text=None, source_text=None, declaration_requirements=None):
     declaration_text = declaration_requirements_for_prompt(declaration_requirements) if isinstance(declaration_requirements, dict) else str(declaration_requirements or "")
     variables = []
+    for item in dynamic_runtime_review_variables(plan, source_text=source_text):
+        add_review_variable(
+            variables,
+            item.get("name"),
+            item.get("kind"),
+            item.get("declaration"),
+            item.get("source"),
+            fields=item.get("fields"),
+        )
     for item in required_form_global_variables(
         prompt_text,
         source_text=source_text,
@@ -786,6 +808,155 @@ def processing_plan_variable_contract(plan, prompt_text=None, source_text=None, 
     return {
         "variables_to_define": sorted(variables, key=lambda item: item["name"].lower()),
         "used_but_not_defined": undefined,
+    }
+
+
+def dynamic_runtime_review_variables(plan, source_text=None):
+    if not processing_plan_requires_dynamic_runtime_access(plan, source_text=source_text):
+        return []
+    return [
+        {
+            "name": "ty_column",
+            "kind": "Type",
+            "declaration": "TYPES ty_column.",
+            "source": "Dynamic runtime contract",
+            "fields": [
+                {"name": "name", "definition": "name TYPE string"},
+                {"name": "width", "definition": "width TYPE i"},
+            ],
+        },
+        {
+            "name": "t_components",
+            "kind": "Global",
+            "declaration": "DATA t_components TYPE abap_component_tab.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "t_columns",
+            "kind": "Global",
+            "declaration": "DATA t_columns TYPE STANDARD TABLE OF ty_column.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "st_component",
+            "kind": "Global",
+            "declaration": "DATA st_component TYPE abap_componentdescr.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "st_column",
+            "kind": "Global",
+            "declaration": "DATA st_column TYPE ty_column.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "w_type_descr",
+            "kind": "Global",
+            "declaration": "DATA w_type_descr TYPE REF TO cl_abap_typedescr.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "w_table_descr",
+            "kind": "Global",
+            "declaration": "DATA w_table_descr TYPE REF TO cl_abap_tabledescr.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "w_line_descr",
+            "kind": "Global",
+            "declaration": "DATA w_line_descr TYPE REF TO cl_abap_typedescr.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "w_struct_descr",
+            "kind": "Global",
+            "declaration": "DATA w_struct_descr TYPE REF TO cl_abap_structdescr.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "w_value",
+            "kind": "Global",
+            "declaration": "DATA w_value TYPE c LENGTH 255.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "w_length",
+            "kind": "Global",
+            "declaration": "DATA w_length TYPE i.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "w_width",
+            "kind": "Global",
+            "declaration": "DATA w_width TYPE i.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "t_dynamic",
+            "kind": "Field-symbol",
+            "declaration": "FIELD-SYMBOLS <t_dynamic> TYPE ANY TABLE.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "st_row",
+            "kind": "Field-symbol",
+            "declaration": "FIELD-SYMBOLS <st_row> TYPE any.",
+            "source": "Dynamic runtime contract",
+        },
+        {
+            "name": "w_field",
+            "kind": "Field-symbol",
+            "declaration": "FIELD-SYMBOLS <w_field> TYPE any.",
+            "source": "Dynamic runtime contract",
+        },
+    ]
+
+
+def processing_plan_variables_to_define(plan):
+    variables = set()
+    collect_processing_plan_variables_to_define(plan, variables)
+    return sorted(variables, key=str.lower)
+
+
+def collect_processing_plan_variables_to_define(value, variables, key=None):
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            collect_processing_plan_variables_to_define(item_value, variables, key=item_key)
+    elif isinstance(value, list):
+        for item in value:
+            collect_processing_plan_variables_to_define(item, variables, key=key)
+    elif key in {"data_object", "target", "derived_or_modified_value"}:
+        for name in review_variable_names_from_plan_value(value):
+            if is_semantic_processing_variable_name(name):
+                variables.add(name)
+
+
+def review_variable_names_from_plan_value(value):
+    text = str(value or "").strip()
+    if not text:
+        return []
+    candidates = re.split(r"\s*(?:,|/|\band\b)\s*", text, flags=re.IGNORECASE)
+    names = []
+    for candidate in candidates:
+        name = normalize_review_variable_name(candidate)
+        if name:
+            names.append(name)
+    return names
+
+
+def is_semantic_processing_variable_name(name):
+    text = str(name or "")
+    if not text:
+        return False
+    if looks_like_generated_variable_name(text):
+        return text.lower().startswith("fs_")
+    return "_" in text or text.lower() in {
+        "headers",
+        "component",
+        "components",
+        "header",
+        "width",
+        "widths",
     }
 
 
@@ -855,6 +1026,8 @@ def collect_processing_plan_variable_references(value, references, key=None):
         "receiving_parameter",
         "returning_parameter",
     }:
+        if is_dynamic_runtime_field_symbol_reference(value):
+            return
         name = normalize_review_variable_name(value)
         if name and looks_like_generated_variable_name(name):
             references.add(name)
@@ -868,6 +1041,11 @@ def normalize_review_variable_name(value):
 
 def looks_like_generated_variable_name(name):
     return bool(re.match(r"^(?:t|w|p|s|g|l|st|fs)_[A-Za-z0-9_]+$", str(name or ""), re.IGNORECASE))
+
+
+def is_dynamic_runtime_field_symbol_reference(value):
+    text = str(value or "").strip()
+    return bool(re.match(r"^<[A-Za-z_]\w*>(?:[-.][A-Za-z_]\w*)?$", text))
 
 
 def processing_plan_review_errors(review_candidate):
@@ -1157,7 +1335,11 @@ def ensure_processing_plan_proposal_variable_contract(payload, jobs_folder, job_
     if not isinstance(payload, dict):
         return payload
     existing_contract = payload.get("variable_contract")
-    if existing_contract and processing_plan_variable_contract_has_type_fields(existing_contract):
+    if (
+        existing_contract
+        and processing_plan_variable_contract_has_type_fields(existing_contract)
+        and not processing_plan_variable_contract_has_stale_processing_variables(existing_contract)
+    ):
         return payload
     context = load_processing_plan_context(jobs_folder, job_id)
     input_path = Path(context.get("input_path") or "")
@@ -1177,6 +1359,17 @@ def processing_plan_variable_contract_has_type_fields(variable_contract):
         return False
     for variable in variable_contract.get("variables_to_define") or []:
         if isinstance(variable, dict) and variable.get("kind") == "Type" and variable.get("fields"):
+            return True
+    return False
+
+
+def processing_plan_variable_contract_has_stale_processing_variables(variable_contract):
+    if not isinstance(variable_contract, dict):
+        return False
+    for variable in variable_contract.get("variables_to_define") or []:
+        if not isinstance(variable, dict):
+            continue
+        if variable.get("kind") == "Processing variable" or variable.get("source") == "Processing plan":
             return True
     return False
 
@@ -2010,9 +2203,7 @@ def usage_for_final_metrics(llm_result, usage, prior_usage=None):
 
 
 def calculate_cost(model_name, input_tokens, output_tokens):
-    pricing = Config.MODEL_PRICING.get(model_name, {})
-    input_rate = pricing.get("input_per_1m_tokens")
-    output_rate = pricing.get("output_per_1m_tokens")
+    input_rate, output_rate = model_pricing(model_name)
     if input_tokens is None or output_tokens is None or input_rate is None or output_rate is None:
         return {"input": None, "output": None, "total": None}
 
@@ -2023,6 +2214,51 @@ def calculate_cost(model_name, input_tokens, output_tokens):
         "output": output_cost,
         "total": input_cost + output_cost,
     }
+
+
+def model_pricing(model_name):
+    return model_cost_rate(model_name, "input"), model_cost_rate(model_name, "output")
+
+
+def model_cost_rate(model_name, direction):
+    direction = str(direction or "").strip().lower()
+    for env_name in model_cost_env_names(model_name, direction):
+        value = env_float(env_name)
+        if value is not None:
+            return value
+    pricing = Config.MODEL_PRICING.get(model_name, {})
+    return pricing.get(f"{direction}_per_1m_tokens")
+
+
+def model_cost_env_names(model_name, direction):
+    direction = str(direction or "").strip().upper()
+    model_text = str(model_name or "").strip()
+    if model_text.lower() in {"claude - sap btp", "sap_btp_claude"}:
+        return (
+            f"SAP_BTP_CLAUDE_{direction}_COST",
+            f"SAP_BTP_CLAUDE_{direction}_COST_PER_1M_TOKENS",
+        )
+    prefix = model_cost_env_prefix(model_text)
+    if not prefix:
+        return ()
+    return (
+        f"{prefix}_{direction}_COST",
+        f"{prefix}_{direction}_COST_PER_1M_TOKENS",
+    )
+
+
+def model_cost_env_prefix(model_name):
+    return "".join(char if char.isalnum() else "_" for char in str(model_name or "").upper()).strip("_")
+
+
+def env_float(name):
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def save_metrics(job_folder, metrics):
@@ -2042,11 +2278,136 @@ def save_model_settings(job_folder, model_settings):
 def load_metrics(jobs_folder, job_id):
     metrics_path = Path(jobs_folder) / job_id / "metrics.json"
     if not metrics_path.exists():
-        return {}
+        return synthesize_metrics_from_job_artifacts(metrics_path.parent)
     return normalize_metrics_for_display(
         json.loads(metrics_path.read_text(encoding="utf-8")),
         job_folder=metrics_path.parent,
     )
+
+
+def synthesize_metrics_from_job_artifacts(job_folder):
+    job_folder = Path(job_folder)
+    cost_breakdown = cost_breakdown_from_job_artifacts(job_folder)
+    if not cost_breakdown_has_entries(cost_breakdown):
+        return {}
+    by_model = cost_breakdown.get("by_model") or []
+    input_tokens = sum_int_values(row.get("input_tokens") for row in by_model)
+    output_tokens = sum_int_values(row.get("output_tokens") for row in by_model)
+    total_tokens = sum_int_values(row.get("total_tokens") for row in by_model)
+    input_cost = sum_numeric_values(row.get("estimated_input_cost") for row in by_model)
+    output_cost = sum_numeric_values(row.get("estimated_output_cost") for row in by_model)
+    total_cost = sum_numeric_values(row.get("estimated_total_cost") for row in by_model)
+    model_names = [str(row.get("model") or "") for row in by_model if row.get("model")]
+    metrics = {
+        "model": model_names[0] if len(model_names) == 1 else "Multiple models",
+        "duration_seconds": synthesized_job_duration_seconds(job_folder),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "estimated_input_cost": input_cost,
+        "estimated_output_cost": output_cost,
+        "estimated_total_cost": total_cost,
+        "prompt_characters": synthesized_prompt_characters(job_folder),
+        "specification_characters": synthesized_specification_characters(job_folder),
+        "generated_abap_characters": len(synthesized_final_abap(job_folder)),
+        "generated_abap_lines": len(synthesized_final_abap(job_folder).splitlines()) if synthesized_final_abap(job_folder) else 0,
+        "section_durations": {},
+        "model_settings": load_model_settings_artifact(job_folder),
+        "cost_breakdown": cost_breakdown,
+        "synthesized_from_artifacts": True,
+    }
+    return normalize_metrics_for_display(metrics, job_folder=job_folder)
+
+
+def sum_int_values(values):
+    total = 0
+    found = False
+    for value in values:
+        if isinstance(value, int):
+            total += value
+            found = True
+    return total if found else None
+
+
+def sum_numeric_values(values):
+    total = 0.0
+    found = False
+    for value in values:
+        if isinstance(value, (int, float)):
+            total += float(value)
+            found = True
+    return total if found else None
+
+
+def synthesized_job_duration_seconds(job_folder):
+    status_path = Path(job_folder) / "status.json"
+    if not status_path.exists():
+        return None
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = status.get("elapsed_seconds")
+    return value if isinstance(value, (int, float)) else None
+
+
+def synthesized_prompt_characters(job_folder):
+    context_path = Path(job_folder) / PROCESSING_PLAN_CONTEXT_ARTIFACT
+    if not context_path.exists():
+        return None
+    try:
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    prompt = str(context.get("prompt_text") or "")
+    return len(prompt) if prompt else None
+
+
+def synthesized_specification_characters(job_folder):
+    for filename in ("accepted_functional_specification.txt", "enhancement_specification.txt"):
+        path = Path(job_folder) / filename
+        if path.exists():
+            try:
+                return len(path.read_text(encoding="utf-8"))
+            except OSError:
+                return None
+    return None
+
+
+def synthesized_final_abap(job_folder):
+    for filename in (SAP_SYNTAX_CURRENT_SOURCE_ARTIFACT, "sap_syntax_repaired.abap", "generated.abap", "original_generated.abap"):
+        path = Path(job_folder) / filename
+        if path.exists():
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError:
+                return ""
+    return ""
+
+
+def save_sap_syntax_current_source(job_folder, source_code):
+    (Path(job_folder) / SAP_SYNTAX_CURRENT_SOURCE_ARTIFACT).write_text(
+        str(source_code or ""),
+        encoding="utf-8",
+    )
+
+
+def load_sap_syntax_current_source(job_folder):
+    current_path = Path(job_folder) / SAP_SYNTAX_CURRENT_SOURCE_ARTIFACT
+    if current_path.exists():
+        return current_path.read_text(encoding="utf-8")
+    return synthesized_final_abap(job_folder)
+
+
+def load_model_settings_artifact(job_folder):
+    path = Path(job_folder) / "model_settings.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def normalize_metrics_for_display(metrics, job_folder=None):
@@ -2163,6 +2524,22 @@ def cost_breakdown_from_job_artifacts(job_folder):
             processing_plan_diagnostics.get("model"),
             processing_plan_diagnostics.get("usage"),
         )
+    syntax_path = job_folder / "sap_syntax_check.json"
+    if syntax_path.exists():
+        try:
+            syntax_diagnostics = json.loads(syntax_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            syntax_diagnostics = {}
+        for index, repair in enumerate(syntax_diagnostics.get("repairs") or [], start=1):
+            if not isinstance(repair, dict):
+                continue
+            append_llm_cost_row(
+                rows,
+                f"sap_syntax_repair:{index}",
+                "SAP syntax repair" if index == 1 else f"SAP syntax repair {index}",
+                repair.get("model"),
+                repair.get("usage"),
+            )
     if rows:
         return build_cost_breakdown(dedupe_cost_stage_rows(rows))
     enhancement_path = job_folder / "enhancement_diagnostics.json"
@@ -2299,6 +2676,7 @@ def maybe_run_sap_syntax_check(
     options = load_job_options(jobs_folder, job_id)
     diagnostic = default_syntax_repair_flow_diagnostic(options)
     record_post_generation_stage(post_generation_diagnostics, "before_sap_syntax_check", source_code)
+    save_sap_syntax_current_source(job_folder, source_code)
     if not options.get("run_sap_syntax_check"):
         diagnostic["llm_repair_skip_reason"] = "Run SAP syntax check checkbox was not enabled."
         save_syntax_repair_flow_diagnostic(job_folder, diagnostic)
@@ -2316,6 +2694,14 @@ def maybe_run_sap_syntax_check(
     max_syntax_check_attempts = int(options.get("sap_syntax_check_attempts", 2))
     diagnostic["sap_syntax_api_called"] = bool(checker)
     diagnostic["final_abap_source_sent_to_final_sap_syntax_check"] = source_code if checker else ""
+    if checker:
+        record_sap_syntax_api_call(
+            diagnostic,
+            reason="FINAL_ASSEMBLED_SOURCE",
+            source_code=source_code,
+            source_role="final_assembled_source",
+            attempt_number=1,
+        )
     first_result = normalize_empty_sap_syntax_diagnostic_result(checker.check(source_code)) if checker else {
         "requested": True,
         "status": "unavailable",
@@ -2326,13 +2712,23 @@ def maybe_run_sap_syntax_check(
     }
     diagnostic["syntax_api_response_status"] = first_result.get("status", "")
     diagnostic["normalized_syntax_errors"] = first_result.get("errors", [])
-    syntax_check_attempts = [sap_syntax_check_attempt_payload(1, first_result)]
+    syntax_check_attempts = [
+        sap_syntax_check_attempt_payload(
+            1,
+            first_result,
+            reason="FINAL_ASSEMBLED_SOURCE",
+            source_line_count=source_line_count(source_code),
+            source_role="final_assembled_source",
+        )
+    ]
     result = {
         **first_result,
         "initial_result": first_result,
         "repair_attempted": False,
         "repair": None,
         "attempts": syntax_check_attempts,
+        "syntax_check_attempts": 1,
+        "max_syntax_check_attempts": max_syntax_check_attempts,
         "final_result": first_result,
     }
     if not syntax_errors(first_result):
@@ -2345,7 +2741,15 @@ def maybe_run_sap_syntax_check(
         diagnostic["llm_repair_skip_reason"] = "SAP syntax check attempt limit reached before LLM repair."
         save_sap_syntax_check(job_folder, result)
         save_syntax_repair_flow_diagnostic(job_folder, diagnostic)
-        require_sap_syntax_success(result)
+        pause_for_sap_syntax_decision(
+            job_folder,
+            jobs_folder,
+            job_id,
+            source_code,
+            result,
+            syntax_check_attempts,
+            max_syntax_check_attempts,
+        )
         return source_code
 
     repairer = code_review_repairer or generate_code_review_repair
@@ -2428,10 +2832,28 @@ def maybe_run_sap_syntax_check(
             f"{syntax_check_count + 1} of {max_syntax_check_attempts}...",
             stage="Running SAP syntax check",
         )
+        if checker:
+            record_sap_syntax_api_call(
+                diagnostic,
+                reason="REPAIR_ATTEMPT",
+                source_code=repaired_abap,
+                source_role="repaired_final_source",
+                attempt_number=syntax_check_count + 1,
+                repair_attempt_number=syntax_check_count,
+            )
         current_result = normalize_empty_sap_syntax_diagnostic_result(checker.check(repaired_abap)) if checker else current_result
         syntax_check_count += 1
         diagnostic["second_syntax_check_result"] = current_result
-        syntax_check_attempts.append(sap_syntax_check_attempt_payload(syntax_check_count, current_result))
+        syntax_check_attempts.append(
+            sap_syntax_check_attempt_payload(
+                syntax_check_count,
+                current_result,
+                reason="REPAIR_ATTEMPT",
+                source_line_count=source_line_count(repaired_abap),
+                source_role="repaired_final_source",
+                repair_attempt_number=syntax_check_count - 1,
+            )
+        )
         current_source = repaired_abap
         repairs.append(
             {
@@ -2465,10 +2887,150 @@ def maybe_run_sap_syntax_check(
     save_sap_syntax_check(job_folder, result)
     if repairs:
         (Path(job_folder) / "sap_syntax_repaired.abap").write_text(repaired_abap, encoding="utf-8")
+    save_sap_syntax_current_source(job_folder, repaired_abap)
     save_syntax_repair_flow_diagnostic(job_folder, diagnostic)
+    if syntax_errors(final_result):
+        pause_for_sap_syntax_decision(
+            job_folder,
+            jobs_folder,
+            job_id,
+            repaired_abap,
+            result,
+            syntax_check_attempts,
+            max_syntax_check_attempts,
+        )
     require_sap_syntax_success(result)
     record_post_generation_stage(post_generation_diagnostics, "after_sap_syntax_check", repaired_abap)
     return repaired_abap
+
+
+def pause_for_sap_syntax_decision(
+    job_folder,
+    jobs_folder,
+    job_id,
+    source_code,
+    result,
+    attempts,
+    max_syntax_check_attempts,
+):
+    decision = sap_syntax_decision_payload(
+        source_code,
+        result,
+        attempts,
+        max_syntax_check_attempts=max_syntax_check_attempts,
+    )
+    save_sap_syntax_decision(job_folder, decision)
+    update_progress(
+        jobs_folder,
+        job_id,
+        "Awaiting Review",
+        "SAP syntax check still reports an error. Choose whether to run another syntax repair or continue with the syntax error.",
+        stage="awaiting_sap_syntax_decision",
+    )
+    raise SapSyntaxDecisionRequired(sap_syntax_failure_message(result))
+
+
+def sap_syntax_decision_payload(source_code, result, attempts, max_syntax_check_attempts=None):
+    attempts = list(attempts or [])
+    final_result = (result or {}).get("final_result") if isinstance(result, dict) else None
+    current_result = final_result if isinstance(final_result, dict) else (result or {})
+    current_error = first_actionable_sap_syntax_error(current_result)
+    previous_result = previous_sap_syntax_result_from_attempts(attempts)
+    previous_error = first_actionable_sap_syntax_error(previous_result)
+    total_lines = len(str(source_code or "").splitlines())
+    current_line = sap_error_line_number(current_error)
+    previous_line = sap_error_line_number(previous_error)
+    current_percent = sap_error_position_percent(current_line, total_lines)
+    previous_percent = sap_error_position_percent(previous_line, total_lines)
+    current_signature = normalized_sap_error_signature(current_error)
+    previous_signature = normalized_sap_error_signature(previous_error)
+    no_progress = bool(current_signature and current_signature == previous_signature)
+    return {
+        "status": "pending",
+        "total_source_lines": total_lines,
+        "current_error_line": current_line,
+        "current_error_position_percent": current_percent,
+        "current_error_message": str((current_error or {}).get("message") or ""),
+        "syntax_check_attempts": len(attempts),
+        "max_syntax_check_attempts": max_syntax_check_attempts,
+        "previous_error_line": previous_line,
+        "previous_error_position_percent": previous_percent,
+        "previous_error_message": str((previous_error or {}).get("message") or ""),
+        "no_compiler_progress_detected": no_progress,
+        "warning": "No compiler progress detected since previous repair." if no_progress else "",
+        "current_sap_syntax_result": current_result,
+        "attempts": attempts,
+    }
+
+
+def first_actionable_sap_syntax_error(result):
+    errors = actionable_sap_syntax_errors(result)
+    return errors[0] if errors else None
+
+
+def previous_sap_syntax_result_from_attempts(attempts):
+    if not attempts or len(attempts) < 2:
+        return None
+    previous_attempt = attempts[-2]
+    if not isinstance(previous_attempt, dict):
+        return None
+    return {
+        "status": previous_attempt.get("status"),
+        "passed": previous_attempt.get("passed"),
+        "errors": previous_attempt.get("errors") or [],
+        "technical_message": previous_attempt.get("technical_message") or "",
+        "raw_response": previous_attempt.get("raw_response") or "",
+    }
+
+
+def sap_error_line_number(error):
+    line = (error or {}).get("line")
+    try:
+        line_number = int(line)
+    except (TypeError, ValueError):
+        return None
+    return line_number if line_number > 0 else None
+
+
+def sap_error_position_percent(line_number, total_lines):
+    if not line_number or not total_lines:
+        return None
+    return round((line_number / total_lines) * 100, 2)
+
+
+def normalized_sap_error_signature(error):
+    if not error:
+        return None
+    return {
+        "line": sap_error_line_number(error),
+        "column": (error or {}).get("column"),
+        "message": " ".join(str((error or {}).get("message") or "").split()).lower(),
+        "word": " ".join(str((error or {}).get("word") or "").split()).lower(),
+        "source_line": " ".join(str((error or {}).get("source_line") or "").split()).lower(),
+    }
+
+
+def save_sap_syntax_decision(job_folder, decision):
+    (Path(job_folder) / SAP_SYNTAX_DECISION_ARTIFACT).write_text(
+        json.dumps(decision or {}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_sap_syntax_decision(jobs_folder, job_id):
+    path = Path(jobs_folder) / job_id / SAP_SYNTAX_DECISION_ARTIFACT
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def mark_sap_syntax_decision_resolved(job_folder, status):
+    decision = load_sap_syntax_decision(Path(job_folder).parent, Path(job_folder).name)
+    decision["status"] = status
+    save_sap_syntax_decision(job_folder, decision)
 
 
 def require_sap_syntax_success(result):
@@ -2491,9 +3053,74 @@ def sap_syntax_failure_message(result):
     return f"Final SAP syntax check did not succeed ({status})."
 
 
-def sap_syntax_check_attempt_payload(number, result):
+def source_line_count(source_code):
+    return len(str(source_code or "").splitlines())
+
+
+def source_sha256(source_code):
+    return hashlib.sha256(str(source_code or "").encode("utf-8")).hexdigest()
+
+
+def syntax_repair_source_state(
+    repair_attempt_number,
+    source_before_repair,
+    repaired_source,
+    source_submitted_to_sap,
+    assembler_invoked_during_attempt=False,
+):
+    repaired_hash = source_sha256(repaired_source)
+    submitted_hash = source_sha256(source_submitted_to_sap)
+    payload = {
+        "repair_attempt_number": repair_attempt_number,
+        "source_line_count_before_repair": source_line_count(source_before_repair),
+        "repaired_source_line_count_after_repair": source_line_count(repaired_source),
+        "source_line_count_submitted_to_sap": source_line_count(source_submitted_to_sap),
+        "assembler_invoked_during_attempt": bool(assembler_invoked_during_attempt),
+        "source_hash_before_repair": source_sha256(source_before_repair),
+        "repaired_source_hash": repaired_hash,
+        "source_hash_submitted_to_sap": submitted_hash,
+        "repaired_source_hash_matches_submitted_source_hash": repaired_hash == submitted_hash,
+        "assembler_warning": "",
+    }
+    if assembler_invoked_during_attempt:
+        payload["assembler_warning"] = (
+            "Assembler was invoked after initial final assembly while the job was in syntax-repair state."
+        )
+    return payload
+
+
+def record_sap_syntax_api_call(
+    diagnostic,
+    reason,
+    source_code,
+    source_role,
+    attempt_number=None,
+    repair_attempt_number=None,
+):
+    if diagnostic is None:
+        return
+    calls = diagnostic.setdefault("sap_syntax_api_calls", [])
+    calls.append(
+        {
+            "reason": reason,
+            "source_line_count": source_line_count(source_code),
+            "source_role": source_role,
+            "attempt_number": attempt_number,
+            "repair_attempt_number": repair_attempt_number,
+        }
+    )
+
+
+def sap_syntax_check_attempt_payload(
+    number,
+    result,
+    reason=None,
+    source_line_count=None,
+    source_role=None,
+    repair_attempt_number=None,
+):
     result = normalize_empty_sap_syntax_diagnostic_result(result or {})
-    return {
+    payload = {
         "number": number,
         "status": result.get("status", "unknown"),
         "passed": bool(result.get("passed")),
@@ -2501,6 +3128,21 @@ def sap_syntax_check_attempt_payload(number, result):
         "technical_message": result.get("technical_message") or "",
         "raw_response": result.get("raw_response") or "",
     }
+    reason = reason if reason is not None else result.get("reason")
+    source_line_count = source_line_count if source_line_count is not None else result.get("source_line_count")
+    source_role = source_role if source_role is not None else result.get("source_role")
+    repair_attempt_number = (
+        repair_attempt_number if repair_attempt_number is not None else result.get("repair_attempt_number")
+    )
+    if reason:
+        payload["reason"] = reason
+    if source_line_count is not None:
+        payload["source_line_count"] = source_line_count
+    if source_role:
+        payload["source_role"] = source_role
+    if repair_attempt_number is not None:
+        payload["repair_attempt_number"] = repair_attempt_number
+    return payload
 
 
 def syntax_repair_target_for_errors(source_code, errors):
@@ -2846,6 +3488,8 @@ def default_syntax_repair_flow_diagnostic(options):
         "syntax_repair_restored_unrelated_select_blocks": [],
         "second_sap_syntax_api_called": False,
         "second_syntax_check_result": None,
+        "sap_syntax_api_calls": [],
+        "syntax_repair_source_states": [],
         "syntax_repair_prompt_source_routing": {
             "system_prompt": "llm_repair_prompt contains repair instructions and normalized SAP syntax errors.",
             "complete_abap_source": "supplied as the code-review model user message via repairer(repair_prompt, source_code).",
@@ -2864,6 +3508,10 @@ def save_syntax_repair_flow_diagnostic(job_folder, diagnostic):
         diagnostic["raw_llm_response"] or "None",
         "Unrelated SELECT blocks restored after repair:",
         json.dumps(diagnostic.get("syntax_repair_restored_unrelated_select_blocks") or [], indent=2),
+        "SAP syntax API calls:",
+        json.dumps(diagnostic.get("sap_syntax_api_calls") or [], indent=2),
+        "Syntax repair source-state diagnostics:",
+        json.dumps(diagnostic.get("syntax_repair_source_states") or [], indent=2),
         "Complete final ABAP source sent to final SAP syntax check:",
         diagnostic["final_abap_source_sent_to_final_sap_syntax_check"] or "None",
     ]
@@ -2905,6 +3553,193 @@ def load_sap_syntax_check(jobs_folder, job_id, options=None):
         "raw_response": "",
         "technical_message": "",
     })
+
+
+def run_user_authorized_sap_syntax_repair(
+    jobs_folder,
+    job_id,
+    sap_syntax_checker,
+    code_review_repairer=None,
+    callable_metadata=None,
+):
+    job_folder = Path(jobs_folder) / job_id
+    options = load_job_options(jobs_folder, job_id)
+    model_settings_token = set_current_model_settings(load_model_settings_artifact(job_folder) or {})
+    try:
+        source_code = load_sap_syntax_current_source(job_folder)
+        result = load_sap_syntax_check(jobs_folder, job_id, options)
+        current_result = result.get("final_result") if isinstance(result.get("final_result"), dict) else result
+        if not syntax_errors(current_result):
+            mark_sap_syntax_decision_resolved(job_folder, "resolved")
+            update_progress(jobs_folder, job_id, "Complete", "SAP syntax check passed.", stage="Complete")
+            return source_code
+        if not sap_syntax_checker:
+            raise RuntimeError("SAP syntax check unavailable: checker is not configured")
+
+        attempts = list(result.get("attempts") or [])
+        repairs = list(result.get("repairs") or [])
+        attempt_number = len(attempts) + 1
+        diagnostic = default_syntax_repair_flow_diagnostic(options)
+        diagnostic["sap_syntax_api_called"] = True
+        diagnostic["syntax_api_response_status"] = current_result.get("status", "")
+        diagnostic["normalized_syntax_errors"] = current_result.get("errors", [])
+        diagnostic["user_authorized_additional_attempt"] = attempt_number
+
+        update_progress(
+            jobs_folder,
+            job_id,
+            "Running",
+            f"Running user-authorized SAP syntax repair before attempt {attempt_number}...",
+            stage="sap_syntax_repair_user_authorized",
+        )
+        repairer = code_review_repairer or generate_code_review_repair
+        repair_prompt = build_sap_syntax_repair_prompt(current_result.get("errors", []))
+        source_for_repair = source_code
+        diagnostic["llm_repair_invoked"] = True
+        diagnostic["llm_repair_prompt"] = repair_prompt
+        diagnostic["abap_source_passed_to_repair_llm"] = source_for_repair
+        repair_llm_result = repairer(repair_prompt, source_for_repair)
+        repair_response_text, repair_model_name, repair_usage = normalize_llm_result(repair_llm_result)
+        diagnostic["raw_llm_response"] = repair_response_text
+        repaired_abap = clean_response(repair_response_text)
+        diagnostic["raw_abap_returned_by_repair_llm"] = repaired_abap
+        repair_fix_result = auto_fix_abap(
+            repaired_abap,
+            callable_signatures=(callable_metadata or {}).get("callable_signatures") or (callable_metadata or {}).get("callables"),
+            callable_mappings=callable_metadata or {},
+        )
+        repaired_abap = repair_fix_result["fixed_source"]
+        source_submitted_to_sap = repaired_abap
+        source_state = syntax_repair_source_state(
+            attempt_number - 1,
+            source_code,
+            repaired_abap,
+            source_submitted_to_sap,
+            assembler_invoked_during_attempt=False,
+        )
+        diagnostic["syntax_repair_source_states"].append(source_state)
+        diagnostic["abap_after_deterministic_repairs"] = repaired_abap
+        diagnostic["deterministic_repairs_ran_after_llm_repair"] = True
+        diagnostic["deterministic_repair_fixes_after_llm_repair"] = repair_fix_result["fixes"]
+        diagnostic["bapi_message_getdetail_fix_ran_after_llm_repair"] = bapi_message_getdetail_fix_ran(repair_fix_result)
+        diagnostic["repaired_abap_replaced_original"] = repaired_abap != source_code
+        diagnostic["second_sap_syntax_api_called"] = True
+        diagnostic["exact_abap_sent_to_second_sap_syntax_api"] = source_submitted_to_sap
+        diagnostic["final_abap_source_sent_to_final_sap_syntax_check"] = source_submitted_to_sap
+
+        update_progress(
+            jobs_folder,
+            job_id,
+            "Running",
+            f"Running user-authorized SAP syntax check attempt {attempt_number}...",
+            stage="Running SAP syntax check",
+        )
+        record_sap_syntax_api_call(
+            diagnostic,
+            reason="REPAIR_ATTEMPT",
+            source_code=source_submitted_to_sap,
+            source_role="repaired_final_source",
+            attempt_number=attempt_number,
+            repair_attempt_number=attempt_number - 1,
+        )
+        syntax_result = normalize_empty_sap_syntax_diagnostic_result(sap_syntax_checker.check(source_submitted_to_sap))
+        diagnostic["second_syntax_check_result"] = syntax_result
+        attempts.append(
+            sap_syntax_check_attempt_payload(
+                attempt_number,
+                syntax_result,
+                reason="REPAIR_ATTEMPT",
+                source_line_count=source_line_count(source_submitted_to_sap),
+                source_role="repaired_final_source",
+                repair_attempt_number=attempt_number - 1,
+            )
+        )
+        repairs.append(
+            {
+                "prompt": repair_prompt,
+                "raw_model_response": repair_response_text,
+                "model": repair_model_name,
+                "usage": repair_usage,
+                "repaired_abap": source_submitted_to_sap,
+                "syntax_result": syntax_result,
+                "user_authorized": True,
+                "source_state": source_state,
+                "deterministic_fix_summary": {
+                    "original_issue_count": repair_fix_result["original_issue_count"],
+                    "final_issue_count": repair_fix_result["final_issue_count"],
+                    "fixes": repair_fix_result["fixes"],
+                },
+            }
+        )
+        updated_result = {
+            **syntax_result,
+            "initial_result": result.get("initial_result") or (attempts[0] if attempts else syntax_result),
+            "repair_attempted": True,
+            "repair": repairs[-1],
+            "repairs": repairs,
+            "attempts": attempts,
+            "syntax_check_attempts": len(attempts),
+            "max_syntax_check_attempts": result.get("max_syntax_check_attempts") or options.get("sap_syntax_check_attempts"),
+            "final_result": syntax_result,
+            "user_authorized_additional_attempts": [
+                repair for repair in repairs if isinstance(repair, dict) and repair.get("user_authorized")
+            ],
+        }
+        save_sap_syntax_check(job_folder, updated_result)
+        (job_folder / "sap_syntax_repaired.abap").write_text(source_submitted_to_sap, encoding="utf-8")
+        save_sap_syntax_current_source(job_folder, source_submitted_to_sap)
+        save_syntax_repair_flow_diagnostic(job_folder, diagnostic)
+        if syntax_errors(syntax_result):
+            save_sap_syntax_decision(
+                job_folder,
+                sap_syntax_decision_payload(
+                    source_submitted_to_sap,
+                    updated_result,
+                    attempts,
+                    max_syntax_check_attempts=updated_result.get("max_syntax_check_attempts"),
+                ),
+            )
+            update_progress(
+                jobs_folder,
+                job_id,
+                "Awaiting Review",
+                "SAP syntax check still reports an error. Choose whether to run another syntax repair or continue with the syntax error.",
+                stage="awaiting_sap_syntax_decision",
+            )
+            return source_submitted_to_sap
+        mark_sap_syntax_decision_resolved(job_folder, "resolved")
+        update_progress(jobs_folder, job_id, "Complete", "ABAP generation complete after SAP syntax repair.", stage="Complete")
+        return source_submitted_to_sap
+    except SapSyntaxDecisionRequired:
+        raise
+    except Exception as exc:
+        update_progress(jobs_folder, job_id, "Error", str(exc), stage="Error")
+        raise
+    finally:
+        reset_current_model_settings(model_settings_token)
+
+
+def continue_with_sap_syntax_error(jobs_folder, job_id):
+    job_folder = Path(jobs_folder) / job_id
+    decision = load_sap_syntax_decision(jobs_folder, job_id)
+    decision["status"] = "continued_with_syntax_error"
+    save_sap_syntax_decision(job_folder, decision)
+    syntax_path = job_folder / "sap_syntax_check.json"
+    if syntax_path.exists():
+        try:
+            result = json.loads(syntax_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result = {}
+        result["continued_with_syntax_error"] = True
+        result["syntax_error_continuation_decision"] = decision
+        save_sap_syntax_check(job_folder, result)
+    update_progress(
+        jobs_folder,
+        job_id,
+        "Complete",
+        "Continuing with unresolved SAP syntax error.",
+        stage="Complete",
+    )
 
 
 def normalize_sap_syntax_check_for_display(payload):

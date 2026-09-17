@@ -23,6 +23,7 @@ from services.final_assembler import (
     APP_FINAL_ASSEMBLY_MODE,
     LLM_FINAL_ASSEMBLY_MODE,
     assemble_final_abap_from_chunks,
+    assemble_final_abap_from_chunks_with_diagnostics,
     normalize_final_assembly_mode,
 )
 from services.generation_contract import (
@@ -379,13 +380,15 @@ def generate_chunked_abap_program(
             "duration_seconds": perf_counter() - started_at,
         }
     else:
-        final_text = assemble_abap_chunks(chunks, final_assembly_mode=assembly_mode)
+        final_assembly = assemble_final_abap_from_chunks_with_diagnostics(chunks)
+        final_text = final_assembly["text"]
         final_assembly_result = {
             "mode": assembly_mode,
             "text": final_text,
             "model": None,
             "usage": None,
             "duration_seconds": None,
+            "diagnostics": final_assembly.get("diagnostics") or {},
         }
     final_text = ensure_callable_parameter_declarations(final_text, callable_metadata)
     final_text = apply_deterministic_alv_field_catalogue(
@@ -1558,6 +1561,8 @@ def validate_read_result_safety(steps, context, errors, path):
     for index, step in enumerate(steps or []):
         if not isinstance(step, dict) or str(step.get("operation") or "").upper() != "READ":
             continue
+        if processing_step_is_dynamic_runtime_state_lookup(step):
+            continue
         into = normalize_plan_identifier(step.get("into"))
         if not into:
             continue
@@ -1568,6 +1573,17 @@ def validate_read_result_safety(steps, context, errors, path):
             f"{format_processing_plan_path(step_path)} READ result work area {into} is not safely tested; "
             "clear the work area before READ or add an explicit successful-read result check"
         )
+
+
+def processing_step_is_dynamic_runtime_state_lookup(step):
+    text = " ".join(
+        str((step or {}).get(key) or "")
+        for key in ("iteration_scope", "dynamic_runtime_operation", "technical_details", "data_object", "source", "into")
+    ).lower()
+    return bool(
+        re.search(r"\b(runtime|dynamic|component|column|header|formatted)\b", text)
+        and re.search(r"\b(component|column|header|formatted|state|width|runtime)\b", text)
+    )
 
 
 def read_work_area_cleared_before(steps, index, into):
@@ -1637,6 +1653,8 @@ def validate_plan_reference(value, context, errors, path, role=None):
             if field_name not in (context.get("output_fields") or set()):
                 errors.append(f"{format_processing_plan_path(path)} references output field {field_name} not found in output structure contract")
             return
+        if dynamic_runtime_state_field_reference(object_name, field_name, context):
+            return
         ddic_object = (context.get("aliases") or {}).get(object_name)
         if not ddic_object:
             errors.append(f"{format_processing_plan_path(path)} references undeclared object {object_name}")
@@ -1655,6 +1673,24 @@ def validate_plan_reference(value, context, errors, path, role=None):
         errors.append(f"{format_processing_plan_path(path)} references work area {identifier} not found in generation contract")
     elif (context.get("globals") or set()) and identifier.startswith(GLOBAL_STYLE_PREFIXES) and identifier not in (context.get("globals") or set()):
         errors.append(f"{format_processing_plan_path(path)} references undeclared global object {identifier}")
+
+
+def dynamic_runtime_state_field_reference(alias, field, context):
+    if (context or {}).get("contracts") or (context or {}).get("aliases") or (context or {}).get("output_names"):
+        return False
+    text = f"{alias}-{field}".lower()
+    dynamic_terms = (
+        "runtime",
+        "dynamic",
+        "component",
+        "column",
+        "header",
+        "formatted",
+        "field",
+        "table_row",
+        "assigned_internal_table",
+    )
+    return any(term in text for term in dynamic_terms)
 
 
 def processing_plan_reference_info(value, context):
@@ -1681,6 +1717,8 @@ def processing_plan_reference_info(value, context):
                 "object": role.get("object"),
                 "field": field,
             }
+        if dynamic_runtime_state_field_reference(alias, field, context):
+            return {"kind": "dynamic_runtime_state", "alias": alias, "field": field}
         return {"kind": "unknown_field", "alias": alias, "field": field}
     identifier = normalize_plan_identifier(text)
     if identifier and identifier in (context.get("globals") or set()):

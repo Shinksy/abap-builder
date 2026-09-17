@@ -30,6 +30,7 @@ from services.create_abap import (
     save_model_settings,
     save_post_generation_diagnostics,
     save_validation_issues,
+    SapSyntaxDecisionRequired,
 )
 from services.ddic_metadata_context import (
     append_callable_catalogue,
@@ -538,6 +539,8 @@ def run_enhance_abap(
         metrics["enhancement_specification_characters"] = len(enhancement_specification)
         (job_folder / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         update_progress(jobs_folder, job_id, "Complete", "ABAP enhancement complete.", stage="Complete")
+    except SapSyntaxDecisionRequired:
+        pass
     except Exception as exc:
         update_progress(jobs_folder, job_id, "Error", str(exc), stage="Error")
     finally:
