@@ -21,7 +21,9 @@ from services.orchestrator import (
     extract_processing_plan,
     extract_processing_rules_section,
     enrich_declaration_requirements_for_form_globals,
+    final_llm_assembly_prompt,
     generate_chunked_abap_program,
+    apply_final_requirement_repairs,
     processing_plan_response_format,
     discover_processing_rule_dependencies,
     apply_deterministic_alv_field_catalogue,
@@ -90,6 +92,9 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn("Extract the business-processing logic", prompt_text)
         self.assertIn("processing_steps", prompt_text)
         self.assertIn("LOOP: source, into, steps", prompt_text)
+        self.assertIn("optional iteration_scope", prompt_text)
+        self.assertIn("runtime component discovery", prompt_text)
+        self.assertIn('Do not collapse separate operations into generic wording such as "Loop through the source data"', prompt_text)
         self.assertIn("CALL_FUNCTION: name", prompt_text)
         self.assertIn("CALL_STATIC_METHOD: class, method", prompt_text)
         self.assertIn("CALL_METHOD: object, method", prompt_text)
@@ -2774,6 +2779,10 @@ class OrchestratorTest(unittest.TestCase):
         )
 
         self.assertIn("Use the structured processing plan as the authoritative source of processing logic.", prompt)
+        self.assertIn("Use optional processing-plan fields such as data_object, iteration_scope", prompt)
+        self.assertIn("Preserve distinct iteration scopes from the plan.", prompt)
+        self.assertIn("If the plan or functional-specification context says an input table", prompt)
+        self.assertIn("For dynamically typed values intended for display", prompt)
         self.assertIn('"operation": "READ"', prompt)
         self.assertIn('"match": "st_edids-docnum = st_edidc-docnum"', prompt)
         self.assertIn('"name": "BAPI_MESSAGE_GETDETAIL"', prompt)
@@ -2783,7 +2792,43 @@ class OrchestratorTest(unittest.TestCase):
         self.assertNotIn("Relevant specification excerpts:", prompt)
         self.assertNotIn("Relevant naming contract:", prompt)
         self.assertNotIn("When p_alv is selected display MPE_ID.", prompt)
-        self.assertNotIn("The report shall compile.", prompt)
+        self.assertIn("Acceptance criteria:", prompt)
+        self.assertIn("The report shall compile.", prompt)
+
+    def test_processing_prompt_includes_compact_dynamic_and_release_context(self):
+        prompt = chunk_prompt_text(
+            "Shared generation contract:\nExact FORM names: process_data\nExact callable identities: none",
+            {"name": "processing_form", "instruction": "Generate processing."},
+            source_text=(
+                "Processing rules:\n"
+                "- The input internal table is dynamically assigned and its row structure is unknown at design time.\n"
+                "- Discover runtime components and calculate a display width per component.\n"
+                "- Use ABAP 7.02 compatible classical syntax only; no inline declarations.\n"
+                "Acceptance Criteria:\n"
+                "- All runtime components are displayed with converted values.\n"
+            ),
+            processing_plan=json.dumps(
+                {
+                    "processing_steps": [
+                        {
+                            "operation": "LOOP",
+                            "source": "t_dynamic",
+                            "into": "st_dynamic",
+                            "iteration_scope": "internal_table_rows",
+                            "dynamic_runtime_operation": "dynamic table row iteration",
+                            "steps": [],
+                        }
+                    ]
+                }
+            ),
+        )
+
+        self.assertIn("Acceptance criteria:", prompt)
+        self.assertIn("All runtime components are displayed with converted values.", prompt)
+        self.assertIn("Target release and syntax restrictions:", prompt)
+        self.assertIn("ABAP 7.02 compatible classical syntax only", prompt)
+        self.assertIn("Dynamic runtime requirements:", prompt)
+        self.assertIn("row structure is unknown at design time", prompt)
 
     def test_processing_prompt_requires_complete_calculation_and_aggregation_logic(self):
         declaration_requirements = json.dumps(
@@ -3018,6 +3063,57 @@ class OrchestratorTest(unittest.TestCase):
         self.assertNotIn("1 = 0", json.dumps(normalized))
         self.assertNotIn("t_unused", json.dumps(normalized))
         self.assertNotIn("st_unused", json.dumps(normalized))
+
+    def test_processing_plan_normalization_preserves_dynamic_runtime_step_details(self):
+        normalized = normalize_processing_plan(
+            {
+                "processing_steps": [
+                    {
+                        "operation": "DERIVE",
+                        "target": "lt_components",
+                        "expression": "Discover runtime components of w_output",
+                        "sources": ["w_output"],
+                        "data_object": "w_output runtime structure",
+                        "derived_or_modified_value": "component metadata table",
+                        "retained_state": "component list for later width calculation",
+                        "dynamic_runtime_operation": "runtime structure discovery and runtime component discovery",
+                    },
+                    {
+                        "operation": "LOOP",
+                        "source": "lt_components",
+                        "into": "ls_component",
+                        "iteration_scope": "runtime_structure_components",
+                        "data_object": "runtime component metadata for w_output",
+                        "derived_or_modified_value": "per-component column width",
+                        "retained_state": "maximum width by component name",
+                        "dynamic_runtime_operation": "iterate structure components and access each component dynamically",
+                        "technical_details": "Calculate column width separately for each discovered component.",
+                        "steps": [
+                            {
+                                "operation": "CALCULATE",
+                                "target": "lv_width",
+                                "expression": "maximum of component name length and dynamic component value length",
+                                "sources": ["ls_component", "w_output"],
+                                "data_object": "current runtime component",
+                                "derived_or_modified_value": "lv_width",
+                                "retained_state": "largest width for the current component",
+                                "dynamic_runtime_operation": "dynamic component access",
+                            }
+                        ],
+                    },
+                ]
+            }
+        )
+
+        discover = normalized["processing_steps"][0]
+        self.assertEqual("runtime structure discovery and runtime component discovery", discover["dynamic_runtime_operation"])
+        self.assertEqual("component list for later width calculation", discover["retained_state"])
+        loop = normalized["processing_steps"][1]
+        self.assertEqual("runtime_structure_components", loop["iteration_scope"])
+        self.assertEqual("runtime component metadata for w_output", loop["data_object"])
+        self.assertEqual("maximum width by component name", loop["retained_state"])
+        self.assertEqual("iterate structure components and access each component dynamically", loop["dynamic_runtime_operation"])
+        self.assertEqual("dynamic component access", loop["steps"][0]["dynamic_runtime_operation"])
 
     def test_processing_plan_normalization_removes_select_filters_from_read_conditions(self):
         declaration_requirements = json.dumps(
@@ -4054,6 +4150,220 @@ class OrchestratorTest(unittest.TestCase):
         self.assertNotIn("SPEC_UPDATE_TRANSACTION_HANDLING_MISSING", rule_ids)
         self.assertNotIn("SPEC_ALV_OUTPUT_MISSING", rule_ids)
 
+    def test_dynamic_processing_plan_requires_dynamic_runtime_abap_access(self):
+        processing_plan = {
+            "processing_steps": [
+                {
+                    "operation": "LOOP",
+                    "source": "t_dynamic",
+                    "into": "st_dynamic",
+                    "iteration_scope": "runtime_structure_components",
+                    "dynamic_runtime_operation": "runtime component discovery and dynamic component access",
+                    "steps": [
+                        {
+                            "operation": "CALCULATE",
+                            "target": "lv_width",
+                            "expression": "maximum display width for current runtime component",
+                            "sources": ["st_dynamic"],
+                            "dynamic_runtime_operation": "dynamic component access",
+                        }
+                    ],
+                }
+            ]
+        }
+        static_source = (
+            "FORM process_data.\n"
+            "  LOOP AT t_dynamic INTO st_dynamic.\n"
+            "    lv_width = 10.\n"
+            "  ENDLOOP.\n"
+            "ENDFORM.\n"
+        )
+        dynamic_source = (
+            "FORM process_data.\n"
+            "  FIELD-SYMBOLS <fs_table> TYPE ANY TABLE.\n"
+            "  FIELD-SYMBOLS <fs_value> TYPE ANY.\n"
+            "  ASSIGN t_dynamic TO <fs_table>.\n"
+            "  ASSIGN COMPONENT lv_component OF STRUCTURE st_dynamic TO <fs_value>.\n"
+            "ENDFORM.\n"
+        )
+
+        static_issues = validate_generated_processing_completeness(
+            static_source,
+            source_text="The table row type is dynamic and components are discovered at runtime.",
+            processing_plan=processing_plan,
+        )
+        dynamic_issues = validate_generated_processing_completeness(
+            dynamic_source,
+            source_text="The table row type is dynamic and components are discovered at runtime.",
+            processing_plan=processing_plan,
+        )
+
+        self.assertIn("PROCESSING_DYNAMIC_RUNTIME_ACCESS_MISSING", [issue["rule_id"] for issue in static_issues])
+        self.assertNotIn("PROCESSING_DYNAMIC_RUNTIME_ACCESS_MISSING", [issue["rule_id"] for issue in dynamic_issues])
+
+    def test_output_requirement_rejects_empty_or_disconnected_output_forms(self):
+        source = (
+            "REPORT ztest.\n"
+            "DATA t_output TYPE STANDARD TABLE OF string.\n"
+            "FORM display_alv.\n"
+            "ENDFORM.\n"
+            "FORM write_csv.\n"
+            "  DATA w_line TYPE string.\n"
+            "  TRANSFER w_line TO w_filename.\n"
+            "ENDFORM.\n"
+        )
+
+        issues = validate_generated_processing_completeness(
+            source,
+            source_text="Display prepared output in ALV and export prepared output as CSV.",
+        )
+        rule_ids = [issue["rule_id"] for issue in issues]
+
+        self.assertIn("SPEC_REQUIRED_OUTPUT_FORM_EMPTY", rule_ids)
+        self.assertIn("SPEC_PREPARED_OUTPUT_NOT_PRESENTED", rule_ids)
+        self.assertIn("display_alv", [issue.get("form") for issue in issues])
+
+    def test_final_coherence_review_flags_disconnected_dynamic_formatting(self):
+        processing_plan = {
+            "processing_steps": [
+                {
+                    "operation": "LOOP",
+                    "source": "t_dynamic",
+                    "into": "st_dynamic",
+                    "iteration_scope": "runtime_structure_components",
+                    "dynamic_runtime_operation": "runtime component discovery and dynamic component access",
+                    "steps": [
+                        {
+                            "operation": "CALCULATE",
+                            "target": "lv_component_count",
+                            "expression": "number of runtime components",
+                            "sources": ["t_dynamic"],
+                        }
+                    ],
+                }
+            ]
+        }
+        source = (
+            "REPORT ztest.\n"
+            "DATA t_output TYPE STANDARD TABLE OF string.\n"
+            "FORM process_data.\n"
+            "  FIELD-SYMBOLS <dyn1> TYPE ANY TABLE.\n"
+            "  FIELD-SYMBOLS <dyn2> TYPE ANY TABLE.\n"
+            "  ASSIGN t_dynamic TO <dyn1>.\n"
+            "  ASSIGN t_dynamic TO <dyn2>.\n"
+            "  DESCRIBE TABLE t_dynamic LINES lv_component_count.\n"
+            "  lv_width = lv_component_count + 1.\n"
+            "  CONCATENATE 'A' 'B' INTO lv_formatted_line.\n"
+            "ENDFORM.\n"
+            "FORM display_alv.\n"
+            "  LOOP AT t_output INTO w_output.\n"
+            "    WRITE: / w_output.\n"
+            "  ENDLOOP.\n"
+            "ENDFORM.\n"
+        )
+
+        issues = validate_generated_processing_completeness(
+            source,
+            source_text=(
+                "Process the supplied dynamic table. Discover runtime components, calculate column widths, "
+                "build formatted headers, separators and values, then display the formatted result."
+            ),
+            processing_plan=processing_plan,
+        )
+        rule_ids = [issue["rule_id"] for issue in issues]
+
+        self.assertIn("FINAL_DESCRIBE_TABLE_USED_AS_COMPONENT_COUNT", rule_ids)
+        self.assertIn("FINAL_CALCULATED_INTERMEDIATE_NOT_CONSUMED", rule_ids)
+        self.assertIn("FINAL_REDUNDANT_FIELD_SYMBOL_FOR_SAME_OBJECT", rule_ids)
+        self.assertIn("FINAL_FORMATTED_OUTPUT_NOT_USED", rule_ids)
+
+    def test_final_coherence_review_flags_indirect_dynamic_assignment_and_duplicate_requirement(self):
+        source = (
+            "REPORT ztest.\n"
+            "FORM process_data.\n"
+            "  ASSIGN (lv_table_name) TO <dyn_table>.\n"
+            "  ASSIGN COMPONENT lv_component OF STRUCTURE st_dynamic TO <value>.\n"
+            "  WRITE <value> TO lv_text.\n"
+            "  TRANSFER lv_text TO w_filename.\n"
+            "ENDFORM.\n"
+            "FORM output_data.\n"
+            "  ASSIGN COMPONENT lv_component OF STRUCTURE st_dynamic TO <value>.\n"
+            "  WRITE <value> TO lv_text.\n"
+            "  TRANSFER lv_text TO w_filename.\n"
+            "ENDFORM.\n"
+        )
+
+        issues = validate_generated_processing_completeness(
+            source,
+            source_text="Process the supplied dynamic table and output each runtime component.",
+        )
+        rule_ids = [issue["rule_id"] for issue in issues]
+
+        self.assertIn("FINAL_UNREQUESTED_INDIRECT_DYNAMIC_OBJECT_ASSIGNMENT", rule_ids)
+        self.assertIn("FINAL_DUPLICATE_REQUIREMENT_IMPLEMENTATION", rule_ids)
+
+    def test_final_review_requires_header_row_on_output_path(self):
+        source = (
+            "REPORT ztest.\n"
+            "FORM process_data.\n"
+            "  CONCATENATE 'COL1' 'COL2' INTO lv_header_line.\n"
+            "ENDFORM.\n"
+            "FORM display_output.\n"
+            "  LOOP AT t_output INTO w_output.\n"
+            "    WRITE: / w_output.\n"
+            "  ENDLOOP.\n"
+            "ENDFORM.\n"
+        )
+
+        issues = validate_generated_processing_completeness(
+            source,
+            source_text="Generate a header row with column headers and output the formatted result.",
+        )
+
+        self.assertIn("FINAL_REQUIRED_HEADER_ROW_NOT_OUTPUT", [issue["rule_id"] for issue in issues])
+
+    def test_final_review_requires_width_from_field_name_and_value(self):
+        source = (
+            "REPORT ztest.\n"
+            "FORM process_data.\n"
+            "  lv_width = strlen( lv_value_text ).\n"
+            "ENDFORM.\n"
+        )
+
+        issues = validate_generated_processing_completeness(
+            source,
+            source_text="Calculate column widths from both field names and data values.",
+        )
+
+        self.assertIn("FINAL_WIDTH_IGNORES_FIELD_NAME_OR_VALUE", [issue["rule_id"] for issue in issues])
+
+    def test_final_review_rejects_condense_for_trim_only_requirement_and_repairs_it(self):
+        source = (
+            "REPORT ztest.\n"
+            "FORM process_data.\n"
+            "  CONDENSE lv_value.\n"
+            "ENDFORM.\n"
+        )
+        source_text = "Remove leading and trailing spaces while preserving spaces within the value."
+
+        issues = validate_generated_processing_completeness(source, source_text=source_text)
+        fixed = apply_final_requirement_repairs(source, source_text)
+
+        self.assertIn("FINAL_TRIM_USES_CONDENSE", [issue["rule_id"] for issue in issues])
+        self.assertIn("SHIFT lv_value LEFT DELETING LEADING space.", fixed)
+        self.assertIn("SHIFT lv_value RIGHT DELETING TRAILING space.", fixed)
+        self.assertNotIn("CONDENSE lv_value", fixed)
+
+    def test_final_llm_assembly_prompt_includes_coherence_review_rules(self):
+        prompt = final_llm_assembly_prompt()
+
+        self.assertIn("every calculated intermediate must feed downstream processing", prompt)
+        self.assertIn("DESCRIBE TABLE ... LINES only for row counts", prompt)
+        self.assertIn("Do not invent indirect dynamic object-name assignment", prompt)
+        self.assertIn("If headers are required", prompt)
+        self.assertIn("do not use CONDENSE for trim-only requirements", prompt)
+        self.assertIn("VALUE #( )", prompt)
+
     def test_processing_plan_validation_rejects_callable_input_from_output_record(self):
         declaration_requirements = json.dumps(
             {
@@ -4477,6 +4787,16 @@ class OrchestratorTest(unittest.TestCase):
             ["left", "operator", "right"],
             schema["$defs"]["condition"]["required"],
         )
+        self.assertEqual(
+            {"type": ["string", "null"]},
+            schema["$defs"]["loop_step"]["properties"]["iteration_scope"],
+        )
+        self.assertIn("iteration_scope", schema["$defs"]["loop_step"]["required"])
+        self.assertEqual(
+            {"type": ["string", "null"]},
+            schema["$defs"]["calculate_step"]["properties"]["dynamic_runtime_operation"],
+        )
+        self.assertIn("dynamic_runtime_operation", schema["$defs"]["calculate_step"]["required"])
 
     def test_processing_plan_response_format_rejects_extra_step_properties(self):
         schema_format = processing_plan_response_format()
@@ -5772,6 +6092,9 @@ class OrchestratorTest(unittest.TestCase):
         self.assertIn(expected_contract, prompt)
         self.assertIn("Exact output structure fields: DOCNUM", prompt)
         self.assertIn("Exact output FORM names: output_data, display_alv, write_csv", prompt)
+        self.assertIn("Do not return empty FORM routines when output", prompt)
+        self.assertIn("Output routines must actually present or transfer the prepared generated data.", prompt)
+        self.assertIn("Before returning:", prompt)
         self.assertIn("Exact file-output global variable: w_filename.", prompt)
         self.assertIn("Treat w_filename as the dataset path only; do not use it as a CSV content buffer.", prompt)
         self.assertIn("Exact CSV line global variable: w_csv_line.", prompt)

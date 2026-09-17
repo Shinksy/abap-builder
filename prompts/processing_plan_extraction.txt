@@ -38,7 +38,7 @@ Represent the business logic using these operations:
 
 Operation schema:
 
-- LOOP: source, into, steps
+- LOOP: source, into, steps, optional iteration_scope
 - READ: source, into, conditions
 - IF: conditions, then, else
 - MOVE: source, target
@@ -56,9 +56,23 @@ Operation schema:
 - CALL_METHOD: object, method, input_parameters, output_parameters, receiving_parameter or returning_parameter
 - CONCATENATE, SORT, DELETE: include only required fields
 
+Optional technical-detail fields may be added to any processing step:
+
+- data_object: the exact table, work area, structure, component list, callable result, output object, or runtime object being processed.
+- iteration_scope: "internal_table_rows", "runtime_structure_components", "runtime_type_components", or another specific collection scope.
+- derived_or_modified_value: the value, field, variable, component, output object, or state changed by the step.
+- retained_state: intermediate state that must survive for later steps, such as totals, counters, flags, lookup results, field symbols, component metadata, or per-component widths.
+- dynamic_runtime_operation: runtime type discovery, structure discovery, component discovery, dynamic component access, dynamic assignment, per-component calculation, or other dynamic ABAP concept required by the specification.
+- technical_details: concise implementation-relevant prose when the structured fields alone are not enough.
+
 Rules
 
 - Preserve the order of the functional specification.
+- Preserve distinct structures, internal tables, work areas, runtime component lists, and loop scopes as distinct processing steps. Do not collapse separate operations into generic wording such as "Loop through the source data".
+- For every LOOP, identify whether it iterates internal-table rows, runtime structure components, runtime type components, callable results, output fields, or another specific collection.
+- For every step, identify what data/object is processed, what value is derived or modified, what state must be retained for later processing, and any dynamic runtime operation needed by the specification.
+- When the specification requires dynamic ABAP behavior, preserve the dynamic concepts explicitly in the optional technical-detail fields and in separate ordered steps. This includes runtime type or structure discovery, runtime component discovery, iteration over structure components, iteration over internal-table rows, dynamic component access, and per-component calculated state such as column widths.
+- Do not prescribe specific SAP classes, function modules, or methods for dynamic runtime behavior unless the validated processing contract or specification explicitly requires a named callable.
 - Extract only business logic explicitly described.
 - Translate business actions into the corresponding processing operations:
   - "Process each record" → LOOP

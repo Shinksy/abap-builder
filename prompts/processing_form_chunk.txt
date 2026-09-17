@@ -6,6 +6,11 @@ Rules:
 - Use only the exact processing FORM names, internal table names, work-area names, output objects, and callable identities supplied below.
 - Read from already populated internal tables and work areas.
 - Implement every MOVE, CALCULATE, DERIVE, TRANSFORM, AGGREGATE, COUNT, AVERAGE, PERCENTAGE, READ, IF, SORT, DELETE, and CONCATENATE step in the structured processing plan as executable classical ABAP.
+- Use optional processing-plan fields such as data_object, iteration_scope, derived_or_modified_value, retained_state, dynamic_runtime_operation, and technical_details to distinguish internal-table row loops from runtime structure/component loops and other dynamic operations.
+- Preserve distinct iteration scopes from the plan. Do not merge separate internal-table row processing, runtime component discovery, component iteration, dynamic component access, or per-component state calculation into one generic source-data loop.
+- If the plan or functional-specification context says an input table, row type, or component set is dynamic or unknown at design time, do not invent a concrete row structure or component list. Preserve dynamic table assignment and access runtime components dynamically.
+- For dynamic component processing, use classical dynamic ABAP patterns compatible with the requested target release, such as explicit field symbols, dynamic ASSIGN/ASSIGN COMPONENT, and retained per-component state. Do not use inline declarations, table expressions, string templates, host-variable escapes, or newer syntax when older-compatible syntax is requested.
+- For dynamically typed values intended for display or text output, convert them with an appropriate classical ABAP display conversion, such as WRITE ... TO a display variable, before concatenation or output. Do not assume a direct MOVE from TYPE any or an unknown component to string is valid.
 - Populate every required output field through a concrete assignment, calculation, aggregation, count, average, percentage, lookup, transformation, or derivation path.
 - If the plan or specification requires one output row per grouping key, aggregate by those keys before appending output. Do not append one output row per source record.
 - Prefer Open SQL aggregation only when the structured plan explicitly identifies an OPEN_SQL_AGGREGATE or database-level aggregation path; otherwise aggregate from already populated internal tables in classical ABAP.
@@ -19,6 +24,7 @@ Rules:
 - Do not generate presentation, file, event-block, or declaration logic.
 - Before returning the FORM source, check that each required output field listed in the filtered processing chunk contract is assigned or calculated before APPEND.
 - Before returning the FORM source, check that each processing requirement in the structured plan appears as executable ABAP.
+- Before returning the FORM source, check that every acceptance criterion and functional-specification context item supplied below is covered by executable processing logic or intentionally belongs to another chunk.
 - Return only ABAP source for these routines.
 
 Structured processing plan:

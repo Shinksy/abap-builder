@@ -9,6 +9,9 @@ Rules:
 - Do not add USING, CHANGING or TABLES parameters.
 - Do not generate SAP database reads.
 - Do not generate business-processing, event-block, or declaration logic.
+- Do not return empty FORM routines when output, display, ALV, CSV, download, export, or list presentation is required.
+- Output routines must actually present or transfer the prepared generated data. Use the supplied global output table and output fields from the chunk contract; do not build a disconnected placeholder output.
+- Respect target release and syntax restrictions from the functional-specification context. Use classical SAP ECC-compatible output code when older-compatible syntax is requested.
 - Return only ABAP source for these routines.
 
 When ALV output is required:
@@ -19,6 +22,7 @@ When ALV output is required:
 - Do not REFRESH t_fieldcat, CLEAR w_fieldcat, assign w_fieldcat-* fields, or APPEND w_fieldcat TO t_fieldcat.
 - The application inserts the field-catalogue entries deterministically from the approved output contract.
 - Pass the field catalogue using IT_FIELDCAT.
+- Pass the prepared output table using T_OUTTAB.
 
 When file output is required:
 - Use the existing global filename variable from the supplied chunk contract.
@@ -27,6 +31,12 @@ When file output is required:
 - Use the exact CSV line variable from the supplied chunk contract for generated row text.
 - Build each CSV row in the CSV line variable, then TRANSFER the CSV line variable TO the filename variable.
 - Do not create local or undeclared filename variables.
+- Build rows from the prepared output table or explicitly prepared output work area. Do not transfer an empty row or unrelated placeholder.
+
+Before returning:
+- Check that each required output FORM contains executable output logic.
+- Check that the prepared output data is actually passed to ALV, written, transferred, downloaded, or otherwise presented as required.
+- Check that every acceptance criterion and functional-specification context item supplied below is covered by executable output logic or intentionally belongs to another chunk.
 
 Output requirements:
 {{OUTPUT_REQUIREMENTS}}

@@ -257,7 +257,7 @@ def create_app(config_overrides=None):
         )
         uploaded_file = request.files.get("abap_file")
         job_title = request.form.get("job_title", "").strip()
-        pasted_specification = request.form.get("specification_text", "").strip()
+        pasted_specification = normalize_create_specification_text(request.form.get("specification_text", ""))
         has_uploaded_file = bool(uploaded_file and uploaded_file.filename)
         if not job_title:
             return render_template(
@@ -311,7 +311,7 @@ def create_app(config_overrides=None):
                 if rerun_context.get("input_path")
                 else job_upload_folder / "pasted_specification.txt"
             )
-            input_path.write_text(pasted_specification, encoding="utf-8")
+            input_path.write_text(pasted_specification, encoding="utf-8", newline="\n")
 
         if request.form.get("prepare_functional_specification") == "1":
             start_prepare_functional_spec_job(
@@ -877,7 +877,7 @@ def load_rerun_form_context(jobs_folder, upload_folder, job_id):
         {
             "input_path": str(input_path),
             "input_name": display_path.name,
-            "specification_text": display_path.read_text(encoding="utf-8"),
+            "specification_text": normalize_create_specification_text(display_path.read_text(encoding="utf-8")),
         }
     )
     return context
@@ -933,10 +933,15 @@ def load_rerun_source_form_context(jobs_folder, upload_folder, source_job_id):
         {
             "input_path": str(input_path),
             "input_name": Path(input_path).name,
-            "specification_text": Path(input_path).read_text(encoding="utf-8"),
+            "specification_text": normalize_create_specification_text(Path(input_path).read_text(encoding="utf-8")),
         }
     )
     return context
+
+
+def normalize_create_specification_text(text):
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return re.sub(r"\n{3,}", "\n\n", normalized)
 
 
 def normalize_enhancement_specification_text(text):

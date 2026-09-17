@@ -42,6 +42,7 @@ from services.orchestrator import (
     ProcessingPlanValidationError,
     StructuredGenerationContractValidationError,
     aggregate_usage,
+    apply_final_requirement_repairs,
     apply_deterministic_alv_field_catalogue,
     apply_deterministic_file_input_support,
     apply_deterministic_selection_screen_declarations,
@@ -383,6 +384,7 @@ def run_create_abap(
             source_text=source_text,
         )
         final_abap = apply_deterministic_file_input_support(final_abap, source_text)
+        final_abap = apply_final_requirement_repairs(final_abap, source_text)
         final_abap = ensure_standard_report_header(final_abap)
         for stage in fixer_diagnostic_stages(fix_result):
             record_post_generation_stage(post_generation_diagnostics, stage["stage"], stage["source"])
@@ -482,6 +484,7 @@ def run_create_abap(
             source_text=source_text,
         )
         final_abap = apply_deterministic_file_input_support(final_abap, source_text)
+        final_abap = apply_final_requirement_repairs(final_abap, source_text)
         final_abap = ensure_standard_report_header(final_abap)
         add_section_duration(section_durations, "sap_syntax_check", time.monotonic() - sap_syntax_started_at)
         record_post_generation_stage(post_generation_diagnostics, "complete_source_immediately_before_final_save", final_abap)

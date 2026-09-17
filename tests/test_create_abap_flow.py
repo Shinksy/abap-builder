@@ -1928,6 +1928,62 @@ class CreateAbapFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
+    def test_create_rerun_normalizes_repeated_windows_blank_lines(self):
+        temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
+        temp_path.mkdir()
+        try:
+            jobs_folder = temp_path / "jobs"
+            uploads_folder = temp_path / "uploads"
+            source_job_id = "source_job"
+            self.write_job_fixture(
+                jobs_folder,
+                uploads_folder,
+                source_job_id,
+                status="Complete",
+                stage="Complete",
+                started_at="2026-08-07T09:00:00+00:00",
+                completed_at="2026-08-07T09:00:05+00:00",
+                upload_name="original_spec.txt",
+                generated=True,
+                metrics={"job_mode": "create_abap", "duration_seconds": 5.0},
+                options={"job_title": "Create rerun"},
+            )
+            (uploads_folder / source_job_id / "original_spec.txt").write_bytes(
+                b"First requirement.\r\r\n\r\r\n\r\r\nSecond requirement."
+            )
+            app = create_app({
+                "TESTING": True,
+                "UPLOAD_FOLDER": str(uploads_folder),
+                "JOBS_FOLDER": str(jobs_folder),
+            })
+            client = app.test_client()
+            rerun = client.post(f"/jobs/{source_job_id}/rerun", follow_redirects=False)
+            self.assertEqual(rerun.headers["Location"], f"/?rerun_source_job_id={source_job_id}")
+
+            review = client.get(f"/?rerun_source_job_id={source_job_id}")
+            self.assertEqual(review.status_code, 200)
+            self.assertIn(b"First requirement.\n\nSecond requirement.", review.data)
+            self.assertNotIn(b"\r\r\n", review.data)
+            self.assertNotIn(b"First requirement.\n\n\nSecond requirement.", review.data)
+
+            with patch("app.start_create_abap_job"):
+                response = client.post(
+                    "/upload",
+                    data={
+                        "rerun_source_job_id": source_job_id,
+                        "job_title": "Create rerun",
+                        "specification_text": "First requirement.\r\n\r\n\r\nSecond requirement.",
+                    },
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            new_job_id = response.headers["Location"].rsplit("/", 1)[-1]
+            spec_bytes = (uploads_folder / new_job_id / "original_spec.txt").read_bytes()
+            self.assertEqual(spec_bytes, b"First requirement.\n\nSecond requirement.")
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def test_create_rerun_with_structured_spec_review_opens_proposal_not_index(self):
         temp_path = Path(__file__).resolve().parents[1] / f".test_tmp_{uuid4().hex}"
         temp_path.mkdir()

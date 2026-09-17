@@ -396,6 +396,7 @@ def generate_chunked_abap_program(
         source_text=source_text,
     )
     final_text = apply_deterministic_file_input_support(final_text, source_text)
+    final_text = apply_final_requirement_repairs(final_text, source_text)
     if final_assembly_result is not None:
         final_assembly_result["text"] = final_text
     return {
@@ -686,7 +687,7 @@ def generate_processing_plan_response(generator, prompt, source_text):
 
 
 def processing_plan_response_format():
-    return {
+    schema_format = {
         "type": "json_schema",
         "name": "processing_plan",
         "strict": True,
@@ -989,6 +990,28 @@ def processing_plan_response_format():
             },
         },
     }
+    add_processing_step_technical_detail_schema(schema_format["schema"])
+    return schema_format
+
+
+def add_processing_step_technical_detail_schema(schema):
+    detail_properties = {
+        "data_object": {"type": ["string", "null"]},
+        "iteration_scope": {"type": ["string", "null"]},
+        "derived_or_modified_value": {"type": ["string", "null"]},
+        "retained_state": {"type": ["string", "null"]},
+        "dynamic_runtime_operation": {"type": ["string", "null"]},
+        "technical_details": {"type": ["string", "null"]},
+    }
+    for definition_name, definition in (schema.get("$defs") or {}).items():
+        if not definition_name.endswith("_step"):
+            continue
+        properties = definition.setdefault("properties", {})
+        properties.update(detail_properties)
+        required = definition.setdefault("required", [])
+        for key in detail_properties:
+            if key not in required:
+                required.append(key)
 
 
 def extract_processing_rules_section(source_text):
@@ -1326,8 +1349,10 @@ def validate_processing_steps(steps, context, errors, path=None):
             continue
         operation = str(step.get("operation") or "").upper()
         if operation == "LOOP":
-            validate_plan_reference(step.get("source"), context, errors, step_path + ["source"], role="table")
-            validate_plan_reference(step.get("into"), context, errors, step_path + ["into"], role="work_area")
+            iteration_scope = str(step.get("iteration_scope") or "").strip().lower()
+            if iteration_scope in {"", "internal_table_rows", "table_rows"}:
+                validate_plan_reference(step.get("source"), context, errors, step_path + ["source"], role="table")
+                validate_plan_reference(step.get("into"), context, errors, step_path + ["into"], role="work_area")
             validate_processing_steps(step.get("steps") or [], context, errors, step_path + ["steps"])
         elif operation == "READ":
             validate_plan_reference(step.get("source"), context, errors, step_path + ["source"], role="table")
@@ -4559,7 +4584,11 @@ def chunk_requirement_block(chunk_name, source_text, base_prompt, declaration_re
     if chunk_name == "declarations":
         return str(declaration_requirements or "").strip() or "None"
     if chunk_name == "processing_form":
-        return str(processing_plan or "").strip() or "None"
+        sections = [str(processing_plan or "").strip() or "None"]
+        context = final_generation_context_block(source_text, chunk_name)
+        if context:
+            sections.append(context)
+        return "\n\n".join(sections).strip()
     excerpts = relevant_specification_excerpts(
         source_text,
         chunk_name,
@@ -4568,6 +4597,9 @@ def chunk_requirement_block(chunk_name, source_text, base_prompt, declaration_re
     sections = []
     if excerpts:
         sections.append("Relevant specification excerpts:\n" + excerpts)
+    context = final_generation_context_block(source_text, chunk_name)
+    if context:
+        sections.append(context)
     metadata = requirement_metadata_block(chunk_name, base_prompt)
     if metadata:
         sections.append(metadata)
@@ -4582,6 +4614,110 @@ def chunk_requirement_block(chunk_name, source_text, base_prompt, declaration_re
     if contract:
         sections.append("Relevant naming contract:\n" + contract)
     return "\n\n".join(sections).strip() or "None"
+
+
+def final_generation_context_block(source_text, chunk_name=None):
+    context = []
+    acceptance = acceptance_criteria_units(source_text)
+    if acceptance:
+        context.append("Acceptance criteria:\n" + "\n".join(f"- {line}" for line in acceptance))
+    syntax = target_release_and_syntax_units(source_text)
+    if syntax:
+        context.append("Target release and syntax restrictions:\n" + "\n".join(f"- {line}" for line in syntax))
+    dynamic = dynamic_runtime_requirement_units(source_text)
+    if dynamic and chunk_name in {"processing_form", "output_forms", "declarations"}:
+        context.append("Dynamic runtime requirements:\n" + "\n".join(f"- {line}" for line in dynamic))
+    return "\n\n".join(context).strip()
+
+
+def acceptance_criteria_units(source_text):
+    return specification_section_units(
+        source_text,
+        start_pattern=r"\b(?:acceptance\s+criteria|acceptance|success\s+criteria|done\s+when|definition\s+of\s+done)\b",
+    )
+
+
+def specification_section_units(source_text, start_pattern):
+    lines = []
+    active = False
+    start_level = None
+    for raw_line in str(source_text or "").splitlines():
+        stripped = raw_line.strip(" \t-")
+        if not stripped:
+            continue
+        heading = markdown_heading(stripped)
+        title = normalize_markdown_heading_text(heading["text"]) if heading else normalize_markdown_heading_text(stripped)
+        if re.search(start_pattern, title, re.IGNORECASE):
+            active = True
+            start_level = heading["level"] if heading else None
+            continue
+        if active:
+            next_heading = markdown_heading(stripped)
+            if next_heading and (start_level is None or next_heading["level"] <= start_level):
+                break
+            if is_processing_section_boundary(stripped) and not re.match(r"^\d+[.)]|[-*]", stripped):
+                break
+            append_unique(lines, stripped)
+    return lines[:12]
+
+
+def target_release_and_syntax_units(source_text):
+    return specification_keyword_units(
+        source_text,
+        (
+            "sap ecc",
+            "classical",
+            "older",
+            "old release",
+            "release",
+            "sap_basis",
+            "7.0",
+            "7.01",
+            "7.02",
+            "7.31",
+            "no inline",
+            "inline declaration",
+            "modern abap",
+            "host variable",
+            "string template",
+            "table expression",
+            "new syntax",
+        ),
+        limit=10,
+    )
+
+
+def dynamic_runtime_requirement_units(source_text):
+    return specification_keyword_units(
+        source_text,
+        (
+            "dynamic",
+            "unknown at design time",
+            "runtime",
+            "component",
+            "field-symbol",
+            "assign component",
+            "type any",
+            "any table",
+            "generic table",
+            "structure is unknown",
+            "display conversion",
+            "write to",
+        ),
+        limit=12,
+    )
+
+
+def specification_keyword_units(source_text, keywords, limit=10):
+    result = []
+    lowered_keywords = tuple(str(item).lower() for item in keywords or ())
+    for line in specification_units(source_text):
+        normalized = line.lower()
+        if any(keyword in normalized for keyword in lowered_keywords):
+            append_unique(result, line)
+        if len(result) >= limit:
+            break
+    return result
 
 
 def relevant_specification_excerpts(source_text, chunk_name, object_names=None):
@@ -6486,6 +6622,18 @@ def validate_generated_processing_completeness(source, source_text=None, process
     output_fields = output_field_names_from_requirements(declaration_requirements)
     issues = []
     issues.extend(validate_generated_spec_functionality_coverage(source, source_text, processing_plan))
+    issues.extend(validate_generated_final_coherence(source, source_text=source_text, processing_plan=processing_plan))
+    plan = processing_plan_payload(processing_plan)
+    if processing_plan_requires_dynamic_runtime_access(plan, source_text) and not generated_has_dynamic_runtime_access(source):
+        issues.append(
+            processing_completeness_issue(
+                "PROCESSING_DYNAMIC_RUNTIME_ACCESS_MISSING",
+                processing_form_line_number(source),
+                "The processing plan/specification requires dynamic runtime table or component access, but the generated ABAP has no executable dynamic assignment/component access.",
+                processing_form_source_line(source),
+                "Preserve the dynamic table/component design with classical FIELD-SYMBOLS and dynamic ASSIGN or ASSIGN COMPONENT logic.",
+            )
+        )
     if not output_names or not output_fields:
         return dedupe_processing_completeness_issues(issues)
     output_work_area = output_names["work_area"]
@@ -6505,7 +6653,6 @@ def validate_generated_processing_completeness(source, source_text=None, process
                     output_table=output_table,
                 )
             )
-    plan = processing_plan_payload(processing_plan)
     if processing_plan_requests_grouped_or_aggregate_logic(plan, source_text) and not generated_processing_has_grouping_or_aggregation(source):
         issues.append(
             processing_completeness_issue(
@@ -6529,6 +6676,476 @@ def validate_generated_processing_completeness(source, source_text=None, process
                 )
             )
     return dedupe_processing_completeness_issues(issues)
+
+
+def validate_generated_final_coherence(source, source_text=None, processing_plan=None):
+    issues = []
+    issues.extend(validate_unconsumed_calculated_intermediates(source))
+    issues.extend(validate_duplicate_functional_implementations(source))
+    issues.extend(validate_dynamic_generation_coherence(source, source_text=source_text, processing_plan=processing_plan))
+    issues.extend(validate_formatted_output_coherence(source, source_text=source_text))
+    return issues
+
+
+def validate_unconsumed_calculated_intermediates(source):
+    issues = []
+    assignments = calculated_intermediate_assignments(source)
+    lines = str(source or "").splitlines()
+    for item in assignments:
+        target = item["target"]
+        later = "\n".join(lines[item["line_number"] :])
+        if re.search(rf"\b{re.escape(target)}\b", later, re.IGNORECASE):
+            continue
+        issues.append(
+            processing_completeness_issue(
+                "FINAL_CALCULATED_INTERMEDIATE_NOT_CONSUMED",
+                item["line_number"],
+                f"Calculated intermediate {target} is not consumed by downstream processing or output.",
+                item["source_line"],
+                "Use the calculated value in the required downstream processing/output path or remove the redundant calculation.",
+                variable=target,
+            )
+        )
+    return issues
+
+
+def calculated_intermediate_assignments(source):
+    result = []
+    for line_number, line in enumerate(str(source or "").splitlines(), start=1):
+        code = split_code_and_comment(line)[0].strip()
+        if not code or re.match(r"^(DATA|FIELD-SYMBOLS|CONSTANTS|TYPES|PARAMETERS|SELECT-OPTIONS)\b", code, re.IGNORECASE):
+            continue
+        match = re.match(r"^(?P<target>[A-Za-z][A-Za-z0-9_]{1,29})\s*=\s*(?P<expr>.+)\.$", code, re.IGNORECASE)
+        if not match:
+            continue
+        target = match.group("target")
+        if target.lower().startswith(("p_", "s_")) or "-" in target:
+            continue
+        expr = match.group("expr")
+        if re.search(r"[-+*/]|\b(?:STRLEN|ABS|CEIL|FLOOR|ROUND|MAX|MIN)\b", expr, re.IGNORECASE) or calculated_name_suggests_intermediate(target):
+            result.append({"line_number": line_number, "target": target, "source_line": line})
+    return result
+
+
+def calculated_name_suggests_intermediate(name):
+    return bool(re.search(r"\b(?:width|count|total|sum|len|length|sep|separator|offset|index|lines|cols?|components?)\b", str(name or ""), re.IGNORECASE))
+
+
+def validate_duplicate_functional_implementations(source):
+    issues = []
+    forms = executable_form_bodies(source)
+    seen = {}
+    for form_name, info in forms.items():
+        normalized = normalized_executable_body(info["body"])
+        if not normalized:
+            if form_name.lower().startswith(("process", "output", "display", "write")):
+                issues.append(
+                    processing_completeness_issue(
+                        "FINAL_EMPTY_REQUIRED_FORM",
+                        info["line_number"],
+                        f"FORM {form_name} is empty or contains no executable implementation.",
+                        info["source_line"],
+                        "Remove the redundant FORM or implement the required processing/output logic.",
+                        form=form_name,
+                    )
+                )
+            continue
+        if normalized in seen:
+            original = seen[normalized]
+            issues.append(
+                processing_completeness_issue(
+                    "FINAL_DUPLICATE_FORM_IMPLEMENTATION",
+                    info["line_number"],
+                    f"FORM {form_name} duplicates the implementation already present in FORM {original['form']}.",
+                    info["source_line"],
+                    "Keep one implementation of the functional requirement and call that routine from the required flow.",
+                    form=form_name,
+                    duplicate_of=original["form"],
+                )
+            )
+        else:
+            seen[normalized] = {"form": form_name, "line_number": info["line_number"]}
+    requirement_signatures = {}
+    for form_name, info in forms.items():
+        signature = functional_requirement_signature(info["body"])
+        if not signature:
+            continue
+        if signature in requirement_signatures:
+            original = requirement_signatures[signature]
+            issues.append(
+                processing_completeness_issue(
+                    "FINAL_DUPLICATE_REQUIREMENT_IMPLEMENTATION",
+                    info["line_number"],
+                    f"FORM {form_name} appears to independently implement the same requirement as FORM {original['form']}.",
+                    info["source_line"],
+                    "Route the prepared result through one implementation instead of reimplementing the same requirement in multiple routines.",
+                    form=form_name,
+                    duplicate_of=original["form"],
+                )
+            )
+        else:
+            requirement_signatures[signature] = {"form": form_name}
+    return issues
+
+
+def executable_form_bodies(source):
+    forms = {}
+    lines = str(source or "").splitlines()
+    pattern = re.compile(r"^\s*FORM\s+([A-Za-z][A-Za-z0-9_]*)\b", re.IGNORECASE)
+    index = 0
+    while index < len(lines):
+        match = pattern.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        form_name = match.group(1)
+        start = index
+        body = []
+        index += 1
+        while index < len(lines) and not re.match(r"^\s*ENDFORM\b", lines[index], re.IGNORECASE):
+            body.append(lines[index])
+            index += 1
+        forms[form_name] = {"body": "\n".join(body), "line_number": start + 1, "source_line": lines[start]}
+        index += 1
+    return forms
+
+
+def normalized_executable_body(body):
+    executable = []
+    for line in str(body or "").splitlines():
+        code = split_code_and_comment(line)[0].strip()
+        if not code or re.match(r"^(DATA|FIELD-SYMBOLS|CONSTANTS|TYPES|STATICS)\b", code, re.IGNORECASE):
+            continue
+        executable.append(re.sub(r"\s+", " ", code).upper())
+    return "\n".join(executable)
+
+
+def functional_requirement_signature(body):
+    text = normalized_executable_body(body)
+    if not text:
+        return ""
+    features = []
+    for label, pattern in (
+        ("dynamic_component_output", r"\bASSIGN\s+COMPONENT\b.*\bWRITE\b|\bWRITE\b.*\bASSIGN\s+COMPONENT\b"),
+        ("dynamic_component_loop", r"\bASSIGN\s+COMPONENT\b"),
+        ("formatted_output", r"\bCONCATENATE\b.*\bTRANSFER\b|\bWRITE\b.*\bTO\b.*\bTRANSFER\b"),
+        ("alv_output", r"\bREUSE_ALV_GRID_DISPLAY\b"),
+        ("csv_output", r"\bTRANSFER\b"),
+    ):
+        if re.search(pattern, text, re.IGNORECASE | re.DOTALL):
+            features.append(label)
+    return "|".join(features)
+
+
+def validate_dynamic_generation_coherence(source, source_text=None, processing_plan=None):
+    issues = []
+    plan = processing_plan_payload(processing_plan)
+    if dynamic_component_processing_required(plan, source_text):
+        for item in describe_table_component_count_misuse(source):
+            issues.append(
+                processing_completeness_issue(
+                    "FINAL_DESCRIBE_TABLE_USED_AS_COMPONENT_COUNT",
+                    item["line_number"],
+                    f"DESCRIBE TABLE ... LINES populates {item['target']}, which appears to be used as a structure/component count.",
+                    item["source_line"],
+                    "Use runtime structure/component discovery for component counts; use DESCRIBE TABLE ... LINES only for internal-table row counts.",
+                    variable=item["target"],
+                )
+            )
+    if indirect_dynamic_object_assignment_forbidden(source_text):
+        for item in indirect_dynamic_object_assignments(source):
+            issues.append(
+                processing_completeness_issue(
+                    "FINAL_UNREQUESTED_INDIRECT_DYNAMIC_OBJECT_ASSIGNMENT",
+                    item["line_number"],
+                    f"Indirect dynamic object-name assignment {item['expression']} is not required by the specification.",
+                    item["source_line"],
+                    "Assign the supplied dynamic table/object directly unless the specification explicitly requires object-name indirection.",
+                    expression=item["expression"],
+                )
+            )
+    if processing_plan_requires_dynamic_runtime_access(plan, source_text):
+        supplied = dynamic_plan_source_identifiers(plan)
+        if supplied and not any(re.search(rf"\bASSIGN\s+{re.escape(name)}\s+TO\b|\bLOOP\s+AT\s+{re.escape(name)}\b", str(source or ""), re.IGNORECASE) for name in supplied):
+            issues.append(
+                processing_completeness_issue(
+                    "FINAL_DYNAMIC_TABLE_SOURCE_NOT_PRESERVED",
+                    processing_form_line_number(source),
+                    "Dynamic table processing does not use the dynamic table supplied by the processing plan.",
+                    processing_form_source_line(source),
+                    "Preserve and process the dynamic table from the requirement instead of inventing a separate dynamic object source.",
+                    expected_sources=", ".join(supplied),
+                )
+            )
+    issues.extend(validate_redundant_field_symbols_for_same_object(source))
+    return issues
+
+
+def dynamic_component_processing_required(plan, source_text=None):
+    text = processing_plan_text_blob(plan) + "\n" + str(source_text or "")
+    return bool(re.search(r"\b(component|column\s+width|header|separator|formatted)\b", text, re.IGNORECASE))
+
+
+def describe_table_component_count_misuse(source):
+    result = []
+    for line_number, line in enumerate(str(source or "").splitlines(), start=1):
+        code = split_code_and_comment(line)[0]
+        match = re.search(r"\bDESCRIBE\s+TABLE\s+\w+\s+LINES\s+([A-Za-z][A-Za-z0-9_]*)", code, re.IGNORECASE)
+        if not match:
+            continue
+        target = match.group(1)
+        if re.search(r"(comp|component|col|column|field|width|header)", target, re.IGNORECASE):
+            result.append({"line_number": line_number, "target": target, "source_line": line})
+    return result
+
+
+def indirect_dynamic_object_assignment_forbidden(source_text):
+    text = str(source_text or "")
+    return not re.search(r"\b(?:object\s+name|table\s+name|variable\s+name|assign\s+by\s+name|named\s+object)\b", text, re.IGNORECASE)
+
+
+def indirect_dynamic_object_assignments(source):
+    result = []
+    for line_number, line in enumerate(str(source or "").splitlines(), start=1):
+        code = split_code_and_comment(line)[0]
+        match = re.search(r"\bASSIGN\s+(\([^)]+\))\s+TO\b", code, re.IGNORECASE)
+        if match:
+            result.append({"line_number": line_number, "expression": match.group(1), "source_line": line})
+    return result
+
+
+def dynamic_plan_source_identifiers(plan):
+    names = []
+    for step in processing_plan_all_steps(plan):
+        text = " ".join(str(step.get(key) or "") for key in ("iteration_scope", "dynamic_runtime_operation", "technical_details"))
+        if "dynamic" not in text.lower() and "runtime" not in text.lower():
+            continue
+        source = normalize_plan_identifier(step.get("source"))
+        if source:
+            append_unique(names, source)
+    return names
+
+
+def validate_redundant_field_symbols_for_same_object(source):
+    assignments = {}
+    issues = []
+    declared_any_symbols = set()
+    for line in str(source or "").splitlines():
+        code = split_code_and_comment(line)[0]
+        match = re.search(r"\bFIELD-SYMBOLS\s+<([^>]+)>\s+TYPE\s+(?:ANY|ANY\s+TABLE)\b", code, re.IGNORECASE)
+        if match:
+            declared_any_symbols.add(match.group(1).lower())
+    for line_number, line in enumerate(str(source or "").splitlines(), start=1):
+        code = split_code_and_comment(line)[0]
+        match = re.search(r"\bASSIGN\s+([A-Za-z][A-Za-z0-9_]*)\s+TO\s+<([^>]+)>", code, re.IGNORECASE)
+        if not match:
+            continue
+        source_name = match.group(1).lower()
+        symbol = match.group(2).lower()
+        if symbol not in declared_any_symbols:
+            continue
+        prior = assignments.setdefault(source_name, {"symbol": symbol, "line_number": line_number, "source_line": line})
+        if prior["symbol"] != symbol:
+            issues.append(
+                processing_completeness_issue(
+                    "FINAL_REDUNDANT_FIELD_SYMBOL_FOR_SAME_OBJECT",
+                    line_number,
+                    f"Field-symbol <{symbol}> and <{prior['symbol']}> both represent {source_name}.",
+                    line,
+                    "Consolidate field-symbols that represent the same dynamic object unless separate aliases are required.",
+                    variable=source_name,
+                )
+            )
+    return issues
+
+
+def validate_formatted_output_coherence(source, source_text=None):
+    issues = []
+    if trimming_preserve_internal_spaces_required(source_text):
+        for item in condense_statements(source):
+            issues.append(
+                processing_completeness_issue(
+                    "FINAL_TRIM_USES_CONDENSE",
+                    item["line_number"],
+                    "CONDENSE is not valid for trim-only requirements because it changes internal spacing.",
+                    item["source_line"],
+                    "Use SHIFT LEFT DELETING LEADING space and SHIFT RIGHT DELETING TRAILING space to trim only outer spaces.",
+                )
+            )
+    if not formatted_output_requested(source_text) and not generated_builds_formatted_output(source):
+        return issues
+    formatted_names = formatted_output_variable_names(source)
+    if formatted_names and not output_routines_use_any(source, formatted_names):
+        issues.append(
+            processing_completeness_issue(
+                "FINAL_FORMATTED_OUTPUT_NOT_USED",
+                processing_form_line_number(source),
+                "Formatted output is built but the final output routine does not output the formatted result.",
+                processing_form_source_line(source),
+                "Route the formatted headers, separators, widths, and values to the executed output routine instead of reimplementing raw data output.",
+                variables=", ".join(formatted_names),
+            )
+        )
+    if formatted_output_requested(source_text):
+        required_patterns = [
+            ("FINAL_FORMATTED_HEADER_MISSING", r"\bheader\b|sy-uline|uline|separator", "Header or separator formatting required by the specification is missing from the executed code path."),
+            ("FINAL_FORMATTED_WIDTH_MISSING", r"\bwidth\b|strlen|WRITE\b.+\bTO\b", "Calculated column widths or display conversion required by the specification are missing from the executed code path."),
+            ("FINAL_FORMATTED_VALUE_MISSING", r"\bWRITE\b.+\bTO\b|\bCONCATENATE\b", "Formatted display values required by the specification are missing from the executed code path."),
+        ]
+        source_blob = str(source or "")
+        for rule_id, pattern, message in required_patterns:
+            if not re.search(pattern, source_blob, re.IGNORECASE):
+                issues.append(
+                    processing_completeness_issue(
+                        rule_id,
+                        processing_form_line_number(source),
+                        message,
+                        processing_form_source_line(source),
+                        "Keep the formatted header, width, separator, and value-building logic on the final executed output path.",
+                    )
+                )
+    if header_row_required(source_text) and not generated_outputs_header_row(source):
+        issues.append(
+            processing_completeness_issue(
+                "FINAL_REQUIRED_HEADER_ROW_NOT_OUTPUT",
+                processing_form_line_number(source),
+                "The specification requires a header row, but the generated code does not output a generated header row.",
+                processing_form_source_line(source),
+                "Build the required header row and route it through the executed output routine before data rows.",
+            )
+        )
+    if width_must_use_field_name_and_value(source_text) and not generated_width_uses_field_name_and_value(source):
+        issues.append(
+            processing_completeness_issue(
+                "FINAL_WIDTH_IGNORES_FIELD_NAME_OR_VALUE",
+                processing_form_line_number(source),
+                "The specification requires calculated widths to consider both field names and data values.",
+                processing_form_source_line(source),
+                "Initialise or adjust each column width from the field/component name and from the formatted component value.",
+            )
+        )
+    return issues
+
+
+def formatted_output_requested(source_text):
+    return bool(re.search(r"\b(formatted|header|separator|column\s+width|width|aligned|runtime\s+components?)\b", str(source_text or ""), re.IGNORECASE))
+
+
+def generated_builds_formatted_output(source):
+    return bool(re.search(r"\b(?:CONCATENATE|WRITE\b.+\bTO\b|STRLEN|sy-uline|ULINE)\b", str(source or ""), re.IGNORECASE | re.DOTALL))
+
+
+def formatted_output_variable_names(source):
+    names = []
+    for line in str(source or "").splitlines():
+        code = split_code_and_comment(line)[0]
+        for pattern in (
+            r"\bCONCATENATE\b.+\bINTO\s+([A-Za-z][A-Za-z0-9_]*)",
+            r"\bWRITE\b.+\bTO\s+([A-Za-z][A-Za-z0-9_]*)",
+            r"\b([A-Za-z][A-Za-z0-9_]*(?:formatted|line|header|separator|width)[A-Za-z0-9_]*)\s*=",
+        ):
+            match = re.search(pattern, code, re.IGNORECASE)
+            if match:
+                append_unique(names, match.group(1))
+    return names
+
+
+def output_routines_use_any(source, names):
+    output_body = "\n".join(
+        info["body"]
+        for form_name, info in executable_form_bodies(source).items()
+        if re.search(r"\b(output|display|write|alv|csv)\b", form_name, re.IGNORECASE)
+    )
+    if not output_body:
+        return False
+    return any(re.search(rf"\b{re.escape(name)}\b", output_body, re.IGNORECASE) for name in names)
+
+
+def header_row_required(source_text):
+    text = str(source_text or "")
+    if re.search(r"\bfirst\s+(?:input\s+)?row\s+is\s+a\s+header\b|\bskip\s+(?:the\s+)?(?:first\s+)?header\b", text, re.IGNORECASE):
+        return False
+    return bool(re.search(r"\b(?:header\s+row|column\s+headers?|field\s+headers?|output\s+headers?)\b", text, re.IGNORECASE))
+
+
+def generated_outputs_header_row(source):
+    forms = executable_form_bodies(source)
+    output_body = "\n".join(
+        info["body"]
+        for form_name, info in forms.items()
+        if re.search(r"\b(output|display|write|alv|csv)\b", form_name, re.IGNORECASE)
+    )
+    text = output_body or str(source or "")
+    has_header_build = bool(re.search(r"\bheader\w*\b", text, re.IGNORECASE) or re.search(r"\bCONCATENATE\b.+\bINTO\s+\w*head\w*", text, re.IGNORECASE | re.DOTALL))
+    has_header_output = bool(
+        re.search(r"\b(?:WRITE|TRANSFER)\b.+\bheader\w*\b|\bheader\w*\b.+\b(?:WRITE|TRANSFER)\b", text, re.IGNORECASE | re.DOTALL)
+        or re.search(r"\bAPPEND\s+\w*header\w*\s+TO\s+t_output\b", text, re.IGNORECASE)
+    )
+    return has_header_build and has_header_output
+
+
+def width_must_use_field_name_and_value(source_text):
+    text = str(source_text or "")
+    return bool(
+        re.search(r"\bwidths?\b", text, re.IGNORECASE)
+        and re.search(r"\b(?:field|component|column)\s+names?\b", text, re.IGNORECASE)
+        and re.search(r"\b(?:data\s+)?values?\b", text, re.IGNORECASE)
+    )
+
+
+def generated_width_uses_field_name_and_value(source):
+    width_statements = []
+    for line in str(source or "").splitlines():
+        code = split_code_and_comment(line)[0]
+        if re.search(r"\b(?:width|len|length)\w*\b", code, re.IGNORECASE):
+            width_statements.append(code)
+    blob = "\n".join(width_statements)
+    if not blob:
+        return False
+    name_width = bool(re.search(r"\bSTRLEN\b.+\b(?:name|field|component|column)\b|\b(?:name|field|component|column)\b.+\bSTRLEN\b", blob, re.IGNORECASE | re.DOTALL))
+    value_width = bool(re.search(r"\bSTRLEN\b.+\b(?:value|text|display|data)\b|\b(?:value|text|display|data)\b.+\bSTRLEN\b|\bWRITE\b.+\bTO\b.+\b(?:text|display|value)\b", blob, re.IGNORECASE | re.DOTALL))
+    return name_width and value_width
+
+
+def trimming_preserve_internal_spaces_required(source_text):
+    text = str(source_text or "")
+    trim_outer = re.search(r"\b(?:trim|remove|strip)\b.{0,40}\b(?:leading|trailing|outer)\b|\b(?:leading|trailing)\b.{0,40}\bspaces?\b", text, re.IGNORECASE | re.DOTALL)
+    preserve_internal = re.search(r"\bpreserv(?:e|ing)\b.{0,40}\b(?:internal|within|embedded)\s+spaces?\b|\bdo\s+not\b.{0,40}\b(?:alter|remove|collapse)\b.{0,40}\b(?:internal|within|embedded)\s+spaces?\b", text, re.IGNORECASE | re.DOTALL)
+    condense_allowed = re.search(r"\bcondense\b|\bcollapse\s+internal\s+spaces?\b|\bremove\s+all\s+spaces?\b", text, re.IGNORECASE)
+    return bool(trim_outer and (preserve_internal or not condense_allowed))
+
+
+def condense_statements(source):
+    result = []
+    for line_number, line in enumerate(str(source or "").splitlines(), start=1):
+        code = split_code_and_comment(line)[0]
+        if re.search(r"^\s*CONDENSE\s+[A-Za-z][A-Za-z0-9_]*(?:\s+NO-GAPS)?\s*\.", code, re.IGNORECASE):
+            result.append({"line_number": line_number, "source_line": line})
+    return result
+
+
+def apply_final_requirement_repairs(source, source_text=None):
+    result = str(source or "")
+    if trimming_preserve_internal_spaces_required(source_text):
+        result = replace_condense_with_outer_trim(result)
+    return result
+
+
+def replace_condense_with_outer_trim(source):
+    repaired = []
+    changed = False
+    for line in str(source or "").splitlines():
+        code, comment = split_code_and_comment(line)
+        match = re.match(r"^(\s*)CONDENSE\s+([A-Za-z][A-Za-z0-9_]*)(?:\s+NO-GAPS)?\s*\.\s*$", code, re.IGNORECASE)
+        if not match:
+            repaired.append(line)
+            continue
+        indent, variable = match.groups()
+        suffix = (" " + comment.strip()) if comment.strip() else ""
+        repaired.append(f"{indent}SHIFT {variable} LEFT DELETING LEADING space.{suffix}")
+        repaired.append(f"{indent}SHIFT {variable} RIGHT DELETING TRAILING space.")
+        changed = True
+    return "\n".join(repaired) if changed else source
 
 
 def validate_generated_spec_functionality_coverage(source, source_text=None, processing_plan=None):
@@ -6643,7 +7260,113 @@ def validate_generated_spec_functionality_coverage(source, source_text=None, pro
                 "Display the processed results with REUSE_ALV_GRID_DISPLAY, CL_SALV_TABLE, or CL_GUI_ALV_GRID.",
             )
         )
+    if specification_requests_output_presentation(source_text):
+        empty_forms = empty_required_output_forms(source)
+        for form_name in empty_forms:
+            issues.append(
+                processing_completeness_issue(
+                    "SPEC_REQUIRED_OUTPUT_FORM_EMPTY",
+                    form_line_number(source, form_name),
+                    f"The specification requires output, but FORM {form_name} contains no executable output logic.",
+                    form_source_line(source, form_name),
+                    "Implement the required output routine so it presents or transfers the prepared output data.",
+                    form=form_name,
+                )
+            )
+        if output_table_used(source, "t_output") and not generated_outputs_prepared_output_table(source):
+            issues.append(
+                processing_completeness_issue(
+                    "SPEC_PREPARED_OUTPUT_NOT_PRESENTED",
+                    processing_form_line_number(source),
+                    "The generated program prepares t_output but does not present or transfer it in an executable output routine.",
+                    processing_form_source_line(source),
+                    "Pass t_output to ALV, loop over it for list output, or transfer rows from it for file output according to the specification.",
+                )
+            )
     return issues
+
+
+def processing_plan_requires_dynamic_runtime_access(plan, source_text=None):
+    dynamic_terms = (
+        "dynamic",
+        "runtime",
+        "component",
+        "unknown at design time",
+        "assign component",
+        "type any",
+        "any table",
+        "generic table",
+    )
+    text = processing_plan_text_blob(plan) + "\n" + str(source_text or "")
+    return any(term in text.lower() for term in dynamic_terms)
+
+
+def generated_has_dynamic_runtime_access(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\bFIELD-SYMBOLS\b.+\bTYPE\s+(?:ANY|ANY\s+TABLE)\b", text, re.IGNORECASE | re.DOTALL)
+        and re.search(r"\bASSIGN(?:\s+COMPONENT)?\b", text, re.IGNORECASE)
+    )
+
+
+def specification_requests_output_presentation(source_text):
+    text = str(source_text or "")
+    if re.search(r"\bno\s+output(?!\s+file)\b|\bno\s+display\b", text, re.IGNORECASE):
+        return False
+    return bool(re.search(r"\b(output|display|show|list|write|print|alv|csv|download|export|present)\b", text, re.IGNORECASE))
+
+
+def empty_required_output_forms(source):
+    result = []
+    for form_name in ("output_data", "display_alv", "display_output", "write_csv"):
+        body = form_body(source, form_name)
+        if body is not None and not form_body_has_executable_output_logic(body):
+            result.append(form_name)
+    return result
+
+
+def form_body(source, form_name):
+    pattern = rf"(?ims)^\s*FORM\s+{re.escape(form_name)}\b.*?\.\s*(?P<body>.*?)^\s*ENDFORM\s*\."
+    match = re.search(pattern, str(source or ""))
+    return match.group("body") if match else None
+
+
+def form_body_has_executable_output_logic(body):
+    for line in str(body or "").splitlines():
+        code = split_code_and_comment(line)[0].strip()
+        if not code:
+            continue
+        if re.search(r"\b(?:CALL\s+FUNCTION\s+'REUSE_ALV|TRANSFER|WRITE|LOOP\s+AT|OPEN\s+DATASET|GUI_DOWNLOAD|CL_GUI_FRONTEND_SERVICES|SUBMIT|CALL\s+SCREEN)\b", code, re.IGNORECASE):
+            return True
+    return False
+
+
+def form_line_number(source, form_name):
+    for number, line in enumerate(str(source or "").splitlines(), start=1):
+        if re.match(rf"\s*FORM\s+{re.escape(form_name)}\b", line, re.IGNORECASE):
+            return number
+    return 1
+
+
+def form_source_line(source, form_name):
+    lines = str(source or "").splitlines()
+    line_number = form_line_number(source, form_name)
+    if 1 <= line_number <= len(lines):
+        return lines[line_number - 1]
+    return ""
+
+
+def generated_outputs_prepared_output_table(source):
+    text = str(source or "")
+    if re.search(r"\bT_OUTTAB\s*=\s*t_output\b", text, re.IGNORECASE):
+        return True
+    if re.search(r"\bLOOP\s+AT\s+t_output\b", text, re.IGNORECASE):
+        return True
+    for line in text.splitlines():
+        code = split_code_and_comment(line)[0]
+        if re.search(r"\bt_output\b", code, re.IGNORECASE) and re.search(r"\b(?:TRANSFER|WRITE)\b", code, re.IGNORECASE):
+            return True
+    return False
 
 
 def generated_has_file_source_selection(source):
@@ -6901,9 +7624,22 @@ def final_llm_assembly_prompt():
             "Assemble ABAP generation chunks into one complete classical SAP ECC ABAP report.",
             "Use only the supplied chunk responses.",
             "Preserve the implemented business logic, table reads, SELECT field lists, WHERE clauses, FORM names, and output behavior.",
+            "Preserve dynamic table assignment, runtime component access, display conversion, and target-release syntax restrictions already present in the chunks.",
+            "Do not invent concrete row structures or component names when the chunks describe dynamic or unknown-at-design-time structures.",
+            "Do not leave required output FORM routines empty; ensure assembled output routines still pass or present the prepared output data.",
             "Resolve mechanical assembly problems such as duplicate global declarations, duplicate FORM blocks, misplaced declarations, or repeated REPORT statements.",
             "Do not add fields to SELECT field lists unless they are explicitly required to be read or returned.",
             "Fields used only in WHERE conditions must remain in the WHERE clause and must not be added to SELECT lists or output structures.",
+            "Before returning, check that every processing-plan operation and acceptance criterion represented in the chunks remains implemented in the assembled ABAP.",
+            "Check final coherence: every calculated intermediate must feed downstream processing, prepared output must be consumed by the output routine, and formatted output routines must output the formatted result rather than rebuilding raw output separately.",
+            "Remove empty, redundant, or duplicate processing and avoid independently implementing the same functional requirement in multiple FORM routines.",
+            "Consolidate variables and field-symbols that represent the same dynamic object where possible.",
+            "Use DESCRIBE TABLE ... LINES only for row counts, never as a structure/component count.",
+            "Do not invent indirect dynamic object-name assignment unless the functional specification explicitly requires object-name indirection.",
+            "If headers are required, ensure a generated header row is on the final executed output path.",
+            "If column widths are required to consider field names and data values, ensure width logic uses both the field/component name and the formatted value.",
+            "If only leading/trailing spaces should be removed, preserve internal spaces; do not use CONDENSE for trim-only requirements.",
+            "Preserve older-compatible ABAP syntax; do not introduce VALUE #( ), inline DATA(...), string templates, table expressions, or other unsupported modern constructs.",
             "Return ABAP code only.",
         ]
     )

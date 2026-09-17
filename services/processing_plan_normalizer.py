@@ -3,6 +3,15 @@ import re
 
 
 GLOBAL_STYLE_PREFIXES = ("t_", "st_", "w_", "gt_", "gs_", "gv_", "it_", "lt_", "ls_", "lv_", "wa_", "ct_")
+PROCESSING_STEP_TECHNICAL_DETAIL_FIELDS = (
+    "data_object",
+    "iteration_scope",
+    "derived_or_modified_value",
+    "retained_state",
+    "dynamic_runtime_operation",
+    "technical_details",
+)
+TABLE_ROW_ITERATION_SCOPES = {"", "internal_table_rows", "table_rows"}
 
 SUPPORTED_PROCESSING_PLAN_OPERATIONS = {
     "APPEND",
@@ -113,8 +122,12 @@ def normalize_processing_step(item, index, context, path=None):
         record_processing_step_rejection(context.get("diagnostics"), path, item, "unsupported or missing operation", "normalize_processing_step")
         return None
     step = {"step": item.get("step") if isinstance(item.get("step"), int) else index, "operation": operation}
+    copy_processing_step_technical_details(step, item)
     if operation == "LOOP":
+        iteration_scope = normalize_processing_step_detail(item.get("iteration_scope"))
         source = normalize_plan_identifier(item.get("source"))
+        if not source and iteration_scope not in TABLE_ROW_ITERATION_SCOPES:
+            source = normalize_plan_reference(item.get("source"), context, role="source")
         if source:
             step["source"] = source
         into = normalize_plan_identifier(item.get("into")) or work_area_for_table(source, context)
@@ -233,6 +246,20 @@ def normalize_processing_step(item, index, context, path=None):
             step[key] = normalize_plan_reference(value, context) if key in {"source", "target", "into"} else str(value).strip()
     record_processing_step_modification(context.get("diagnostics"), path, item, step, f"normalized {operation} scalar fields", "normalize_processing_step")
     return step
+
+
+def copy_processing_step_technical_details(step, item):
+    for key in PROCESSING_STEP_TECHNICAL_DETAIL_FIELDS:
+        value = normalize_processing_step_detail((item or {}).get(key))
+        if value:
+            step[key] = value
+
+
+def normalize_processing_step_detail(value):
+    if value is None:
+        return ""
+    text = re.sub(r"\s+", " ", str(value).strip())
+    return text[:500]
 
 
 def normalize_callable_step_name(item, operation=None, context=None):
