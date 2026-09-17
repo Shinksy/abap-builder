@@ -1,7 +1,10 @@
+<task>
 You are enhancing an existing classical SAP ECC ABAP program.
 
 Return the complete updated ABAP source only. Do not use Markdown fences.
+</task>
 
+<preservation_rules>
 Preservation rules:
 
 - Preserve the existing program structure, coding style, naming conventions, comments, and formatting wherever possible.
@@ -37,16 +40,23 @@ Preservation rules:
 - Do not invent SAP table fields, structure components, data elements, function modules, classes, methods, or DDIC objects.
 - Every new external SAP identifier must come from the existing program, the functional specification, verified SAP metadata, or callable metadata.
 - If required SAP metadata is unknown, leave the existing source unchanged around that requirement and add a clear ABAP comment that identifies the unresolved metadata requirement.
+</preservation_rules>
 
+<expected_edit_style>
 Example of the expected edit style:
 
 - If a field must be added to an existing SELECT field list, add that field to the existing field list and preserve the SELECT statement's existing clause order, indentation, WHERE conditions, INTO target, and comments.
 - Apply the same minimal-edit rule generically to IF, LOOP, READ TABLE, CALL FUNCTION, PERFORM, DATA/TYPES declarations, APPEND/MOVE assignments, and any other existing ABAP statement.
+</expected_edit_style>
 
+<functional_specification>
 Functional specification:
 
 {{FUNCTIONAL_SPECIFICATION}}
+</functional_specification>
 
+<existing_abap>
 Existing ABAP program:
 
 {{EXISTING_ABAP}}
+</existing_abap>

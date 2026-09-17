@@ -1,11 +1,16 @@
+<task>
 Extract the business-processing logic from the functional specification.
 Extract business-processing logic.
 
 Return one valid JSON object containing a processing_steps array.
 Do not generate ABAP.
+</task>
 
+<processing_contract_rules>
 The processing contract defines the only valid internal tables, work areas, fields, callables, output fields, and selection parameters. Use only names from that contract.
+</processing_contract_rules>
 
+<pre_generation_review>
 Before returning the plan:
 
 - Identify every required output field.
@@ -13,7 +18,9 @@ Before returning the plan:
 - Identify grouping keys and any intermediate totals, counters, flags, or lookup variables required.
 - Include all source fields required by calculations, grouping, transformations, lookups, and derived fields.
 - Represent every processing requirement from the specification as executable processing steps.
+</pre_generation_review>
 
+<allowed_operations>
 Represent the business logic using these operations:
 
 - LOOP
@@ -35,7 +42,9 @@ Represent the business logic using these operations:
 - CONCATENATE
 - SORT
 - DELETE
+</allowed_operations>
 
+<operation_schema>
 Operation schema:
 
 - LOOP: source, into, steps, optional iteration_scope
@@ -55,7 +64,9 @@ Operation schema:
 - CALL_STATIC_METHOD: class, method, input_parameters, output_parameters, receiving_parameter or returning_parameter
 - CALL_METHOD: object, method, input_parameters, output_parameters, receiving_parameter or returning_parameter
 - CONCATENATE, SORT, DELETE: include only required fields
+</operation_schema>
 
+<optional_technical_detail_fields>
 Optional technical-detail fields may be added to any processing step:
 
 - data_object: the exact table, work area, structure, component list, callable result, output object, or runtime object being processed.
@@ -64,7 +75,9 @@ Optional technical-detail fields may be added to any processing step:
 - retained_state: intermediate state that must survive for later steps, such as totals, counters, flags, lookup results, field symbols, component metadata, or per-component widths.
 - dynamic_runtime_operation: runtime type discovery, structure discovery, component discovery, dynamic component access, dynamic assignment, per-component calculation, or other dynamic ABAP concept required by the specification.
 - technical_details: concise implementation-relevant prose when the structured fields alone are not enough.
+</optional_technical_detail_fields>
 
+<rules>
 Rules
 
 - Preserve the order of the functional specification.
@@ -79,17 +92,17 @@ Rules
   - "Search", "Find", "Lookup" → READ
   - "Populate", "Assign", "Use" → MOVE
   - "Call function/module" → CALL_FUNCTION
-  - "Call static method", "class method", "=>" -> CALL_STATIC_METHOD
-  - "Call instance method", "object method", "->" -> CALL_METHOD
+  - "Call static method", "class method", "=&gt;" -&gt; CALL_STATIC_METHOD
+  - "Call instance method", "object method", "-&gt;" -&gt; CALL_METHOD
   - "Add output record" → APPEND
 - Translate calculation and summary words into executable processing operations:
-  - "Calculate", "compute", formulas, margins, differences, ratios -> CALCULATE
-  - "Derive", "determine", "classify", "bucket" -> DERIVE
-  - "Transform", "format", "convert", "substring", "concatenate" -> TRANSFORM or CONCATENATE
-  - "Total", "sum", "aggregate" -> AGGREGATE
-  - "Count", "number of", "distinct documents" -> COUNT
-  - "Average", "mean" -> AVERAGE
-  - "Percent", "percentage", "rate" -> PERCENTAGE
+  - "Calculate", "compute", formulas, margins, differences, ratios -&gt; CALCULATE
+  - "Derive", "determine", "classify", "bucket" -&gt; DERIVE
+  - "Transform", "format", "convert", "substring", "concatenate" -&gt; TRANSFORM or CONCATENATE
+  - "Total", "sum", "aggregate" -&gt; AGGREGATE
+  - "Count", "number of", "distinct documents" -&gt; COUNT
+  - "Average", "mean" -&gt; AVERAGE
+  - "Percent", "percentage", "rate" -&gt; PERCENTAGE
 - Do not invent business logic that is not implied by the specification.
 - Nest all steps that occur within a LOOP inside its steps array.
 - READ conditions must be structured lookup-key objects with left, operator and right.
@@ -99,8 +112,8 @@ Rules
 - Only fields explicitly required to be read or returned should appear in processing fields.
 - Fields used only in SQL WHERE conditions are filter fields and must not be added to processing structures or output structures unless explicitly required elsewhere in the specification.
 - IF branches must contain then and else arrays. Use empty arrays when a branch has no explicit steps.
-- Output fields must be referenced as w_output-<field>.
-- Every required output field must have a concrete MOVE, CALCULATE, DERIVE, TRANSFORM, AGGREGATE, COUNT, AVERAGE, PERCENTAGE, or callable output step targeting w_output-<field>.
+- Output fields must be referenced as w_output-&lt;field&gt;.
+- Every required output field must have a concrete MOVE, CALCULATE, DERIVE, TRANSFORM, AGGREGATE, COUNT, AVERAGE, PERCENTAGE, or callable output step targeting w_output-&lt;field&gt;.
 - For one-output-row-per-group requirements, include group_by on the aggregation/count/average/percentage steps and do not model the output as one APPEND per source record.
 - For calculations, include a classical ABAP-compatible expression using only available source fields, constants, declared variables, or prior aggregate results.
 - For percentages and averages, include the numerator and denominator and any required zero-denominator handling implied by the specification.
@@ -109,7 +122,7 @@ Rules
   - APPEND w_output TO t_output after it is populated.
 - CALL_FUNCTION must contain separate input_parameters and output_parameters objects.
 - CALL_STATIC_METHOD and CALL_METHOD must contain separate input_parameters and output_parameters objects.
-- For CALL_STATIC_METHOD, split the provider-compatible CLASS=>METHOD identity into class and method.
+- For CALL_STATIC_METHOD, split the provider-compatible CLASS=&gt;METHOD identity into class and method.
 - For CALL_METHOD, use the instance object name and method name from the specification.
 - Use receiving_parameter when a method returns a value via ABAP RECEIVING.
 - Use returning_parameter when the specification describes a returned value without naming ABAP RECEIVING syntax.
@@ -117,3 +130,4 @@ Rules
 - Do not use placeholder conditions.
 - Do not use placeholder processing steps.
 - Return an empty processing_steps array only if the specification contains no business-processing logic and no required output fields are derived by processing.
+</rules>

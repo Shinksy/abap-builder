@@ -1,30 +1,54 @@
+<task>
 Declarations-specific prompt:
-Generate only classical SAP ECC ABAP declarations needed by this report.
 
+Generate only classical SAP ECC ABAP declarations needed by this report.
+</task>
+
+<allowed_output>
 Allowed output statements:
 - REPORT
 - TABLES
 - CONSTANTS
+</allowed_output>
 
+<output_restrictions>
 Do not generate TYPES, DATA, PARAMETERS or SELECT-OPTIONS.
 The application inserts DDIC-backed TYPES, DATA and selection-screen declarations deterministically from the approved structured generation contract.
 
 Return only the allowed declaration statements.
+</output_restrictions>
 
+<field_selection_rules>
 Field-selection rules:
+
 - Include only fields explicitly required to be read or returned in declared structures.
 - Fields used only in WHERE conditions are filter fields and must not be added to internal table structures, work areas, processing structures, or output structures unless explicitly required elsewhere in the specification.
+</field_selection_rules>
 
+<declaration_requirements>
 Declaration requirements:
+
 {{DECLARATION_REQUIREMENTS}}
+</declaration_requirements>
 
+<tables_declaration_rules>
 For every entry in tables_declarations, generate one TABLES declaration for that DDIC table.
+</tables_declaration_rules>
 
+<sap_ddic_metadata>
 Relevant SAP DDIC metadata:
+
 {{DDIC_METADATA}}
+</sap_ddic_metadata>
 
+<sap_callable_metadata>
 Relevant SAP callable metadata:
-{{CALLABLE_METADATA}}
 
+{{CALLABLE_METADATA}}
+</sap_callable_metadata>
+
+<chunk_contract>
 Declaration chunk contract:
+
 {{CHUNK_CONTRACT}}
+</chunk_contract>

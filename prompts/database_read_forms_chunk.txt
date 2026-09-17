@@ -1,7 +1,10 @@
+<task>
 Database-read chunk prompt:
-Generate only FORM...ENDFORM routines that read SAP database content.
 
-Rules:
+Generate only FORM...ENDFORM routines that read SAP database content.
+</task>
+
+<rules>
 - Use classical SAP ECC Open SQL.
 - Use explicit SELECT field lists.
 - Include only fields explicitly required to be read or returned in each SELECT field list.
@@ -19,7 +22,9 @@ Rules:
 - Use only selection parameters and select-options from the supplied database-read requirements when building SQL conditions.
 - Build the database-read routine for each DDIC object from the supplied requirements, DDIC metadata, and chunk contract.
 - Return only ABAP source for these routines.
+</rules>
 
+<selection_option_rules>
 Selection-Option Rules:
 
 Selection-options are the source of all database filtering.
@@ -42,12 +47,22 @@ The program must **not** manually process selection-option range tables by:
 * checking OPTION
 
 Selection-option filtering must always be performed by the database using the WHERE clause.
+</selection_option_rules>
 
+<database_read_requirements>
 Database-read requirements:
+
 {{DATABASE_READ_REQUIREMENTS}}
+</database_read_requirements>
 
+<ddic_metadata>
 Relevant SAP DDIC metadata:
-{{DDIC_METADATA}}
 
+{{DDIC_METADATA}}
+</ddic_metadata>
+
+<chunk_contract>
 DB-read chunk contract:
+
 {{CHUNK_CONTRACT}}
+</chunk_contract>

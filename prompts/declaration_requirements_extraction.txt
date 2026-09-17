@@ -1,10 +1,14 @@
+<task>
 Extract declaration requirements from the functional specification.
 
 Return structured JSON only.
 Do not generate ABAP.
 Do not include implementation logic for database reads, processing, output routines, FORM routines, or event blocks.
+</task>
 
+<required_json_shape>
 Return exactly this JSON shape:
+
 {
   "report_name": "",
   "parameters": [
@@ -24,14 +28,14 @@ Return exactly this JSON shape:
       "default": ""
     }
   ],
-  "tables_declarations": [],  
+  "tables_declarations": [],
   "global_variables": [
     {
       "name": "",
       "declaration": ""
     }
   ],
-  "constants": [],  
+  "constants": [],
   "output_structure_fields": [
     {
       "name": "",
@@ -39,8 +43,9 @@ Return exactly this JSON shape:
     }
   ]
 }
+</required_json_shape>
 
-Rules:
+<rules>
 - Include only declaration requirements explicitly stated in the functional specification.
 - Include global_variables for every global DATA object that generated FORM routines must reference.
 - Each global_variables entry must include the exact variable name and the complete ABAP DATA declaration when the type is known.
@@ -71,8 +76,11 @@ Rules:
 - Preserve DEFAULT values exactly as ABAP-ready literals or values, for example "X" when a radio button or checkbox is selected by default.
 - For SELECT-OPTIONS, preserve the exact referenced FOR field or explicit TYPE or LIKE and any DEFAULT value.
 - Leave an array empty when the functional specification does not explicitly require that category.
+</rules>
 
+<radio_button_example>
 Example radio button PARAMETERS entries:
+
 {
   "name": "p_alv",
   "type_or_like": "",
@@ -80,6 +88,7 @@ Example radio button PARAMETERS entries:
   "radiobutton_group": "rad1",
   "default": "X"
 }
+
 {
   "name": "p_file",
   "type_or_like": "",
@@ -87,3 +96,20 @@ Example radio button PARAMETERS entries:
   "radiobutton_group": "rad1",
   "default": ""
 }
+</radio_button_example>
+
+<functional_specification>
+{{SPECIFICATION}}
+</functional_specification>
+
+<sap_ddic_metadata>
+{{DDIC_METADATA}}
+</sap_ddic_metadata>
+
+<sap_callable_metadata>
+{{CALLABLE_METADATA}}
+</sap_callable_metadata>
+
+<generation_contract>
+{{GENERATION_CONTRACT}}
+</generation_contract>

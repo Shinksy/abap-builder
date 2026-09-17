@@ -1,16 +1,28 @@
+<task>
 Main program flow chunk prompt:
-Generate only the main event block and PERFORM calls.
 
+Generate only the main event block and PERFORM calls.
+</task>
+
+<rules>
 Rules:
+
 - Use the exact FORM names from the supplied chunk contract.
 - Call routines in dependency order: database reads first, processing next, result handling last.
 - Do not generate declarations.
 - Do not generate FORM routines.
 - Do not generate SAP database reads inside the event block.
 - Return only ABAP source for the main event block.
+</rules>
 
+<main_flow_requirements>
 Main-flow requirements:
-{{MAIN_FLOW_REQUIREMENTS}}
 
+{{MAIN_FLOW_REQUIREMENTS}}
+</main_flow_requirements>
+
+<chunk_contract>
 Main-flow chunk contract:
+
 {{CHUNK_CONTRACT}}
+</chunk_contract>

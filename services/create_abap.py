@@ -80,6 +80,7 @@ from services.validator import parse_callable_invocations, validate_abap
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPORT_SKELETON_PATH = PROJECT_ROOT / "templates" / "report_skeleton.abap"
 DATABASE_READ_PATTERNS_PATH = PROJECT_ROOT / "templates" / "database_read_patterns.abap"
+SAP_SYNTAX_REPAIR_PROMPT_PATH = PROJECT_ROOT / "prompts" / "repair_prompt.txt"
 POST_GENERATION_INVALID_DDIC_FRAGMENTS = {"END", "LINE", "NON", "START", "SY"}
 POST_GENERATION_PROCESSING_DIAGNOSTIC = "post_generation_processing.json"
 PROCESSING_PLAN_PROPOSAL_ARTIFACT = "processing_plan_proposal.json"
@@ -2873,27 +2874,14 @@ def save_syntax_repair_flow_diagnostic(job_folder, diagnostic):
 
 
 def build_sap_syntax_repair_prompt(errors):
-    return (
-        "You are repairing an existing ABAP program after SAP syntax validation.\n\n"
-        "Correct only the reported SAP syntax errors.\n"
-        "Make the smallest possible changes.\n"
-        "Do not rewrite unrelated code.\n"
-        "Preserve the existing logic, declarations, formatting and comments.\n"
-        "Return the complete corrected ABAP source only. Do not use Markdown fences.\n\n"
-        "When repairing a LOOP AT statement for an internal table without a header line:\n\n"
-        "- Do not introduce inline declarations.\n"
-        "- Do not use ASSIGNING FIELD-SYMBOL(...).\n"
-        "- Use a separately declared work area.\n"
-        "- Use classic ECC-compatible syntax:\n\n"
-        "DATA w_line TYPE <table_line_type>.\n"
-        "LOOP AT internal_table INTO w_line.\n\n"
-        "- Update references inside the loop from internal_table-field to w_line-field.\n"
-        "- Reuse an existing compatible work area when one already exists.\n"
-        "- Choose a work-area name derived from the internal table name.\n\n"
-        "Apply this rule generically to any internal table, not only t_edids.\n\n"
-        "Normalized SAP syntax errors:\n"
-        f"{json.dumps(errors or [], indent=2)}"
+    return load_sap_syntax_repair_prompt_template().replace(
+        "{{NORMALIZED_SAP_SYNTAX_ERRORS}}",
+        json.dumps(errors or [], indent=2),
     )
+
+
+def load_sap_syntax_repair_prompt_template(path=SAP_SYNTAX_REPAIR_PROMPT_PATH):
+    return Path(path).read_text(encoding="utf-8")
 
 
 def save_sap_syntax_check(job_folder, result):

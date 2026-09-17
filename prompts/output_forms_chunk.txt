@@ -1,7 +1,12 @@
+<task>
 Output chunk prompt:
-Generate only FORM...ENDFORM routines that prepare and present generated results.
 
+Generate only FORM...ENDFORM routines that prepare and present generated results.
+</task>
+
+<rules>
 Rules:
+
 - Use the exact output FORM names and output fields from the supplied chunk contract.
 - Generate ALV logic only when an ALV FORM name is present in the chunk contract.
 - Generate CSV logic only when a CSV FORM name is present in the chunk contract.
@@ -13,7 +18,9 @@ Rules:
 - Output routines must actually present or transfer the prepared generated data. Use the supplied global output table and output fields from the chunk contract; do not build a disconnected placeholder output.
 - Respect target release and syntax restrictions from the functional-specification context. Use classical SAP ECC-compatible output code when older-compatible syntax is requested.
 - Return only ABAP source for these routines.
+</rules>
 
+<alv_output_rules>
 When ALV output is required:
 
 - Use classical SAP ECC ALV.
@@ -23,8 +30,11 @@ When ALV output is required:
 - The application inserts the field-catalogue entries deterministically from the approved output contract.
 - Pass the field catalogue using IT_FIELDCAT.
 - Pass the prepared output table using T_OUTTAB.
+</alv_output_rules>
 
+<file_output_rules>
 When file output is required:
+
 - Use the existing global filename variable from the supplied chunk contract.
 - Treat the filename variable as the dataset path only.
 - Do not use the filename variable as a CSV header, row, or concatenation buffer.
@@ -32,17 +42,30 @@ When file output is required:
 - Build each CSV row in the CSV line variable, then TRANSFER the CSV line variable TO the filename variable.
 - Do not create local or undeclared filename variables.
 - Build rows from the prepared output table or explicitly prepared output work area. Do not transfer an empty row or unrelated placeholder.
+</file_output_rules>
 
+<final_review>
 Before returning:
+
 - Check that each required output FORM contains executable output logic.
 - Check that the prepared output data is actually passed to ALV, written, transferred, downloaded, or otherwise presented as required.
 - Check that every acceptance criterion and functional-specification context item supplied below is covered by executable output logic or intentionally belongs to another chunk.
+</final_review>
 
+<output_requirements>
 Output requirements:
+
 {{OUTPUT_REQUIREMENTS}}
+</output_requirements>
 
+<sap_ddic_metadata>
 Relevant SAP DDIC metadata:
-{{DDIC_METADATA}}
 
+{{DDIC_METADATA}}
+</sap_ddic_metadata>
+
+<chunk_contract>
 Output chunk contract:
+
 {{CHUNK_CONTRACT}}
+</chunk_contract>

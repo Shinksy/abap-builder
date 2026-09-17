@@ -1,0 +1,53 @@
+<task>
+You are repairing an existing ABAP program after SAP syntax validation.
+
+Correct only the reported SAP syntax errors.
+Make the smallest possible changes.
+Do not rewrite unrelated code.
+Preserve the existing logic, declarations, formatting and comments.
+Return the complete corrected ABAP source only. Do not use Markdown fences.
+</task>
+
+<general_repair_rules>
+- Treat the normalized SAP syntax errors as authoritative compiler diagnostics.
+- For each reported syntax error, locate the exact offending ABAP statement and determine the smallest source change required to make that statement valid on classical SAP ECC.
+- Trace an error back to related declarations when necessary. If SAP reports that an operand must have a particular ABAP type category, inspect the declaration of that operand and change it only when required to resolve the reported syntax error.
+- Do not limit repairs to the statement containing the error. A minimal repair may require changing the declaration used by that statement.
+- Prefer classical ECC-compatible types and syntax supported by the compiler diagnostic.
+- Do not repeat a source construct that SAP has explicitly rejected.
+- Apply compiler-diagnostic repairs generically. Do not hard-code variable names, report names, DDIC objects, or individual syntax errors.
+- Preserve all unaffected source exactly as far as practical.
+- After making the repairs, internally verify that every supplied normalized SAP syntax error has been addressed before returning the complete source.
+</general_repair_rules>
+
+<processing_plan_operation_rules>
+Processing-plan operation names such as LOOP, READ, MOVE, CALCULATE, DERIVE, TRANSFORM, AGGREGATE, COUNT, AVERAGE, PERCENTAGE, CLEAR, APPEND, and CONCATENATE are semantic plan operations, not literal ABAP keywords to copy into the repaired source.
+
+Translate every processing-plan operation into valid classical SAP ECC ABAP syntax. For example, a CALCULATE step must become a normal classical ABAP assignment or arithmetic statements; never output CALCULATE as an ABAP statement. Apply this translation rule generically to every processing-plan operation.
+
+All dynamic runtime operations present in the structured processing plan must be implemented. Runtime type discovery, runtime structure discovery, component discovery, dynamic assignment, dynamic component access, and retained per-component state must not be omitted or replaced with an unpopulated placeholder table.
+</processing_plan_operation_rules>
+
+<loop_repair_rules>
+When repairing a LOOP AT statement for an internal table without a header line:
+
+- Do not introduce inline declarations.
+- Do not use ASSIGNING FIELD-SYMBOL(...).
+- Use a separately declared work area.
+- Use classic ECC-compatible syntax:
+
+DATA w_line TYPE &lt;table_line_type&gt;.
+LOOP AT internal_table INTO w_line.
+
+- Update references inside the loop from internal_table-field to w_line-field.
+- Reuse an existing compatible work area when one already exists.
+- Choose a work-area name derived from the internal table name.
+
+Apply this rule generically to any internal table, not only t_edids.
+</loop_repair_rules>
+
+<normalized_sap_syntax_errors>
+Normalized SAP syntax errors:
+
+{{NORMALIZED_SAP_SYNTAX_ERRORS}}
+</normalized_sap_syntax_errors>
